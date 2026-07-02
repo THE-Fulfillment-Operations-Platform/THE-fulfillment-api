@@ -1,0 +1,79 @@
+// Command server is the entrypoint for the THE Fulfillment Operations API.
+package main
+
+import (
+	"context"
+	"errors"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"the-fulfillment/backend/internal/auth"
+	"the-fulfillment/backend/internal/config"
+	"the-fulfillment/backend/internal/database"
+	"the-fulfillment/backend/internal/handlers"
+	"the-fulfillment/backend/internal/repositories"
+	"the-fulfillment/backend/internal/routes"
+	"the-fulfillment/backend/internal/seed"
+	"the-fulfillment/backend/internal/services"
+	"the-fulfillment/backend/internal/shipping"
+)
+
+func main() {
+	cfg := config.Load()
+	log.Printf("%s starting (env=%s)", cfg.AppName, cfg.AppEnv)
+
+	// Database + migrations.
+	db, err := database.Connect(cfg)
+	if err != nil {
+		log.Fatalf("fatal: %v", err)
+	}
+	if err := database.AutoMigrate(db); err != nil {
+		log.Fatalf("fatal: %v", err)
+	}
+	log.Println("database: auto-migration complete")
+
+	// Seed demo data.
+	if cfg.SeedOnStart {
+		if err := seed.Run(db, cfg); err != nil {
+			log.Printf("warning: seed failed: %v", err)
+		}
+	}
+
+	// Wire dependencies: repositories -> services -> handlers -> routes.
+	jwtManager := auth.NewManager(cfg.JWTSecret, cfg.JWTExpiresIn)
+	carrier := shipping.NewNoopCarrier("THE") // MVP: no real carrier API yet
+	repo := repositories.New(db)
+	svc := services.New(repo, jwtManager, carrier)
+	h := handlers.New(svc)
+	router := routes.New(cfg, h, jwtManager)
+
+	srv := &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	// Run server with graceful shutdown.
+	go func() {
+		log.Printf("listening on http://localhost:%s (docs: /docs)", cfg.Port)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("fatal: server error: %v", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("shutting down...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("forced shutdown: %v", err)
+	}
+	log.Println("server stopped")
+}

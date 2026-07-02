@@ -1,0 +1,399 @@
+openapi: 3.0.3
+info:
+  title: THE Fulfillment Operations API
+  version: 0.1.0-mvp
+  description: >
+    Backend MVP cho THE Fulfillment Operations Platform — quản lý đơn hàng và vận
+    hành xưởng fulfillment: import đơn, design queue, batch theo nguyên vật liệu,
+    production status (Pending/Đã in/Đã cắt/Đã QC), QC đối chiếu mockup, packing
+    và handoff THE. Mọi response dùng envelope { success, data, meta?, error? }.
+servers:
+  - url: http://localhost:8080
+    description: Local
+tags:
+  - name: Auth
+  - name: Users
+  - name: Sellers
+  - name: Stores
+  - name: Catalog
+  - name: Import
+  - name: Orders
+  - name: Items
+  - name: Design
+  - name: Batches
+  - name: QC
+  - name: Packing
+  - name: Handoffs
+  - name: Notes
+  - name: Seller View
+  - name: Audit
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Envelope:
+      type: object
+      properties:
+        success: { type: boolean }
+        data: {}
+        meta:
+          type: object
+          properties:
+            page: { type: integer }
+            page_size: { type: integer }
+            total: { type: integer }
+            total_pages: { type: integer }
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: {}
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, example: ops@the.local }
+        password: { type: string, example: "Password123!" }
+    ImportRow:
+      type: object
+      properties:
+        StoreOrderID: { type: string }
+        StoreName: { type: string }
+        ShippingMethod: { type: string }
+        Quantity: { type: integer }
+        ProductName: { type: string }
+        VariantCode: { type: string }
+        SKU: { type: string }
+        Design: { type: string }
+        Mockup: { type: string, description: "Mockup URL seller gửi — chuẩn QC" }
+        EngraveText: { type: string }
+        ShippingName: { type: string }
+        ShippingAddress1: { type: string }
+        ShippingAddress2: { type: string }
+        ShippingCity: { type: string }
+        ShippingZip: { type: string }
+        ShippingProvince: { type: string }
+        ShippingCountry: { type: string }
+        ShippingPhone: { type: string }
+        ShippingEmail: { type: string }
+        IOSS: { type: string }
+        Note: { type: string }
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      tags: [Auth]
+      summary: Health check
+      security: []
+      responses: { '200': { description: OK } }
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Đăng nhập, trả JWT
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200': { description: Token + user }
+        '401': { description: Sai thông tin đăng nhập }
+  /api/me:
+    get:
+      tags: [Auth]
+      summary: Thông tin user hiện tại
+      responses: { '200': { description: User } }
+  /api/users:
+    get: { tags: [Users], summary: Danh sách user, responses: { '200': { description: OK } } }
+    post:
+      tags: [Users]
+      summary: Tạo user (ADMIN/OWNER)
+      responses: { '201': { description: Created } }
+  /api/users/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    get: { tags: [Users], summary: Chi tiết user, responses: { '200': { description: OK } } }
+    put: { tags: [Users], summary: Cập nhật user, responses: { '200': { description: OK } } }
+    delete: { tags: [Users], summary: Xóa user, responses: { '200': { description: OK } } }
+  /api/sellers:
+    get: { tags: [Sellers], summary: Danh sách seller, responses: { '200': { description: OK } } }
+    post: { tags: [Sellers], summary: Tạo seller, responses: { '201': { description: Created } } }
+  /api/sellers/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    get: { tags: [Sellers], summary: Chi tiết seller, responses: { '200': { description: OK } } }
+    put: { tags: [Sellers], summary: Cập nhật seller, responses: { '200': { description: OK } } }
+    delete: { tags: [Sellers], summary: Xóa seller, responses: { '200': { description: OK } } }
+  /api/stores:
+    get: { tags: [Stores], summary: Danh sách store, responses: { '200': { description: OK } } }
+    post: { tags: [Stores], summary: Tạo store, responses: { '201': { description: Created } } }
+  /api/stores/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    get: { tags: [Stores], summary: Chi tiết store, responses: { '200': { description: OK } } }
+    put: { tags: [Stores], summary: Cập nhật store, responses: { '200': { description: OK } } }
+    delete: { tags: [Stores], summary: Xóa store, responses: { '200': { description: OK } } }
+  /api/materials:
+    get: { tags: [Catalog], summary: Danh sách nguyên vật liệu, responses: { '200': { description: OK } } }
+    post: { tags: [Catalog], summary: Tạo material, responses: { '201': { description: Created } } }
+  /api/materials/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    get: { tags: [Catalog], summary: Chi tiết material, responses: { '200': { description: OK } } }
+    put: { tags: [Catalog], summary: Cập nhật material, responses: { '200': { description: OK } } }
+    delete: { tags: [Catalog], summary: Xóa material, responses: { '200': { description: OK } } }
+  /api/skus:
+    get: { tags: [Catalog], summary: Danh sách SKU, responses: { '200': { description: OK } } }
+    post:
+      tags: [Catalog]
+      summary: Tạo SKU (single hoặc combo nhiều material)
+      responses: { '201': { description: Created } }
+  /api/skus/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    get: { tags: [Catalog], summary: Chi tiết SKU, responses: { '200': { description: OK } } }
+    put: { tags: [Catalog], summary: Cập nhật SKU + material set, responses: { '200': { description: OK } } }
+    delete: { tags: [Catalog], summary: Xóa SKU, responses: { '200': { description: OK } } }
+  /api/orders/import:
+    post:
+      tags: [Import]
+      summary: Import đơn (JSON rows hoặc multipart CSV). commit=false để preview.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [seller_id, rows]
+              properties:
+                seller_id: { type: integer }
+                commit: { type: boolean }
+                filename: { type: string }
+                rows: { type: array, items: { $ref: '#/components/schemas/ImportRow' } }
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                seller_id: { type: integer }
+                commit: { type: boolean }
+                file: { type: string, format: binary }
+      responses:
+        '200': { description: Preview hoặc preview+commit result }
+  /api/orders/import/commit:
+    post:
+      tags: [Import]
+      summary: Commit một import job đã preview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [import_job_id]
+              properties: { import_job_id: { type: integer } }
+      responses: { '200': { description: Committed import job } }
+  /api/import-jobs:
+    get: { tags: [Import], summary: Danh sách import job, responses: { '200': { description: OK } } }
+  /api/import-jobs/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    get: { tags: [Import], summary: Chi tiết import job + lỗi theo dòng, responses: { '200': { description: OK } } }
+  /api/orders:
+    get:
+      tags: [Orders]
+      summary: Danh sách đơn (filter store, sku, status, date)
+      parameters:
+        - { name: seller_id, in: query, schema: { type: integer } }
+        - { name: store_id, in: query, schema: { type: integer } }
+        - { name: sku, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [PRODUCTION, PACKED, HANDED_OFF, SHIPPED] } }
+        - { name: store_order_id, in: query, schema: { type: string } }
+        - { name: date_from, in: query, schema: { type: string } }
+        - { name: date_to, in: query, schema: { type: string } }
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: page_size, in: query, schema: { type: integer } }
+      responses: { '200': { description: OK } }
+    post:
+      tags: [Orders]
+      summary: Tạo đơn trực tiếp (convenience/TODO — luồng chuẩn là import)
+      responses: { '201': { description: Created } }
+  /api/orders/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    get: { tags: [Orders], summary: Chi tiết đơn (items, batch, timeline), responses: { '200': { description: OK } } }
+  /api/items:
+    get:
+      tags: [Items]
+      summary: Item view (filter store, sku, status, batch, date)
+      parameters:
+        - { name: sku, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [PENDING, PRINTED, CUT, QC_PASSED] } }
+        - { name: design_status, in: query, schema: { type: string } }
+        - { name: batch_id, in: query, schema: { type: integer } }
+      responses: { '200': { description: OK } }
+  /api/items/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    get: { tags: [Items], summary: Chi tiết item, responses: { '200': { description: OK } } }
+  /api/items/{id}/design:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    patch:
+      tags: [Design]
+      summary: Cập nhật print/cut/mockup file; set_ready=true để set design ready
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                print_file_url: { type: string }
+                cut_file_url: { type: string }
+                mockup_url: { type: string }
+                design_url: { type: string }
+                set_ready: { type: boolean }
+      responses: { '200': { description: OK } }
+  /api/design-queue:
+    get: { tags: [Design], summary: Danh sách item cần design, responses: { '200': { description: OK } } }
+  /api/design-queue/material-buckets:
+    get: { tags: [Design], summary: Đếm item design-ready chưa batch theo material, responses: { '200': { description: OK } } }
+  /api/design-queue/material/{materialId}/items:
+    parameters: [{ name: materialId, in: path, required: true, schema: { type: integer } }]
+    get: { tags: [Design], summary: Item design-ready chưa batch của 1 material, responses: { '200': { description: OK } } }
+  /api/batches:
+    get:
+      tags: [Batches]
+      summary: Danh sách batch (filter material, status, priority, date)
+      responses: { '200': { description: OK } }
+    post:
+      tags: [Batches]
+      summary: Tạo batch cho 1 material từ các item (Designer)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [material_id, order_item_ids]
+              properties:
+                material_id: { type: integer }
+                order_item_ids: { type: array, items: { type: integer } }
+                priority: { type: string, enum: [NORMAL, HIGH, URGENT] }
+                due_date: { type: string }
+                note: { type: string }
+      responses: { '201': { description: Created } }
+  /api/batches/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    get: { tags: [Batches], summary: Batch detail (item, SKU, mockup, file, status), responses: { '200': { description: OK } } }
+  /api/batches/{id}/status:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    patch:
+      tags: [Batches]
+      summary: Cập nhật status batch (Pending/Đã in/Đã cắt/Đã QC)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [PENDING, PRINTED, CUT, QC_PASSED] }
+                note: { type: string }
+      responses: { '200': { description: OK } }
+  /api/qc/scan:
+    post:
+      tags: [QC]
+      summary: Scan tem item → trả info + mockup để đối chiếu
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { code: { type: string }, item_id: { type: integer } }
+      responses: { '200': { description: OK } }
+  /api/qc/pass:
+    post:
+      tags: [QC]
+      summary: Xác nhận QC pass (sản phẩm khớp mockup) → Đã QC
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code: { type: string }
+                item_id: { type: integer }
+                batch_item_id: { type: integer }
+                note: { type: string }
+      responses: { '200': { description: OK } }
+  /api/qc/fail:
+    post:
+      tags: [QC]
+      summary: QC fail → tạo Required Attention / rework note
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code: { type: string }
+                item_id: { type: integer }
+                defect_code: { type: string }
+                note: { type: string }
+      responses: { '201': { description: Created note } }
+  /api/packing/scan:
+    post:
+      tags: [Packing]
+      summary: Scan item đã QC vào package (block nếu chưa QC / over-scan)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                order_id: { type: integer }
+                code: { type: string }
+                item_id: { type: integer }
+      responses: { '200': { description: Expected vs scanned } }
+  /api/packing/order/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    get: { tags: [Packing], summary: Trạng thái package của đơn, responses: { '200': { description: OK } } }
+  /api/handoffs:
+    get: { tags: [Handoffs], summary: Danh sách handoff THE, responses: { '200': { description: OK } } }
+    post:
+      tags: [Handoffs]
+      summary: Tạo handoff THE (yêu cầu package đủ item)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                order_id: { type: integer }
+                package_id: { type: integer }
+                box_type: { type: string }
+                weight_grams: { type: integer }
+                note: { type: string }
+      responses: { '201': { description: Created } }
+  /api/notes:
+    get:
+      tags: [Notes]
+      summary: Danh sách note / required attention
+      parameters:
+        - { name: status, in: query, schema: { type: string } }
+        - { name: severity, in: query, schema: { type: string } }
+        - { name: required_attention, in: query, schema: { type: boolean } }
+      responses: { '200': { description: OK } }
+    post: { tags: [Notes], summary: Tạo note, responses: { '201': { description: Created } } }
+  /api/notes/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    get: { tags: [Notes], summary: Chi tiết note, responses: { '200': { description: OK } } }
+    put: { tags: [Notes], summary: Cập nhật note, responses: { '200': { description: OK } } }
+    delete: { tags: [Notes], summary: Xóa note, responses: { '200': { description: OK } } }
+  /api/seller/orders:
+    get:
+      tags: [Seller View]
+      summary: Seller xem đơn của mình (chỉ trạng thái tổng)
+      responses: { '200': { description: OK } }
+  /api/seller/orders/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    get: { tags: [Seller View], summary: Seller xem chi tiết đơn (sanitized), responses: { '200': { description: OK } } }
+  /api/audit-logs:
+    get: { tags: [Audit], summary: Audit log (ADMIN/OWNER), responses: { '200': { description: OK } } }

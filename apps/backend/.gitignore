@@ -1,0 +1,17 @@
+# Env
+.env
+
+# Binaries
+/bin/
+/server
+server.exe
+*.exe
+
+# Go build/test artifacts
+*.out
+coverage.txt
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
