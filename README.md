@@ -19,7 +19,7 @@ Tách lớp rõ ràng: **handler → service → repository**. Handler chỉ bin
 + build response; service chứa business logic; repository chứa truy vấn DB.
 
 ```
-apps/backend/
+THE-fulfillment-api/           # repo root (backend nằm thẳng ở root, không lồng apps/)
 ├── cmd/server/main.go          # entrypoint: connect DB, migrate, seed, serve
 ├── internal/
 │   ├── config/                 # đọc .env / env vars (không hardcode DB)
@@ -74,7 +74,7 @@ JWT_SECRET=một-chuỗi-bí-mật-dài
 ## Chạy backend local
 
 ```bash
-cd apps/backend
+# chạy ngay tại root repo THE-fulfillment-api
 go mod download
 go run ./cmd/server
 ```
@@ -91,11 +91,11 @@ Khi khởi động, app sẽ:
 1. Kết nối PostgreSQL theo `.env`.
 2. **AutoMigrate** toàn bộ bảng.
 3. **Seed** demo data (nếu `SEED_ON_START=true`).
-4. Lắng nghe tại `http://localhost:8080`.
+4. Lắng nghe tại `http://localhost:8090`.
 
-- Health check: `GET http://localhost:8080/health`
-- API docs (Swagger UI): `http://localhost:8080/docs`
-- OpenAPI spec: `http://localhost:8080/openapi.yaml`
+- Health check: `GET http://localhost:8090/health`
+- API docs (Swagger UI): `http://localhost:8090/docs`
+- OpenAPI spec: `http://localhost:8090/openapi.yaml`
 
 ## Migration & Seed
 
@@ -129,14 +129,14 @@ Mật khẩu mặc định: `Password123!` (đổi qua `SEED_DEMO_PASSWORD`).
 
 ```bash
 # 1. Login
-curl -s -X POST localhost:8080/api/auth/login \
+curl -s -X POST localhost:8090/api/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"email":"ops@the.local","password":"Password123!"}'
 
 # 2. Lấy token rồi gọi API (thay $TOKEN)
-curl -s localhost:8080/api/orders -H "Authorization: Bearer $TOKEN"
-curl -s localhost:8080/api/design-queue -H "Authorization: Bearer $TOKEN"
-curl -s localhost:8080/api/batches -H "Authorization: Bearer $TOKEN"
+curl -s localhost:8090/api/orders -H "Authorization: Bearer $TOKEN"
+curl -s localhost:8090/api/design-queue -H "Authorization: Bearer $TOKEN"
+curl -s localhost:8090/api/batches -H "Authorization: Bearer $TOKEN"
 ```
 
 ## Response format
@@ -160,7 +160,7 @@ bộ (Đã in/Đã cắt/Đã QC).
 ## Master Data / SKU–NVL Setup
 
 Nhóm route giúp setup **Materials, SKUs và mapping SKU → nguyên vật liệu** — điều
-kiện để gom batch và import đơn. Xem chi tiết ở `../../THE-fulfillment-web/MASTER_DATA.md`.
+kiện để gom batch và import đơn. Xem chi tiết ở `../THE-fulfillment-web/MASTER_DATA.md`.
 
 - CRUD: `/api/materials`, `/api/skus` (materials của SKU là **tuỳ chọn** — có thể
   tạo SKU chưa map rồi gán NVL sau).

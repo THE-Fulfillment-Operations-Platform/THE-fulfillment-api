@@ -8,23 +8,23 @@
 ## 1. Tổng quan backend
 
 - **Stack đã dùng:** Go 1.26 + Gin + GORM + PostgreSQL. Auth JWT (`golang-jwt/v5`) + bcrypt. Config qua `.env`. OpenAPI/Swagger embed sẵn.
-- **Thư mục backend:** `apps/backend` (trong repo `THE-fulfillment-api`). Layering: `handler → service → repository`.
+- **Thư mục backend:** repo `THE-fulfillment-api` (backend nằm thẳng ở **root**, không lồng `apps/`). Layering: `handler → service → repository`.
 - **Cách chạy backend local:**
   ```bash
-  cd apps/backend
+  # chạy ngay tại root repo THE-fulfillment-api
   cp .env.example .env      # điền DB creds + JWT_SECRET
   go run ./cmd/server
   ```
-- **Base API URL:** `http://localhost:8080` (đổi qua `PORT` trong `.env`). Mọi route nghiệp vụ có prefix `/api`.
-- **File env cần có:** `apps/backend/.env` (xem `.env.example`). Tối thiểu: `DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME, JWT_SECRET, PORT, CORS_ALLOWED_ORIGINS, SEED_ON_START`.
+- **Base API URL:** `http://localhost:8090` (đổi qua `PORT` trong `.env`). Mọi route nghiệp vụ có prefix `/api`.
+- **File env cần có:** `.env` ở root repo (xem `.env.example`). Tối thiểu: `DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME, JWT_SECRET, PORT, CORS_ALLOWED_ORIGINS, SEED_ON_START`.
 - **Database dùng:** PostgreSQL (>= 13). Tạo trước: `CREATE DATABASE the_fulfillment;`
 - **Migration:** GORM **AutoMigrate** tự chạy mỗi lần khởi động — FE không cần làm gì.
 - **Seed data:** tự chạy khi `SEED_ON_START=true` (mặc định). Idempotent. Tạo sẵn user mọi role, materials, SKU (gồm 1 combo), 1 seller + store, 4 đơn demo, 1 batch demo.
 
 ### Swagger / OpenAPI
-- Swagger UI: `GET http://localhost:8080/docs`
-- OpenAPI spec: `GET http://localhost:8080/openapi.yaml`
-- Health check (public, không cần token): `GET http://localhost:8080/health`
+- Swagger UI: `GET http://localhost:8090/docs`
+- OpenAPI spec: `GET http://localhost:8090/openapi.yaml`
+- Health check (public, không cần token): `GET http://localhost:8090/health`
 
 ---
 
@@ -505,7 +505,7 @@ Như trên + `items[]` chỉ gồm `{ sku_code, product_name, variant_code, quan
 
 ## 8. Ghi chú tích hợp Nuxt 3
 
-- **Base URL:** đặt `runtimeConfig.public.apiBase = "http://localhost:8080"`. Mọi call thêm `/api/...`.
+- **Base URL:** đặt `runtimeConfig.public.apiBase = "http://localhost:8090"`. Mọi call thêm `/api/...`.
 - **CORS:** backend mặc định `CORS_ALLOWED_ORIGINS=*`, đã bật `Access-Control-Allow-Credentials`. Nuxt dev (`http://localhost:3000`) gọi trực tiếp được.
 - **Gửi token:** lưu `token` sau login (cookie/`useState`/pinia), set header `Authorization: Bearer <token>` qua `$fetch`/`useFetch` (dùng `onRequest` interceptor).
 - **Unwrap envelope:** viết composable đọc `res.data` (và `res.meta` cho list); nếu `res.success === false` thì throw theo `res.error`.
