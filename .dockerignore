@@ -1,0 +1,14 @@
+# Keep the build context small and never ship local secrets/artifacts.
+.git
+.env
+*.env
+/bin/
+/server
+server.exe
+*.exe
+*.out
+coverage.txt
+.DS_Store
+.idea/
+.vscode/
+tmp.exe
