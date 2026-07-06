@@ -61,8 +61,15 @@ type QCScanResult struct {
 	StoreOrderID   string                `json:"store_order_id"`
 	SKUCode        string                `json:"sku_code"`
 	ProductName    string                `json:"product_name"`
+	Quantity       int                   `json:"quantity"`
+	MaterialName   string                `json:"material_name"`  // Loại VL
+	QCDescription  string                `json:"qc_description"` // Mô tả SP để QC
+	ImageCode      string                `json:"image_code"`     // Mã ảnh
 	EngraveText    string                `json:"engrave_text"`
+	DesignURL      string                `json:"design_url"` // Link ảnh / design
 	MockupURL      string                `json:"mockup_url"`
+	PrintFileURL   string                `json:"print_file_url"`
+	CutFileURL     string                `json:"cut_file_url"`
 	InternalStatus models.InternalStatus `json:"internal_status"`
 	Batches        []QCScanBatch         `json:"batches"`
 }
@@ -83,13 +90,19 @@ func (s *QCService) Scan(actor Actor, ref ScanRef) (*QCScanResult, error) {
 	}
 	res := &QCScanResult{
 		ItemID: item.ID, ItemCode: item.InternalCode, SKUCode: item.SKUCode,
-		ProductName: item.ProductName, EngraveText: item.EngraveText, MockupURL: item.MockupURL,
+		ProductName: item.ProductName, Quantity: item.Quantity,
+		QCDescription: item.QCDescription, ImageCode: item.ImageCode,
+		EngraveText: item.EngraveText, DesignURL: item.DesignURL, MockupURL: item.MockupURL,
+		PrintFileURL: item.PrintFileURL, CutFileURL: item.CutFileURL,
 		InternalStatus: item.InternalStatus,
 	}
 	if item.Order != nil {
 		res.OrderCode = item.Order.InternalCode
 		res.StoreOrderID = item.Order.StoreOrderID
 	}
+	// Loại VL: the material(s) this item is produced in. Prefer the batch parts
+	// (the concrete production material); fall back to the SKU's mapped materials.
+	res.MaterialName = itemMaterialNames(item)
 	for _, bi := range item.BatchItems {
 		b := QCScanBatch{BatchItemID: bi.ID, Status: bi.Status}
 		if bi.Batch != nil {
@@ -102,6 +115,34 @@ func (s *QCService) Scan(actor Actor, ref ScanRef) (*QCScanResult, error) {
 	}
 	s.audit.Log(actor, "QC_SCAN", "order_item", &item.ID, "Scanned item "+item.InternalCode+" for QC", nil)
 	return res, nil
+}
+
+// itemMaterialNames returns a comma-separated list of the distinct material
+// names an item is produced in — the batch parts' materials if it is batched,
+// otherwise the SKU's mapped materials. Requires BatchItems.Material and/or
+// SKU.Materials.Material to be preloaded.
+func itemMaterialNames(item *models.OrderItem) string {
+	seen := map[string]bool{}
+	var names []string
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	for _, bi := range item.BatchItems {
+		if bi.Material != nil {
+			add(bi.Material.Name)
+		}
+	}
+	if len(names) == 0 && item.SKU != nil {
+		for _, sm := range item.SKU.Materials {
+			add(sm.Material.Name)
+		}
+	}
+	return strings.Join(names, ", ")
 }
 
 // QCDecisionInput confirms a QC outcome for an item.
@@ -134,6 +175,9 @@ func (s *QCService) Pass(actor Actor, in QCDecisionInput) (*models.OrderItem, er
 	item, err := s.resolveItem(in.ScanRef)
 	if err != nil {
 		return nil, err
+	}
+	if item.Order != nil && item.Order.ReviewStatus != models.ReviewApproved {
+		return nil, apperr.Unprocessable("Order is not approved for production; cannot QC")
 	}
 	if item.MockupURL == "" {
 		return nil, apperr.Unprocessable("No mockup URL on file; QC requires a seller mockup to compare against")

@@ -1,8 +1,11 @@
 package services
 
 import (
+	"bytes"
+	"encoding/csv"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -73,6 +76,11 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 		for _, itemID := range in.OrderItemIDs {
 			item, err := txRepo.OrderItem.FindByID(itemID)
 			if err != nil {
+				skipped = append(skipped, itemID)
+				continue
+			}
+			// Only approved orders may enter production.
+			if item.Order == nil || item.Order.ReviewStatus != models.ReviewApproved {
 				skipped = append(skipped, itemID)
 				continue
 			}
@@ -206,4 +214,113 @@ func skuHasMaterial(sku *models.SKU, materialID uint) bool {
 		}
 	}
 	return false
+}
+
+// ---------- Legacy production-template export ----------
+
+// productionTemplateHeaders is the exact, ordered legacy production-template
+// header row. The workshop's existing spreadsheet relies on this precise column
+// order and spelling — note "Mã nội bộ" intentionally appears twice (positions 1
+// and 13) for legacy compatibility. Do not reorder or rename.
+var productionTemplateHeaders = []string{
+	"Mã nội bộ",
+	"SỐ Batch",
+	"Ngày",
+	"Order ID",
+	"SKU",
+	"Loại VL",
+	"Mô tả Sp để QC (Hiện lên phần QC)",
+	"Mã ảnh (copy bên TĐN Ctr + Ship + V...)",
+	"Số thứ tự",
+	"Số lượng",
+	"Link ảnh",
+	"Mock up",
+	"Mã nội bộ",
+	"Tên khách",
+	"Tên File",
+	"Link in",
+	"Link cắt",
+}
+
+// seqStr renders a production sequence, leaving an unassigned (0) sequence blank
+// so the legacy sheet does not show a spurious ordering position.
+func seqStr(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return itoa(n)
+}
+
+// ProductionTemplateGrid builds the legacy production-template grid — the header
+// row followed by one row per batch item — for a fully-loaded batch (with
+// Items.OrderItem.Order and Items.Material preloaded). It is a pure function so
+// the column order and per-field mapping can be unit-tested without a database.
+func ProductionTemplateGrid(batch *models.Batch) [][]string {
+	date := batch.CreatedAt.Format("2006-01-02")
+	grid := make([][]string, 0, len(batch.Items)+1)
+	grid = append(grid, productionTemplateHeaders)
+
+	for _, bi := range batch.Items {
+		it := bi.OrderItem
+		if it == nil {
+			continue
+		}
+		// Loại VL comes from the batch's material (batches are material-scoped).
+		materialName := batch.Material.Name
+		if bi.Material != nil {
+			if bi.Material.Name != "" {
+				materialName = bi.Material.Name
+			} else {
+				materialName = bi.Material.Code
+			}
+		}
+		var orderID, customer string
+		if it.Order != nil {
+			orderID = it.Order.StoreOrderID
+			customer = it.Order.ShippingName
+		}
+		grid = append(grid, []string{
+			it.InternalCode,               // Mã nội bộ
+			batch.Code,                    // SỐ Batch
+			date,                          // Ngày
+			orderID,                       // Order ID
+			it.SKUCode,                    // SKU
+			materialName,                  // Loại VL
+			it.QCDescription,              // Mô tả Sp để QC
+			it.ImageCode,                  // Mã ảnh
+			seqStr(it.ProductionSequence), // Số thứ tự (blank when unassigned)
+			itoa(it.Quantity),             // Số lượng
+			it.DesignURL,                  // Link ảnh
+			it.MockupURL,                  // Mock up
+			it.InternalCode,               // Mã nội bộ (legacy 2nd copy)
+			customer,                      // Tên khách
+			it.ProductionFileName,         // Tên File
+			it.PrintFileURL,               // Link in
+			it.CutFileURL,                 // Link cắt
+		})
+	}
+	return grid
+}
+
+// ProductionTemplateCSV loads a batch and renders the legacy production template
+// as CSV bytes (UTF-8 with a BOM so Excel opens the Vietnamese headers correctly)
+// together with a suggested download filename.
+func (s *BatchService) ProductionTemplateCSV(batchID uint) ([]byte, string, error) {
+	batch, err := s.Get(batchID)
+	if err != nil {
+		return nil, "", err
+	}
+	grid := ProductionTemplateGrid(batch)
+
+	var buf bytes.Buffer
+	buf.Write([]byte{0xEF, 0xBB, 0xBF}) // UTF-8 BOM so Excel reads Vietnamese correctly
+	w := csv.NewWriter(&buf)
+	if err := w.WriteAll(grid); err != nil {
+		return nil, "", apperr.Internal("could not render production CSV").Wrap(err)
+	}
+	if err := w.Error(); err != nil {
+		return nil, "", apperr.Internal("could not render production CSV").Wrap(err)
+	}
+	filename := "production-" + strings.ReplaceAll(batch.Code, "#", "") + ".csv"
+	return buf.Bytes(), filename, nil
 }

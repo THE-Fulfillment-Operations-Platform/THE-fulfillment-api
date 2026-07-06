@@ -60,16 +60,25 @@ func (s *OrderService) GetItem(id uint) (*models.OrderItem, error) {
 func (s *OrderService) DesignQueue(f repositories.ItemFilter) ([]models.OrderItem, int64, error) {
 	f.Page = f.Page.Normalize()
 	f.NeedsDesign = true
+	f.ReviewApproved = true // only approved orders enter the design flow
 	return s.repo.OrderItem.List(f)
 }
 
-// UpdateDesignInput updates an item's design assets. Any field left nil is unchanged.
+// UpdateDesignInput updates an item's design assets and production-ready fields.
+// Any field left nil is unchanged. Ops/Design use this from the Pending Review
+// detail to normalize a seller item into production-ready data before approval.
 type UpdateDesignInput struct {
 	PrintFileURL *string `json:"print_file_url"`
 	CutFileURL   *string `json:"cut_file_url"`
 	MockupURL    *string `json:"mockup_url"`
 	DesignURL    *string `json:"design_url"`
 	SetReady     *bool   `json:"set_ready"`
+
+	// Production-ready fields (legacy production-template columns).
+	ImageCode          *string `json:"image_code"`           // Mã ảnh
+	QCDescription      *string `json:"qc_description"`       // Mô tả SP để QC
+	ProductionSequence *int    `json:"production_sequence"`  // Số thứ tự
+	ProductionFileName *string `json:"production_file_name"` // Tên File
 }
 
 // UpdateItemDesign saves print/cut/mockup/design URLs, records versioned assets
@@ -88,33 +97,64 @@ func (s *OrderService) UpdateItemDesign(actor Actor, itemID uint, in UpdateDesig
 		}).Error
 	}
 
+	// A design asset only counts as "touched" when its URL actually changes, so
+	// editing production-only fields (image code / QC description / sequence /
+	// file name) from the review screen never re-versions assets or disturbs the
+	// item's design_status.
+	designTouched := false
 	if in.PrintFileURL != nil {
-		item.PrintFileURL = strings.TrimSpace(*in.PrintFileURL)
-		if item.PrintFileURL != "" {
-			addAsset("PRINT_FILE", item.PrintFileURL)
+		if v := strings.TrimSpace(*in.PrintFileURL); v != item.PrintFileURL {
+			item.PrintFileURL = v
+			if v != "" {
+				addAsset("PRINT_FILE", v)
+			}
+			designTouched = true
 		}
 	}
 	if in.CutFileURL != nil {
-		item.CutFileURL = strings.TrimSpace(*in.CutFileURL)
-		if item.CutFileURL != "" {
-			addAsset("CUT_FILE", item.CutFileURL)
+		if v := strings.TrimSpace(*in.CutFileURL); v != item.CutFileURL {
+			item.CutFileURL = v
+			if v != "" {
+				addAsset("CUT_FILE", v)
+			}
+			designTouched = true
 		}
 	}
 	if in.DesignURL != nil {
-		item.DesignURL = strings.TrimSpace(*in.DesignURL)
-		if item.DesignURL != "" {
-			addAsset("DESIGN", item.DesignURL)
+		if v := strings.TrimSpace(*in.DesignURL); v != item.DesignURL {
+			item.DesignURL = v
+			if v != "" {
+				addAsset("DESIGN", v)
+			}
+			designTouched = true
 		}
 	}
 	if in.MockupURL != nil {
-		item.MockupURL = strings.TrimSpace(*in.MockupURL)
-		if item.MockupURL != "" {
-			addAsset("MOCKUP", item.MockupURL)
+		if v := strings.TrimSpace(*in.MockupURL); v != item.MockupURL {
+			item.MockupURL = v
+			if v != "" {
+				addAsset("MOCKUP", v)
+			}
+			designTouched = true
 		}
 	}
 
-	// Re-evaluate design status.
-	if item.DesignStatus != models.DesignReady {
+	// Production-ready fields (no asset history — plain scalar values).
+	if in.ImageCode != nil {
+		item.ImageCode = strings.TrimSpace(*in.ImageCode)
+	}
+	if in.QCDescription != nil {
+		item.QCDescription = strings.TrimSpace(*in.QCDescription)
+	}
+	if in.ProductionSequence != nil {
+		item.ProductionSequence = *in.ProductionSequence
+	}
+	if in.ProductionFileName != nil {
+		item.ProductionFileName = strings.TrimSpace(*in.ProductionFileName)
+	}
+
+	// Re-evaluate design status only when a design asset actually changed.
+	if designTouched && item.DesignStatus != models.DesignReady {
 		item.DesignStatus = models.DesignInProgress
 		if item.MockupURL == "" {
 			item.DesignStatus = models.DesignMissing
@@ -159,6 +199,7 @@ type DirectItemInput struct {
 	ProductName string `json:"product_name"`
 	VariantCode string `json:"variant_code"`
 	Quantity    int    `json:"quantity"`
+	ImageCode   string `json:"image_code"`
 	MockupURL   string `json:"mockup_url"`
 	EngraveText string `json:"engrave_text"`
 }
@@ -167,6 +208,7 @@ type DirectOrderInput struct {
 	SellerID         uint              `json:"seller_id" binding:"required"`
 	StoreOrderID     string            `json:"store_order_id" binding:"required"`
 	StoreName        string            `json:"store_name"`
+	Account          string            `json:"account"`
 	ShippingMethod   string            `json:"shipping_method"`
 	ShippingName     string            `json:"shipping_name" binding:"required"`
 	ShippingAddress1 string            `json:"shipping_address1" binding:"required"`
@@ -195,11 +237,14 @@ func (s *OrderService) CreateOrderDirect(actor Actor, in DirectOrderInput) (*mod
 		txRepo := repositories.New(tx)
 		order = &models.Order{
 			StoreOrderID: in.StoreOrderID, StoreOrderRef: in.StoreOrderID, SellerID: in.SellerID,
-			StoreName: in.StoreName, ShippingMethod: in.ShippingMethod, ShippingName: in.ShippingName,
+			StoreName: in.StoreName, Account: in.Account, ShippingMethod: in.ShippingMethod, ShippingName: in.ShippingName,
 			ShippingAddress1: in.ShippingAddress1, ShippingAddress2: in.ShippingAddress2,
 			ShippingCity: in.ShippingCity, ShippingZip: in.ShippingZip, ShippingProvince: in.ShippingProvince,
 			ShippingCountry: in.ShippingCountry, ShippingPhone: in.ShippingPhone, ShippingEmail: in.ShippingEmail,
-			IOSS: in.IOSS, Note: in.Note, SellerStatus: models.SellerStatusProduction, CreatedByID: actor.IDPtr(),
+			IOSS: in.IOSS, Note: in.Note, SellerStatus: models.SellerStatusProduction,
+			// New orders enter operational review before production.
+			ReviewStatus: models.ReviewPending, CancellationStatus: models.CancellationNone,
+			CreatedByID: actor.IDPtr(),
 		}
 		if err := txRepo.Order.Create(order); err != nil {
 			return err
@@ -222,7 +267,7 @@ func (s *OrderService) CreateOrderDirect(actor Actor, in DirectOrderInput) (*mod
 			item := &models.OrderItem{
 				OrderID: order.ID, LineNo: i + 1, InternalCode: "ORD-" + pad6(order.ID) + "_" + itoa(i+1),
 				SKUID: skuID, SKUCode: skuCode, ProductName: it.ProductName, VariantCode: it.VariantCode,
-				Quantity: maxInt(it.Quantity, 1), MockupURL: it.MockupURL, EngraveText: it.EngraveText,
+				Quantity: maxInt(it.Quantity, 1), ImageCode: it.ImageCode, MockupURL: it.MockupURL, EngraveText: it.EngraveText,
 				InternalStatus: models.StatusPending, DesignStatus: ds,
 			}
 			if err := tx.Create(item).Error; err != nil {
@@ -247,10 +292,19 @@ type SellerOrderView struct {
 	InternalCode string              `json:"internal_code"`
 	StoreOrderID string              `json:"store_order_id"`
 	StoreName    string              `json:"store_name"`
-	Status       models.SellerStatus `json:"status"`
-	ItemCount    int                 `json:"item_count"`
-	CreatedAt    time.Time           `json:"created_at"`
-	Items        []SellerItemView    `json:"items,omitempty"`
+	Status       models.SellerStatus `json:"status"` // production phase (only meaningful once approved)
+	// Review / cancellation state. The seller UI shows the review status until an
+	// order is APPROVED, then falls through to the production Status above.
+	ReviewStatus       models.ReviewStatus       `json:"review_status"`
+	CancellationStatus models.CancellationStatus `json:"cancellation_status"`
+	ReviewNote         string                    `json:"review_note,omitempty"`
+	// Allowed cancellation action for this order, so the UI can show exactly one
+	// of: cancel directly / request cancellation / (nothing).
+	CanCancel              bool             `json:"can_cancel"`
+	CanRequestCancellation bool             `json:"can_request_cancellation"`
+	ItemCount              int              `json:"item_count"`
+	CreatedAt              time.Time        `json:"created_at"`
+	Items                  []SellerItemView `json:"items,omitempty"`
 }
 
 // SellerItemView only exposes product-level facts, not the factory pipeline.
@@ -263,9 +317,14 @@ type SellerItemView struct {
 }
 
 func toSellerView(o models.Order, withItems bool) SellerOrderView {
+	action := sellerCancelActionForOrder(&o)
 	v := SellerOrderView{
 		ID: o.ID, InternalCode: o.InternalCode, StoreOrderID: o.StoreOrderID,
-		StoreName: o.StoreName, Status: o.SellerStatus, ItemCount: len(o.Items), CreatedAt: o.CreatedAt,
+		StoreName: o.StoreName, Status: o.SellerStatus,
+		ReviewStatus: o.ReviewStatus, CancellationStatus: o.CancellationStatus, ReviewNote: o.ReviewNote,
+		CanCancel:              action == SellerActionCancel,
+		CanRequestCancellation: action == SellerActionRequest,
+		ItemCount:              len(o.Items), CreatedAt: o.CreatedAt,
 	}
 	if withItems {
 		for _, it := range o.Items {

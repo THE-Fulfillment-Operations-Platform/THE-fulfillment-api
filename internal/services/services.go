@@ -37,6 +37,7 @@ type Services struct {
 	Import       *ImportService
 	MasterImport *MasterImportService
 	Order        *OrderService
+	Review       *ReviewService
 	Batch        *BatchService
 	QC           *QCService
 	Packing      *PackingService
@@ -55,6 +56,7 @@ func New(repo *repositories.Repositories, jwt *auth.Manager, carrier shipping.Ca
 		Import:       &ImportService{repo: repo, audit: audit},
 		MasterImport: &MasterImportService{repo: repo, audit: audit},
 		Order:        &OrderService{repo: repo, audit: audit},
+		Review:       &ReviewService{repo: repo, audit: audit},
 		Batch:        &BatchService{repo: repo, audit: audit},
 		QC:           &QCService{repo: repo, audit: audit},
 		Packing:      &PackingService{repo: repo, audit: audit, carrier: carrier},

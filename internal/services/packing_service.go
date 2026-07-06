@@ -116,6 +116,9 @@ func (s *PackingService) Scan(actor Actor, in PackingScanInput) (*PackingResult,
 	if err != nil {
 		return nil, apperr.Internal("could not load order").Wrap(err)
 	}
+	if order.ReviewStatus != models.ReviewApproved {
+		return nil, apperr.Unprocessable("Order is not approved for production; cannot pack")
+	}
 
 	var result *PackingResult
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
@@ -256,6 +259,9 @@ func (s *PackingService) CreateHandoff(actor Actor, in HandoffInput) (*models.Ha
 	order, err := s.repo.Order.FindByID(pkg.OrderID)
 	if err != nil {
 		return nil, apperr.Internal("could not load order").Wrap(err)
+	}
+	if order.ReviewStatus != models.ReviewApproved {
+		return nil, apperr.Unprocessable("Order is not approved for production; cannot hand off")
 	}
 
 	// Consult the carrier adapter (no-op in the MVP).

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/xuri/excelize/v2"
+	"golang.org/x/text/unicode/norm"
 	"gorm.io/gorm"
 
 	"the-fulfillment/backend/internal/apperr"
@@ -45,12 +46,14 @@ func (f *FlexInt) UnmarshalJSON(b []byte) error {
 // ImportRow mirrors the seller's file columns (one row = one order item).
 type ImportRow struct {
 	StoreOrderID     string  `json:"StoreOrderID"`
+	Account          string  `json:"Account"`
 	StoreName        string  `json:"StoreName"`
 	ShippingMethod   string  `json:"ShippingMethod"`
 	Quantity         FlexInt `json:"Quantity"`
 	ProductName      string  `json:"ProductName"`
 	VariantCode      string  `json:"VariantCode"`
 	SKU              string  `json:"SKU"`
+	ImageCode        string  `json:"ImageCode"` // "Mã ảnh"
 	Design           string  `json:"Design"`
 	Mockup           string  `json:"Mockup"`
 	EngraveText      string  `json:"EngraveText"`
@@ -67,6 +70,35 @@ type ImportRow struct {
 	Note             string  `json:"Note"`
 }
 
+// UnmarshalJSON maps a JSON object onto an ImportRow through the same flexible
+// header mapping as the file-upload path, so the paste-CSV/JSON path accepts the
+// seller template's own column labels ("Mã ảnh", "Account", …) — not just the
+// struct's canonical keys. Values may be JSON strings or numbers. This also keeps
+// the internal RawRows round-trip lossless (every struct-tag key normalizes back
+// to a headerToField entry).
+func (r *ImportRow) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	for k, v := range raw {
+		fn, ok := headerToField[normalizeHeader(k)]
+		if !ok {
+			continue
+		}
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			var num json.Number
+			if err2 := json.Unmarshal(v, &num); err2 != nil {
+				continue // skip bools/objects/null we can't stringify
+			}
+			s = num.String()
+		}
+		fn(r, strings.TrimSpace(s))
+	}
+	return nil
+}
+
 // PreviewResult is returned to the client after validation.
 type PreviewResult struct {
 	ImportJobID uint                   `json:"import_job_id"`
@@ -78,22 +110,30 @@ type PreviewResult struct {
 	Errors      []models.ImportError   `json:"errors"`
 }
 
-// csvHeaderMap normalizes a header cell into a canonical key.
+// csvHeaderMap normalizes a header cell into a canonical key. It NFC-normalizes
+// first so a Vietnamese header ("Mã ảnh") matches whether the file stored it
+// pre-composed (NFC) or decomposed (NFD, as some macOS/exporter tooling emits).
 func normalizeHeader(h string) string {
 	h = strings.TrimPrefix(h, string(rune(0xFEFF))) // strip UTF-8 BOM from Excel "CSV UTF-8" exports
+	h = norm.NFC.String(h)
 	h = strings.ToLower(strings.TrimSpace(h))
 	h = strings.NewReplacer(" ", "", "_", "", "-", "").Replace(h)
 	return h
 }
 
 var headerToField = map[string]func(*ImportRow, string){
-	"storeorderid":     func(r *ImportRow, v string) { r.StoreOrderID = v },
-	"storename":        func(r *ImportRow, v string) { r.StoreName = v },
-	"shippingmethod":   func(r *ImportRow, v string) { r.ShippingMethod = v },
-	"quantity":         func(r *ImportRow, v string) { n, _ := strconv.Atoi(strings.TrimSpace(v)); r.Quantity = FlexInt(n) },
-	"productname":      func(r *ImportRow, v string) { r.ProductName = v },
-	"variantcode":      func(r *ImportRow, v string) { r.VariantCode = v },
-	"sku":              func(r *ImportRow, v string) { r.SKU = v },
+	"storeorderid":   func(r *ImportRow, v string) { r.StoreOrderID = v },
+	"account":        func(r *ImportRow, v string) { r.Account = v },
+	"storename":      func(r *ImportRow, v string) { r.StoreName = v },
+	"shippingmethod": func(r *ImportRow, v string) { r.ShippingMethod = v },
+	"quantity":       func(r *ImportRow, v string) { n, _ := strconv.Atoi(strings.TrimSpace(v)); r.Quantity = FlexInt(n) },
+	"productname":    func(r *ImportRow, v string) { r.ProductName = v },
+	"variantcode":    func(r *ImportRow, v string) { r.VariantCode = v },
+	"sku":            func(r *ImportRow, v string) { r.SKU = v },
+	// "Mã ảnh" — normalized VN header (diacritics preserved), plus safe aliases.
+	"mãảnh":            func(r *ImportRow, v string) { r.ImageCode = v },
+	"maanh":            func(r *ImportRow, v string) { r.ImageCode = v },
+	"imagecode":        func(r *ImportRow, v string) { r.ImageCode = v },
 	"design":           func(r *ImportRow, v string) { r.Design = v },
 	"mockup":           func(r *ImportRow, v string) { r.Mockup = v },
 	"mockupurl":        func(r *ImportRow, v string) { r.Mockup = v },
@@ -212,10 +252,17 @@ func (s *ImportService) validateRow(rowNumber int, sellerID uint, row ImportRow,
 	// Mockup URL: blocking only if present but malformed (missing mockup is handled
 	// as a non-blocking required-attention note at commit time).
 	if m := strings.TrimSpace(row.Mockup); m != "" {
-		if u, err := url.ParseRequestURI(m); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		if !isValidHTTPURL(m) {
 			return mkErr("Mockup", "MOCKUP_INVALID", "Mockup URL is not a valid http(s) URL",
 				"Request seller gửi lại link mockup")
 		}
+	}
+	// Design: only blocking if it is provided *as a URL* but malformed. A bare
+	// design reference code (e.g. "design-a") is allowed — Design may be a code,
+	// not a link, so we only validate values that clearly attempt to be a URL.
+	if d := strings.TrimSpace(row.Design); looksLikeURL(d) && !isValidHTTPURL(d) {
+		return mkErr("Design", "DESIGN_INVALID", "Design URL is not a valid http(s) URL",
+			"Sửa lại link design hoặc để trống nếu chưa có")
 	}
 	// Dedup within the file is fine (multiple items per order); dedup against the
 	// database below.
@@ -345,6 +392,7 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 				StoreOrderRef:    key,
 				SellerID:         *job.SellerID,
 				StoreName:        g.header.StoreName,
+				Account:          g.header.Account,
 				ShippingMethod:   g.header.ShippingMethod,
 				ShippingName:     g.header.ShippingName,
 				ShippingAddress1: g.header.ShippingAddress1,
@@ -358,8 +406,12 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 				IOSS:             g.header.IOSS,
 				Note:             g.header.Note,
 				SellerStatus:     models.SellerStatusProduction,
-				ImportJobID:      &job.ID,
-				CreatedByID:      actor.IDPtr(),
+				// Seller-uploaded/imported orders must be reviewed before they enter
+				// the design/production flow.
+				ReviewStatus:       models.ReviewPending,
+				CancellationStatus: models.CancellationNone,
+				ImportJobID:        &job.ID,
+				CreatedByID:        actor.IDPtr(),
 			}
 			if err := txRepo.Order.Create(order); err != nil {
 				return err
@@ -389,6 +441,7 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 					ProductName:    row.ProductName,
 					VariantCode:    row.VariantCode,
 					Quantity:       maxInt(int(row.Quantity), 1),
+					ImageCode:      row.ImageCode,
 					DesignURL:      row.Design,
 					MockupURL:      row.Mockup,
 					EngraveText:    row.EngraveText,
@@ -461,4 +514,17 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// looksLikeURL reports whether v appears to be an attempted http(s) link (so it
+// should be validated) rather than a bare reference code (left untouched).
+func looksLikeURL(v string) bool {
+	lv := strings.ToLower(strings.TrimSpace(v))
+	return strings.HasPrefix(lv, "http://") || strings.HasPrefix(lv, "https://") || strings.Contains(v, "://")
+}
+
+// isValidHTTPURL reports whether v parses as an absolute http(s) URL with a host.
+func isValidHTTPURL(v string) bool {
+	u, err := url.ParseRequestURI(strings.TrimSpace(v))
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }

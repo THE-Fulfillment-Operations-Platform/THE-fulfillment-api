@@ -44,13 +44,16 @@ func (r *ImportRepository) List(p Page) ([]models.ImportJob, int64, error) {
 // batch, date range).
 type OrderFilter struct {
 	Page
-	SellerID     *uint
-	StoreID      *uint
-	SKUCode      string
-	SellerStatus string
-	StoreOrderID string
-	DateFrom     *time.Time
-	DateTo       *time.Time
+	SellerID           *uint
+	StoreID            *uint
+	SKUCode            string
+	SellerStatus       string
+	ReviewStatus       string   // exact review_status match
+	ReviewStatuses     []string // review_status IN (...) — used by the review queue
+	CancellationStatus string
+	StoreOrderID       string
+	DateFrom           *time.Time
+	DateTo             *time.Time
 }
 
 type OrderRepository struct{ db *gorm.DB }
@@ -93,6 +96,15 @@ func (r *OrderRepository) baseQuery(f OrderFilter) *gorm.DB {
 	if f.SellerStatus != "" {
 		q = q.Where("orders.seller_status = ?", f.SellerStatus)
 	}
+	if f.ReviewStatus != "" {
+		q = q.Where("orders.review_status = ?", f.ReviewStatus)
+	}
+	if len(f.ReviewStatuses) > 0 {
+		q = q.Where("orders.review_status IN ?", f.ReviewStatuses)
+	}
+	if f.CancellationStatus != "" {
+		q = q.Where("orders.cancellation_status = ?", f.CancellationStatus)
+	}
 	if f.StoreOrderID != "" {
 		q = q.Where("orders.store_order_id ILIKE ?", "%"+f.StoreOrderID+"%")
 	}
@@ -133,6 +145,7 @@ type ItemFilter struct {
 	DesignStatus   string
 	BatchID        *uint
 	NeedsDesign    bool // design queue: design not ready
+	ReviewApproved bool // only items whose order review_status = APPROVED
 	DateFrom       *time.Time
 	DateTo         *time.Time
 }
@@ -193,6 +206,9 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 			string(models.DesignPending), string(models.DesignInProgress), string(models.DesignMissing),
 		})
 	}
+	if f.ReviewApproved {
+		q = q.Where("orders.review_status = ?", string(models.ReviewApproved))
+	}
 	if f.BatchID != nil {
 		q = q.Where("order_items.id IN (?)",
 			r.db.Model(&models.BatchItem{}).Select("order_item_id").Where("batch_id = ?", *f.BatchID))
@@ -234,9 +250,11 @@ type MaterialBucket struct {
 func (r *OrderItemRepository) designReadyUnbatchedSubquery() *gorm.DB {
 	return r.db.Table("order_items oi").
 		Select("oi.id AS order_item_id, sm.material_id AS material_id, m.code AS material_code, m.name AS material_name").
+		Joins("JOIN orders o ON o.id = oi.order_id AND o.deleted_at IS NULL").
 		Joins("JOIN sku_materials sm ON sm.sku_id = oi.sku_id").
 		Joins("JOIN materials m ON m.id = sm.material_id").
 		Where("oi.deleted_at IS NULL").
+		Where("o.review_status = ?", models.ReviewApproved).
 		Where("oi.design_status = ?", models.DesignReady).
 		Where("NOT EXISTS (?)",
 			r.db.Table("batch_items bi").

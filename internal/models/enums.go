@@ -53,6 +53,43 @@ func (s InternalStatus) Valid() bool {
 	return ok
 }
 
+// ReviewStatus is the operational intake status of a seller-uploaded/imported
+// order. New orders enter PENDING_REVIEW and only reach the design/production
+// flow once an Ops/Designer approves them. It is orthogonal to SellerStatus and
+// InternalStatus (which only apply once an order is APPROVED).
+type ReviewStatus string
+
+const (
+	ReviewPending   ReviewStatus = "PENDING_REVIEW"   // just uploaded, awaiting operational review
+	ReviewNeedsFix  ReviewStatus = "NEEDS_CORRECTION" // sent back to seller for correction
+	ReviewApproved  ReviewStatus = "APPROVED"         // released into design/production
+	ReviewRejected  ReviewStatus = "REJECTED"         // rejected by ops (won't be produced)
+	ReviewCancelled ReviewStatus = "CANCELLED"        // cancelled (by seller or via cancellation request)
+)
+
+// reviewStatusValid is the set of known review statuses.
+var reviewStatusValid = map[ReviewStatus]bool{
+	ReviewPending: true, ReviewNeedsFix: true, ReviewApproved: true,
+	ReviewRejected: true, ReviewCancelled: true,
+}
+
+// Valid reports whether s is a known review status.
+func (s ReviewStatus) Valid() bool { return reviewStatusValid[s] }
+
+// CancellationStatus tracks a cancellation on an order. NONE is the default;
+// SELLER_CANCELLED is a direct seller cancel of a pending-review order; REQUESTED
+// is a seller-submitted request awaiting an Ops/Admin decision; APPROVED/REJECTED
+// are the resolved outcomes of such a request.
+type CancellationStatus string
+
+const (
+	CancellationNone      CancellationStatus = "NONE"
+	CancellationSeller    CancellationStatus = "SELLER_CANCELLED"
+	CancellationRequested CancellationStatus = "REQUESTED"
+	CancellationApproved  CancellationStatus = "APPROVED"
+	CancellationRejected  CancellationStatus = "REJECTED"
+)
+
 // SellerStatus is the high-level status exposed to sellers. Sellers only ever
 // see these four values, never the internal print/cut/QC steps.
 type SellerStatus string

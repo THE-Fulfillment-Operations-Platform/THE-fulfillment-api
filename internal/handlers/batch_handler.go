@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 
 	"the-fulfillment/backend/internal/repositories"
@@ -54,6 +56,22 @@ func (h *Handlers) GetBatch(c *gin.Context) {
 		return
 	}
 	response.OK(c, b)
+}
+
+// ExportProductionTemplate streams a batch's legacy-compatible production
+// template as a CSV download. GET /api/batches/:id/production-template.csv
+func (h *Handlers) ExportProductionTemplate(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	data, filename, err := h.svc.Batch.ProductionTemplateCSV(id)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
+	c.Data(http.StatusOK, "text/csv; charset=utf-8", data)
 }
 
 // UpdateBatchStatus moves a batch through Pending/Đã in/Đã cắt/Đã QC.

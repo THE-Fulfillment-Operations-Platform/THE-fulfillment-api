@@ -50,6 +50,11 @@ type Order struct {
 	StoreID      *uint  `json:"store_id" gorm:"index"`
 	StoreName    string `json:"store_name" gorm:"size:160"`
 
+	// Account is the seller's external account reference from the upload template
+	// (the "Account" column). It identifies which storefront account the order
+	// came from; kept as import metadata alongside StoreName.
+	Account string `json:"account" gorm:"size:120"`
+
 	ShippingMethod   string `json:"shipping_method" gorm:"size:80"`
 	ShippingName     string `json:"shipping_name" gorm:"size:160"`
 	ShippingAddress1 string `json:"shipping_address1" gorm:"size:255"`
@@ -70,6 +75,24 @@ type Order struct {
 	SellerStatus SellerStatus `json:"seller_status" gorm:"size:20;not null;index;default:'PRODUCTION'"`
 	ImportJobID  *uint        `json:"import_job_id" gorm:"index"`
 	CreatedByID  *uint        `json:"created_by_id"`
+
+	// Review (intake) state. New orders are PENDING_REVIEW and only enter the
+	// design/production flow once APPROVED. The DB default is APPROVED so orders
+	// created before this feature (and any legacy rows) remain visible to the
+	// existing pipeline; new orders explicitly set PENDING_REVIEW on creation.
+	ReviewStatus ReviewStatus `json:"review_status" gorm:"size:20;not null;index;default:'APPROVED'"`
+	ReviewedByID *uint        `json:"reviewed_by_id"`
+	ReviewedAt   *time.Time   `json:"reviewed_at"`
+	ReviewNote   string       `json:"review_note" gorm:"size:1000"`
+
+	// Cancellation state and audit metadata.
+	CancellationStatus         CancellationStatus `json:"cancellation_status" gorm:"size:20;not null;index;default:'NONE'"`
+	CancellationRequestedByID  *uint              `json:"cancellation_requested_by_id"`
+	CancellationRequestedAt    *time.Time         `json:"cancellation_requested_at"`
+	CancellationReason         string             `json:"cancellation_reason" gorm:"size:1000"`
+	CancellationResolvedByID   *uint              `json:"cancellation_resolved_by_id"`
+	CancellationResolvedAt     *time.Time         `json:"cancellation_resolved_at"`
+	CancellationResolutionNote string             `json:"cancellation_resolution_note" gorm:"size:1000"`
 
 	Items []OrderItem `json:"items,omitempty" gorm:"foreignKey:OrderID"`
 }
@@ -97,6 +120,13 @@ type OrderItem struct {
 	CutFileURL   string `json:"cut_file_url" gorm:"size:500"`
 	MockupURL    string `json:"mockup_url" gorm:"size:500"` // seller-provided QC reference
 	EngraveText  string `json:"engrave_text" gorm:"size:500"`
+
+	// Production-ready fields Ops/Design normalize before an item is produced.
+	// They map 1:1 onto the legacy production template columns exported per batch.
+	ImageCode          string `json:"image_code" gorm:"size:120"`           // Mã ảnh (seller image code)
+	QCDescription      string `json:"qc_description" gorm:"size:500"`       // Mô tả SP để QC
+	ProductionSequence int    `json:"production_sequence" gorm:"default:0"` // Số thứ tự
+	ProductionFileName string `json:"production_file_name" gorm:"size:255"` // Tên File
 
 	InternalStatus InternalStatus `json:"internal_status" gorm:"size:20;not null;index;default:'PENDING'"`
 	DesignStatus   DesignStatus   `json:"design_status" gorm:"size:20;not null;index;default:'PENDING'"`

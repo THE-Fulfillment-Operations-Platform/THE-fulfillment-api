@@ -135,6 +135,25 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		masterData.GET("/import-jobs/:id", h.GetMasterImportJob)
 	}
 
+	// Order review / intake (Pending Review). Ops/Designer approve orders before
+	// they enter the design/production flow.
+	review := authd.Group("/review/orders", middleware.RequireRoles(roleDesignOps...))
+	{
+		review.GET("", h.ListReviewOrders)
+		review.GET("/:id", h.GetReviewOrder)
+		review.POST("/:id/approve", h.ApproveReviewOrder)
+		review.POST("/:id/reject", h.RejectReviewOrder)
+		review.POST("/:id/request-correction", h.RequestReviewCorrection)
+	}
+
+	// Cancellation requests (ops/admin resolve seller-submitted requests).
+	cancellations := authd.Group("/cancellation-requests", middleware.RequireRoles(roleOpsAdmin...))
+	{
+		cancellations.GET("", h.ListCancellationRequests)
+		cancellations.POST("/:id/approve", h.ApproveCancellation)
+		cancellations.POST("/:id/reject", h.RejectCancellation)
+	}
+
 	// Items + design queue.
 	items := authd.Group("/items")
 	{
@@ -154,6 +173,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	{
 		batches.GET("", middleware.RequireRoles(roleInternal...), h.ListBatches)
 		batches.GET("/:id", middleware.RequireRoles(roleInternal...), h.GetBatch)
+		batches.GET("/:id/production-template.csv", middleware.RequireRoles(roleInternal...), h.ExportProductionTemplate)
 		batches.POST("", middleware.RequireRoles(roleDesignOps...), h.CreateBatch)
 		batches.PATCH("/:id/status", middleware.RequireRoles(roleProdOps...), h.UpdateBatchStatus)
 	}
@@ -195,6 +215,8 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	{
 		seller.GET("/orders", h.SellerOrders)
 		seller.GET("/orders/:id", h.SellerOrderDetail)
+		seller.POST("/orders/:id/cancel", h.SellerCancelOrder)
+		seller.POST("/orders/:id/cancellation-request", h.SellerRequestCancellation)
 	}
 
 	return r
