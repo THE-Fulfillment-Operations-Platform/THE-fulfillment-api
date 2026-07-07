@@ -68,6 +68,7 @@ func (r *SellerRepository) FindByID(id uint) (*models.Seller, error) {
 }
 
 func (r *SellerRepository) FindByCode(code string) (*models.Seller, error) {
+	code = models.NormalizeCode(code)
 	var s models.Seller
 	if err := r.db.Where("code = ?", code).First(&s).Error; err != nil {
 		return nil, err
@@ -140,6 +141,7 @@ func (r *MaterialRepository) FindByID(id uint) (*models.Material, error) {
 }
 
 func (r *MaterialRepository) FindByCode(code string) (*models.Material, error) {
+	code = models.NormalizeCode(code)
 	var m models.Material
 	if err := r.db.Where("code = ?", code).First(&m).Error; err != nil {
 		return nil, err
@@ -184,7 +186,11 @@ func (r *SKURepository) Save(s *models.SKU) error {
 
 func (r *SKURepository) ReplaceMaterials(skuID uint, mats []models.SKUMaterial) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("sku_id = ?", skuID).Delete(&models.SKUMaterial{}).Error; err != nil {
+		// Hard delete (Unscoped): sku_materials is a pure mapping table with a
+		// unique index on (sku_id, material_id). A soft delete would leave the old
+		// rows physically present, so re-inserting the same pair collides with the
+		// unique constraint. We never need soft-delete history for a mapping row.
+		if err := tx.Unscoped().Where("sku_id = ?", skuID).Delete(&models.SKUMaterial{}).Error; err != nil {
 			return err
 		}
 		for i := range mats {
@@ -207,6 +213,7 @@ func (r *SKURepository) FindByID(id uint) (*models.SKU, error) {
 }
 
 func (r *SKURepository) FindByCode(code string) (*models.SKU, error) {
+	code = models.NormalizeCode(code)
 	var s models.SKU
 	err := r.db.Preload("Materials.Material").Where("code = ?", code).First(&s).Error
 	if err != nil {

@@ -51,6 +51,12 @@ func main() {
 	h := handlers.New(svc)
 	router := routes.New(cfg, h, jwtManager)
 
+	// Dev convenience: free the port if a previous run left an orphaned process
+	// holding it (a `go run` restart gotcha). No-op in production.
+	if !cfg.IsProduction() {
+		freePortForDev(cfg.Port)
+	}
+
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           router,

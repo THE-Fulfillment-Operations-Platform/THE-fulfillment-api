@@ -485,7 +485,7 @@ func (s *MasterImportService) List(page repositories.Page) ([]models.MasterImpor
 // normalizeSKUCode mirrors the transformation the order importer applies when it
 // looks up a SKU, so a SKU created here always matches an order-file SKU.
 func normalizeSKUCode(s string) string {
-	return strings.ToUpper(strings.TrimSpace(s))
+	return models.NormalizeCode(s)
 }
 
 // materialCode builds a stable, uppercase, ASCII code from a (possibly Vietnamese)

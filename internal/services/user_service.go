@@ -2,6 +2,7 @@ package services
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"gorm.io/gorm"
@@ -46,6 +47,23 @@ func validRole(r models.Role) bool {
 	return false
 }
 
+// ensureSellerExists validates that a referenced seller row exists. Without this
+// pre-check a non-existent seller_id only fails at INSERT time as a foreign-key
+// violation, which the caller wraps into a generic "could not create user" with
+// no usable reason. Returning a clear BadRequest lets the UI show what's wrong.
+func (s *UserService) ensureSellerExists(sellerID *uint) error {
+	if sellerID == nil {
+		return nil
+	}
+	if _, err := s.repo.Seller.FindByID(*sellerID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apperr.BadRequest(fmt.Sprintf("Seller ID %d không tồn tại. Vui lòng nhập ID của seller đã có trong hệ thống.", *sellerID))
+		}
+		return apperr.Internal("seller lookup failed").Wrap(err)
+	}
+	return nil
+}
+
 // Create creates a new user with a hashed password.
 func (s *UserService) Create(actor Actor, in CreateUserInput) (*models.User, error) {
 	in.Email = strings.ToLower(strings.TrimSpace(in.Email))
@@ -54,6 +72,9 @@ func (s *UserService) Create(actor Actor, in CreateUserInput) (*models.User, err
 	}
 	if in.Role == models.RoleSeller && in.SellerID == nil {
 		return nil, apperr.BadRequest("seller_id is required for SELLER users")
+	}
+	if err := s.ensureSellerExists(in.SellerID); err != nil {
+		return nil, err
 	}
 	exists, err := s.repo.User.ExistsByEmail(in.Email)
 	if err != nil {
@@ -129,6 +150,9 @@ func (s *UserService) Update(actor Actor, id uint, in UpdateUserInput) (*models.
 			return nil, apperr.Internal("could not hash password").Wrap(err)
 		}
 		u.PasswordHash = hash
+	}
+	if err := s.ensureSellerExists(u.SellerID); err != nil {
+		return nil, err
 	}
 	if err := s.repo.User.Update(u); err != nil {
 		return nil, apperr.Internal("could not update user").Wrap(err)

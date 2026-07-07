@@ -117,7 +117,7 @@ func (h *Handlers) UpdateSKU(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var in services.SKUInput
+	var in services.SKUUpdateInput
 	if !bindJSON(c, &in) {
 		return
 	}

@@ -2,7 +2,6 @@ package services
 
 import (
 	"errors"
-	"strings"
 
 	"gorm.io/gorm"
 
@@ -26,7 +25,7 @@ type MaterialInput struct {
 }
 
 func (s *CatalogService) CreateMaterial(actor Actor, in MaterialInput) (*models.Material, error) {
-	in.Code = strings.ToUpper(strings.TrimSpace(in.Code))
+	in.Code = models.NormalizeCode(in.Code)
 	if _, err := s.repo.Material.FindByCode(in.Code); err == nil {
 		return nil, apperr.Conflict("A material with this code already exists")
 	}
@@ -90,15 +89,27 @@ type SKUMaterialInput struct {
 }
 
 type SKUInput struct {
-	Code        string             `json:"code" binding:"required"`
-	Name        string             `json:"name" binding:"required"`
-	ProductName string             `json:"product_name"`
-	Description string             `json:"description"`
-	IsActive    *bool              `json:"is_active"`
+	Code        string `json:"code" binding:"required"`
+	Name        string `json:"name" binding:"required"`
+	ProductName string `json:"product_name"`
+	Description string `json:"description"`
+	IsActive    *bool  `json:"is_active"`
 	// Materials is optional: a SKU may be created "unmapped" and have its material(s)
 	// assigned later from the Master Data → Mapping screen. On update, an empty/omitted
 	// list leaves the existing material set unchanged (see UpdateSKU).
 	Materials []SKUMaterialInput `json:"materials" binding:"omitempty,dive"`
+}
+
+// SKUUpdateInput is a partial-update payload for an existing SKU. Unlike SKUInput,
+// code/name are NOT required: the mapping screen only submits `materials`, and
+// UpdateSKU ignores code and treats name as optional. Requiring them here would
+// reject a materials-only update with a spurious validation error.
+type SKUUpdateInput struct {
+	Name        string             `json:"name"`
+	ProductName string             `json:"product_name"`
+	Description string             `json:"description"`
+	IsActive    *bool              `json:"is_active"`
+	Materials   []SKUMaterialInput `json:"materials" binding:"omitempty,dive"`
 }
 
 func (s *CatalogService) buildMaterials(in []SKUMaterialInput) ([]models.SKUMaterial, error) {
@@ -124,7 +135,7 @@ func (s *CatalogService) buildMaterials(in []SKUMaterialInput) ([]models.SKUMate
 // CreateSKU creates a SKU and its material set. A SKU with more than one material
 // is automatically marked as a combo.
 func (s *CatalogService) CreateSKU(actor Actor, in SKUInput) (*models.SKU, error) {
-	in.Code = strings.ToUpper(strings.TrimSpace(in.Code))
+	in.Code = models.NormalizeCode(in.Code)
 	if _, err := s.repo.SKU.FindByCode(in.Code); err == nil {
 		return nil, apperr.Conflict("A SKU with this code already exists")
 	}
@@ -169,7 +180,7 @@ func (s *CatalogService) ListSKUs(page repositories.Page) ([]models.SKU, int64, 
 }
 
 // UpdateSKU updates SKU attributes and (if provided) replaces its material set.
-func (s *CatalogService) UpdateSKU(actor Actor, id uint, in SKUInput) (*models.SKU, error) {
+func (s *CatalogService) UpdateSKU(actor Actor, id uint, in SKUUpdateInput) (*models.SKU, error) {
 	sku, err := s.GetSKU(id)
 	if err != nil {
 		return nil, err

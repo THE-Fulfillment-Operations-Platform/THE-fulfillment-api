@@ -13,7 +13,20 @@ import (
 	"the-fulfillment/backend/internal/handlers"
 	"the-fulfillment/backend/internal/middleware"
 	"the-fulfillment/backend/internal/models"
+	"the-fulfillment/backend/internal/response"
 )
+
+// resetEnabled blocks the destructive data-reset route unless ALLOW_DATA_RESET
+// is on and we're not in production — a safety valve against accidental wipes.
+func resetEnabled(cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !cfg.AllowDataReset || cfg.IsProduction() {
+			response.AbortForbidden(c, "Chức năng xoá dữ liệu đang tắt trên môi trường này")
+			return
+		}
+		c.Next()
+	}
+}
 
 // Role sets reused across route groups.
 var (
@@ -72,6 +85,14 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 
 	// Audit logs (admin/owner).
 	authd.GET("/audit-logs", middleware.RequireRoles(roleAdminOwner...), h.ListAuditLogs)
+
+	// Admin / danger zone (OWNER only, and only when ALLOW_DATA_RESET is enabled).
+	// POST /api/admin/reset wipes order/production data so the catalog can be
+	// re-imported from scratch; master data and users are preserved.
+	admin := authd.Group("/admin", middleware.RequireRoles(models.RoleOwner))
+	{
+		admin.POST("/reset", resetEnabled(cfg), h.ResetData)
+	}
 
 	// Sellers (ops/admin/owner write; internal read).
 	sellers := authd.Group("/sellers")
@@ -173,7 +194,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	{
 		batches.GET("", middleware.RequireRoles(roleInternal...), h.ListBatches)
 		batches.GET("/:id", middleware.RequireRoles(roleInternal...), h.GetBatch)
-		batches.GET("/:id/production-template.csv", middleware.RequireRoles(roleInternal...), h.ExportProductionTemplate)
+		batches.GET("/:id/production-template.xlsx", middleware.RequireRoles(roleInternal...), h.ExportProductionTemplate)
 		batches.POST("", middleware.RequireRoles(roleDesignOps...), h.CreateBatch)
 		batches.PATCH("/:id/status", middleware.RequireRoles(roleProdOps...), h.UpdateBatchStatus)
 	}
@@ -193,11 +214,12 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		packing.GET("/order/:id", h.GetOrderPackage)
 	}
 
-	// Handoffs (packing/shipping).
-	handoffs := authd.Group("/handoffs", middleware.RequireRoles(roleShipOps...))
+	// Handoffs — creating a handoff is packing/shipping; listing is read-only and
+	// available to every internal role (the dashboard shows a handoff KPI).
+	handoffs := authd.Group("/handoffs")
 	{
-		handoffs.POST("", h.CreateHandoff)
-		handoffs.GET("", h.ListHandoffs)
+		handoffs.POST("", middleware.RequireRoles(roleShipOps...), h.CreateHandoff)
+		handoffs.GET("", middleware.RequireRoles(roleInternal...), h.ListHandoffs)
 	}
 
 	// Notes / required attention (all internal roles).
@@ -215,6 +237,9 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	{
 		seller.GET("/orders", h.SellerOrders)
 		seller.GET("/orders/:id", h.SellerOrderDetail)
+		// Seller self-upload: seller_id is forced to the authenticated seller.
+		seller.POST("/orders/import", h.SellerImportOrders)
+		seller.POST("/orders/import/commit", h.SellerCommitImport)
 		seller.POST("/orders/:id/cancel", h.SellerCancelOrder)
 		seller.POST("/orders/:id/cancellation-request", h.SellerRequestCancellation)
 	}

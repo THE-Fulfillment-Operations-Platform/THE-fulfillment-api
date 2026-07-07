@@ -47,6 +47,7 @@ type Repositories struct {
 	Handoff      *HandoffRepository
 	Note         *NoteRepository
 	Audit        *AuditRepository
+	Admin        *AdminRepository
 }
 
 // New builds the repository bundle from a GORM handle.
@@ -69,5 +70,6 @@ func New(db *gorm.DB) *Repositories {
 		Handoff:      &HandoffRepository{db: db},
 		Note:         &NoteRepository{db: db},
 		Audit:        &AuditRepository{db: db},
+		Admin:        &AdminRepository{db: db},
 	}
 }

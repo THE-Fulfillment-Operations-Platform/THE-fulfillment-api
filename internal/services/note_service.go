@@ -7,6 +7,7 @@ import (
 	"gorm.io/gorm"
 
 	"the-fulfillment/backend/internal/apperr"
+	"the-fulfillment/backend/internal/apptypes"
 	"the-fulfillment/backend/internal/models"
 	"the-fulfillment/backend/internal/repositories"
 )
@@ -29,7 +30,7 @@ type NoteInput struct {
 	EntityID            *uint               `json:"entity_id"`
 	OwnerRole           models.Role         `json:"owner_role"`
 	AssignedToID        *uint               `json:"assigned_to_id"`
-	DueDate             *time.Time          `json:"due_date"`
+	DueDate             *apptypes.Date      `json:"due_date"`
 	Resolution          string              `json:"resolution"`
 }
 
@@ -49,7 +50,7 @@ func (s *NoteService) Create(actor Actor, in NoteInput) (*models.Note, error) {
 	n := &models.Note{
 		Title: in.Title, Body: in.Body, ReasonCode: in.ReasonCode, Severity: severity, Status: status,
 		IsRequiredAttention: ra, EntityType: in.EntityType, EntityID: in.EntityID, OwnerRole: in.OwnerRole,
-		AssignedToID: in.AssignedToID, DueDate: in.DueDate, CreatedByID: actor.IDPtr(),
+		AssignedToID: in.AssignedToID, DueDate: in.DueDate.TimePtr(), CreatedByID: actor.IDPtr(),
 	}
 	if err := s.repo.Note.Create(n); err != nil {
 		return nil, apperr.Internal("could not create note").Wrap(err)
@@ -107,7 +108,7 @@ func (s *NoteService) Update(actor Actor, id uint, in NoteInput) (*models.Note, 
 		n.AssignedToID = in.AssignedToID
 	}
 	if in.DueDate != nil {
-		n.DueDate = in.DueDate
+		n.DueDate = in.DueDate.TimePtr()
 	}
 	if in.Resolution != "" {
 		n.Resolution = in.Resolution

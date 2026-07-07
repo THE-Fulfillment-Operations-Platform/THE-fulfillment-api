@@ -1,16 +1,15 @@
 package services
 
 import (
-	"bytes"
-	"encoding/csv"
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
+	"github.com/xuri/excelize/v2"
 	"gorm.io/gorm"
 
 	"the-fulfillment/backend/internal/apperr"
+	"the-fulfillment/backend/internal/apptypes"
 	"the-fulfillment/backend/internal/models"
 	"the-fulfillment/backend/internal/repositories"
 )
@@ -26,11 +25,11 @@ type BatchService struct {
 // A combo item that needs several materials is handled by creating one batch per
 // material (call this endpoint once per material).
 type CreateBatchInput struct {
-	MaterialID   uint       `json:"material_id" binding:"required"`
-	OrderItemIDs []uint     `json:"order_item_ids" binding:"required,min=1"`
-	Priority     string     `json:"priority"`
-	DueDate      *time.Time `json:"due_date"`
-	Note         string     `json:"note"`
+	MaterialID   uint           `json:"material_id" binding:"required"`
+	OrderItemIDs []uint         `json:"order_item_ids" binding:"required,min=1"`
+	Priority     string         `json:"priority"`
+	DueDate      *apptypes.Date `json:"due_date"`
+	Note         string         `json:"note"`
 }
 
 // Create builds a batch and its batch items. Items whose SKU does not include the
@@ -62,7 +61,7 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 
 		batch = &models.Batch{
 			MaterialID: material.ID, Status: models.StatusPending, Priority: priority,
-			DueDate: in.DueDate, Note: in.Note, CreatedByID: actor.IDPtr(),
+			DueDate: in.DueDate.TimePtr(), Note: in.Note, CreatedByID: actor.IDPtr(),
 		}
 		if err := txRepo.Batch.Create(batch); err != nil {
 			return err
@@ -302,25 +301,82 @@ func ProductionTemplateGrid(batch *models.Batch) [][]string {
 	return grid
 }
 
-// ProductionTemplateCSV loads a batch and renders the legacy production template
-// as CSV bytes (UTF-8 with a BOM so Excel opens the Vietnamese headers correctly)
-// together with a suggested download filename.
-func (s *BatchService) ProductionTemplateCSV(batchID uint) ([]byte, string, error) {
+// productionColumnWidths sets sensible Excel column widths (in characters) for the
+// 17 production-template columns, keeping URL columns wide and codes/counts compact
+// so the sheet is readable without manual resizing.
+var productionColumnWidths = []float64{
+	16, // A  Mã nội bộ
+	10, // B  SỐ Batch
+	12, // C  Ngày
+	22, // D  Order ID
+	16, // E  SKU
+	18, // F  Loại VL
+	32, // G  Mô tả QC
+	22, // H  Mã ảnh
+	9,  // I  Số thứ tự
+	9,  // J  Số lượng
+	42, // K  Link ảnh
+	42, // L  Mock up
+	16, // M  Mã nội bộ
+	20, // N  Tên khách
+	22, // O  Tên File
+	42, // P  Link in
+	42, // Q  Link cắt
+}
+
+// ProductionTemplateXLSX loads a batch and renders the legacy production template as
+// a real .xlsx workbook. Unlike CSV, an xlsx always splits into columns cleanly in
+// Excel regardless of the machine's locale/list separator, and Vietnamese headers
+// need no BOM. The header row is bold on a light fill, frozen, and auto-filtered,
+// with per-column widths so it is readable on open.
+func (s *BatchService) ProductionTemplateXLSX(batchID uint) ([]byte, string, error) {
 	batch, err := s.Get(batchID)
 	if err != nil {
 		return nil, "", err
 	}
 	grid := ProductionTemplateGrid(batch)
 
-	var buf bytes.Buffer
-	buf.Write([]byte{0xEF, 0xBB, 0xBF}) // UTF-8 BOM so Excel reads Vietnamese correctly
-	w := csv.NewWriter(&buf)
-	if err := w.WriteAll(grid); err != nil {
-		return nil, "", apperr.Internal("could not render production CSV").Wrap(err)
+	f := excelize.NewFile()
+	defer func() { _ = f.Close() }()
+	const sheet = "Sản xuất"
+	if err := f.SetSheetName("Sheet1", sheet); err != nil {
+		return nil, "", apperr.Internal("could not build production workbook").Wrap(err)
 	}
-	if err := w.Error(); err != nil {
-		return nil, "", apperr.Internal("could not render production CSV").Wrap(err)
+
+	for r, row := range grid {
+		cell, _ := excelize.CoordinatesToCellName(1, r+1)
+		cells := make([]interface{}, len(row))
+		for i, v := range row {
+			cells[i] = v
+		}
+		if err := f.SetSheetRow(sheet, cell, &cells); err != nil {
+			return nil, "", apperr.Internal("could not write production rows").Wrap(err)
+		}
 	}
-	filename := "production-" + strings.ReplaceAll(batch.Code, "#", "") + ".csv"
+
+	lastCol, _ := excelize.ColumnNumberToName(len(productionTemplateHeaders))
+	for i, w := range productionColumnWidths {
+		name, _ := excelize.ColumnNumberToName(i + 1)
+		_ = f.SetColWidth(sheet, name, name, w)
+	}
+
+	if style, err := f.NewStyle(&excelize.Style{
+		Font:      &excelize.Font{Bold: true, Color: "1F2A44"},
+		Fill:      excelize.Fill{Type: "pattern", Pattern: 1, Color: []string{"E9EDF5"}},
+		Alignment: &excelize.Alignment{Vertical: "center"},
+	}); err == nil {
+		_ = f.SetCellStyle(sheet, "A1", lastCol+"1", style)
+	}
+	_ = f.SetRowHeight(sheet, 1, 22)
+	_ = f.SetPanes(sheet, &excelize.Panes{
+		Freeze: true, YSplit: 1, TopLeftCell: "A2", ActivePane: "bottomLeft",
+	})
+	_ = f.AutoFilter(sheet, "A1:"+lastCol+itoa(len(grid)), []excelize.AutoFilterOptions{})
+
+	buf, err := f.WriteToBuffer()
+	if err != nil {
+		return nil, "", apperr.Internal("could not render production workbook").Wrap(err)
+	}
+	filename := "production-" + strings.ReplaceAll(batch.Code, "#", "") + ".xlsx"
 	return buf.Bytes(), filename, nil
 }

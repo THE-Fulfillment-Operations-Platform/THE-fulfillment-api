@@ -37,8 +37,12 @@ type Config struct {
 	CORSAllowedOrigins []string
 
 	// Seed
-	SeedOnStart  bool
-	DemoPassword string
+	SeedOnStart    bool
+	SeedDemoOrders bool
+	DemoPassword   string
+
+	// Ops / danger zone
+	AllowDataReset bool
 }
 
 // Load reads configuration from a .env file (if present) and the process
@@ -67,8 +71,11 @@ func Load() *Config {
 
 		CORSAllowedOrigins: splitAndTrim(getEnv("CORS_ALLOWED_ORIGINS", "*")),
 
-		SeedOnStart:  getEnvAsBool("SEED_ON_START", true),
-		DemoPassword: getEnv("SEED_DEMO_PASSWORD", "Password123!"),
+		SeedOnStart:    getEnvAsBool("SEED_ON_START", true),
+		SeedDemoOrders: getEnvAsBool("SEED_DEMO_ORDERS", false),
+		DemoPassword:   getEnv("SEED_DEMO_PASSWORD", "Password123!"),
+
+		AllowDataReset: getEnvAsBool("ALLOW_DATA_RESET", false),
 	}
 
 	return cfg

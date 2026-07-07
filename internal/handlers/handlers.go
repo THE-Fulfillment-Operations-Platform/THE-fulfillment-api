@@ -99,7 +99,8 @@ func timeQueryPtr(c *gin.Context, name string) *time.Time {
 // bindJSON binds and validates a JSON body, writing a 422 on failure.
 func bindJSON(c *gin.Context, dst interface{}) bool {
 	if err := c.ShouldBindJSON(dst); err != nil {
-		response.FailValidation(c, err.Error())
+		message, details := humanizeBindErr(err)
+		response.FailValidation(c, message, details)
 		return false
 	}
 	return true

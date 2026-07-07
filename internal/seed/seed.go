@@ -36,8 +36,16 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 	if err := seedUsers(db, cfg, seller.ID); err != nil {
 		return err
 	}
-	if err := seedDemoOrders(db, seller, skus, materials); err != nil {
-		return err
+	// Demo orders are opt-in: after a data reset the orders table is empty, so the
+	// old "seed once when no orders exist" guard would re-create them on the next
+	// boot. Gate them behind SEED_DEMO_ORDERS (default off) so a clean re-import
+	// starts from a truly empty order set.
+	if cfg.SeedDemoOrders {
+		if err := seedDemoOrders(db, seller, skus, materials); err != nil {
+			return err
+		}
+	} else {
+		log.Println("seed: demo orders skipped (SEED_DEMO_ORDERS=false)")
 	}
 	log.Println("seed: completed")
 	return nil

@@ -2,7 +2,6 @@ package services
 
 import (
 	"errors"
-	"strings"
 
 	"gorm.io/gorm"
 
@@ -34,7 +33,7 @@ type StoreInput struct {
 }
 
 func (s *SellerService) Create(actor Actor, in SellerInput) (*models.Seller, error) {
-	in.Code = strings.ToUpper(strings.TrimSpace(in.Code))
+	in.Code = models.NormalizeCode(in.Code)
 	if _, err := s.repo.Seller.FindByCode(in.Code); err == nil {
 		return nil, apperr.Conflict("A seller with this code already exists")
 	}

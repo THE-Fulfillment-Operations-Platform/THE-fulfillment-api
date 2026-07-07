@@ -43,6 +43,7 @@ type Services struct {
 	Packing      *PackingService
 	Note         *NoteService
 	Audit        *AuditService
+	Admin        *AdminService
 }
 
 // New builds the service bundle.
@@ -62,5 +63,6 @@ func New(repo *repositories.Repositories, jwt *auth.Manager, carrier shipping.Ca
 		Packing:      &PackingService{repo: repo, audit: audit, carrier: carrier},
 		Note:         &NoteService{repo: repo, audit: audit},
 		Audit:        audit,
+		Admin:        &AdminService{repo: repo, audit: audit},
 	}
 }

@@ -254,7 +254,7 @@ func (s *OrderService) CreateOrderDirect(actor Actor, in DirectOrderInput) (*mod
 			return err
 		}
 		for i, it := range in.Items {
-			skuCode := strings.ToUpper(strings.TrimSpace(it.SKUCode))
+			skuCode := models.NormalizeCode(it.SKUCode)
 			sku, _ := txRepo.SKU.FindByCode(skuCode)
 			var skuID *uint
 			if sku != nil {

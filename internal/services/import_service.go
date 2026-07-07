@@ -234,7 +234,7 @@ func (s *ImportService) validateRow(rowNumber int, sellerID uint, row ImportRow,
 	// A SKU is only "mapped" once it exists AND is linked to at least one material —
 	// materials are the axis production batches around, so an order can only proceed
 	// when the system knows the SKU's material(s).
-	sku, err := s.repo.SKU.FindByCode(strings.ToUpper(strings.TrimSpace(row.SKU)))
+	sku, err := s.repo.SKU.FindByCode(models.NormalizeCode(row.SKU))
 	if err != nil {
 		return mkErr("SKU", "SKU_UNMAPPED", "SKU chưa được setup nguyên vật liệu (chưa có trong master data)",
 			"Vào Master Data → Import Excel vận hành cũ hoặc tạo SKU và gán nguyên vật liệu")
@@ -269,13 +269,56 @@ func (s *ImportService) validateRow(rowNumber int, sellerID uint, row ImportRow,
 	key := strings.ToLower(strings.TrimSpace(row.StoreOrderID))
 	seenInFile[key] = true
 
-	if _, err := s.repo.Order.FindBySellerAndStoreOrder(sellerID, strings.TrimSpace(row.StoreOrderID)); err == nil {
-		return mkErr("StoreOrderID", "ORD_DUPLICATE", "An order with this StoreOrderID already exists for the seller",
-			"Review source/idempotency")
+	if existing, err := s.repo.Order.FindBySellerAndStoreOrder(sellerID, strings.TrimSpace(row.StoreOrderID)); err == nil {
+		// A rejected / needs-correction / cancelled order is "dead": let the seller
+		// re-upload it — Commit overwrites that order in place (revive). Only an
+		// active order (pending review or approved / in production) blocks a dup.
+		if !isRevivable(existing) {
+			return mkErr("StoreOrderID", "ORD_DUPLICATE", "An order with this StoreOrderID already exists for the seller",
+				"Review source/idempotency")
+		}
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return mkErr("StoreOrderID", "LOOKUP_FAILED", "Could not check for duplicate order", "Retry import")
 	}
 	return nil
+}
+
+// isRevivable reports whether an existing order is "dead" and may therefore be
+// overwritten by a fresh import of the same StoreOrderID: rejected, sent back for
+// correction, or cancelled. Such orders never entered production, so overwriting
+// them in place is safe and keeps the (seller, store_order) uniqueness intact.
+func isRevivable(o *models.Order) bool {
+	switch o.ReviewStatus {
+	case models.ReviewRejected, models.ReviewNeedsFix, models.ReviewCancelled:
+		return true
+	}
+	switch o.CancellationStatus {
+	case models.CancellationSeller, models.CancellationApproved:
+		return true
+	}
+	return false
+}
+
+// wipeOrderItems hard-deletes an order's items and their attached assets/notes so
+// a revived order can be rebuilt without colliding with the unique index on
+// order_items.internal_code. A revivable order was never approved, so it has no
+// batch items or packages to clean up.
+func wipeOrderItems(tx *gorm.DB, orderID uint) error {
+	var itemIDs []uint
+	if err := tx.Model(&models.OrderItem{}).Where("order_id = ?", orderID).Pluck("id", &itemIDs).Error; err != nil {
+		return err
+	}
+	if len(itemIDs) > 0 {
+		if err := tx.Unscoped().Where("order_item_id IN ?", itemIDs).Delete(&models.ItemAsset{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Unscoped().
+			Where("entity_type = ? AND entity_id IN ?", models.EntityOrderItem, itemIDs).
+			Delete(&models.Note{}).Error; err != nil {
+			return err
+		}
+	}
+	return tx.Unscoped().Where("order_id = ?", orderID).Delete(&models.OrderItem{}).Error
 }
 
 // Preview validates every row, persists the valid rows on an ImportJob (status
@@ -387,42 +430,72 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 		txRepo := repositories.New(tx)
 		for _, key := range orderKeys {
 			g := groups[key]
-			order := &models.Order{
-				StoreOrderID:     key,
-				StoreOrderRef:    key,
-				SellerID:         *job.SellerID,
-				StoreName:        g.header.StoreName,
-				Account:          g.header.Account,
-				ShippingMethod:   g.header.ShippingMethod,
-				ShippingName:     g.header.ShippingName,
-				ShippingAddress1: g.header.ShippingAddress1,
-				ShippingAddress2: g.header.ShippingAddress2,
-				ShippingCity:     g.header.ShippingCity,
-				ShippingZip:      g.header.ShippingZip,
-				ShippingProvince: g.header.ShippingProvince,
-				ShippingCountry:  g.header.ShippingCountry,
-				ShippingPhone:    g.header.ShippingPhone,
-				ShippingEmail:    g.header.ShippingEmail,
-				IOSS:             g.header.IOSS,
-				Note:             g.header.Note,
-				SellerStatus:     models.SellerStatusProduction,
-				// Seller-uploaded/imported orders must be reviewed before they enter
-				// the design/production flow.
-				ReviewStatus:       models.ReviewPending,
-				CancellationStatus: models.CancellationNone,
-				ImportJobID:        &job.ID,
-				CreatedByID:        actor.IDPtr(),
+			// Revive a dead order (rejected/cancelled/needs-correction) in place,
+			// otherwise create a fresh one. An active duplicate can't reach here —
+			// Preview blocks it as ORD_DUPLICATE.
+			existing, ferr := txRepo.Order.FindBySellerAndStoreOrder(*job.SellerID, key)
+			if ferr != nil && !errors.Is(ferr, gorm.ErrRecordNotFound) {
+				return ferr
 			}
-			if err := txRepo.Order.Create(order); err != nil {
-				return err
+			reviving := ferr == nil && isRevivable(existing)
+			if ferr == nil && !reviving {
+				continue // defensive: an active duplicate slipped past preview
 			}
-			order.InternalCode = fmt.Sprintf("ORD-%06d", order.ID)
-			if err := txRepo.Order.Update(order); err != nil {
-				return err
+
+			order := existing
+			if reviving {
+				if err := wipeOrderItems(tx, order.ID); err != nil {
+					return err
+				}
+			} else {
+				order = &models.Order{}
+			}
+			order.StoreOrderID = key
+			order.StoreOrderRef = key
+			order.SellerID = *job.SellerID
+			order.StoreName = g.header.StoreName
+			order.Account = g.header.Account
+			order.ShippingMethod = g.header.ShippingMethod
+			order.ShippingName = g.header.ShippingName
+			order.ShippingAddress1 = g.header.ShippingAddress1
+			order.ShippingAddress2 = g.header.ShippingAddress2
+			order.ShippingCity = g.header.ShippingCity
+			order.ShippingZip = g.header.ShippingZip
+			order.ShippingProvince = g.header.ShippingProvince
+			order.ShippingCountry = g.header.ShippingCountry
+			order.ShippingPhone = g.header.ShippingPhone
+			order.ShippingEmail = g.header.ShippingEmail
+			order.IOSS = g.header.IOSS
+			order.Note = g.header.Note
+			order.SellerStatus = models.SellerStatusProduction
+			// (Re)enter the review queue with a clean slate — must be reviewed
+			// before entering the design/production flow.
+			order.ReviewStatus = models.ReviewPending
+			order.ReviewedByID = nil
+			order.ReviewedAt = nil
+			order.ReviewNote = ""
+			order.CancellationStatus = models.CancellationNone
+			order.CancellationRequestedByID = nil
+			order.CancellationRequestedAt = nil
+			order.ImportJobID = &job.ID
+
+			if reviving {
+				if err := txRepo.Order.Update(order); err != nil {
+					return err
+				}
+			} else {
+				order.CreatedByID = actor.IDPtr()
+				if err := txRepo.Order.Create(order); err != nil {
+					return err
+				}
+				order.InternalCode = fmt.Sprintf("ORD-%06d", order.ID)
+				if err := txRepo.Order.Update(order); err != nil {
+					return err
+				}
 			}
 
 			for lineNo, row := range g.items {
-				skuCode := strings.ToUpper(strings.TrimSpace(row.SKU))
+				skuCode := models.NormalizeCode(row.SKU)
 				sku, _ := txRepo.SKU.FindByCode(skuCode)
 				var skuID *uint
 				if sku != nil {
