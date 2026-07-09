@@ -30,14 +30,14 @@ func (s *QCService) resolveItem(ref ScanRef) (*models.OrderItem, error) {
 	}
 	code := strings.TrimSpace(ref.Code)
 	if code == "" {
-		return nil, apperr.BadRequest("Provide an item code or item_id")
+		return nil, apperr.BadRequest("Hãy quét hoặc nhập mã item")
 	}
 	item, err := s.repo.OrderItem.FindByCode(code)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, apperr.NotFound("No item matches that scan code")
+			return nil, apperr.NotFound("Không tìm thấy item nào khớp mã vừa quét")
 		}
-		return nil, apperr.Internal("lookup failed").Wrap(err)
+		return nil, apperr.Internal("Không tra cứu được dữ liệu").Wrap(err)
 	}
 	return item, nil
 }
@@ -46,9 +46,9 @@ func (s *QCService) findItemByID(id uint) (*models.OrderItem, error) {
 	item, err := s.repo.OrderItem.FindByID(id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, apperr.NotFound("Item not found")
+			return nil, apperr.NotFound("Không tìm thấy item")
 		}
-		return nil, apperr.Internal("lookup failed").Wrap(err)
+		return nil, apperr.Internal("Không tra cứu được dữ liệu").Wrap(err)
 	}
 	return item, nil
 }
@@ -161,10 +161,10 @@ func (s *QCService) targetBatchItems(item *models.OrderItem, batchItemID *uint) 
 				return []models.BatchItem{bi}, nil
 			}
 		}
-		return nil, apperr.BadRequest("batch_item_id does not belong to this item")
+		return nil, apperr.BadRequest("Mã batch item không thuộc item này")
 	}
 	if len(item.BatchItems) == 0 {
-		return nil, apperr.Unprocessable("Item has no production batch yet; cannot QC")
+		return nil, apperr.Unprocessable("Item chưa được đưa vào batch sản xuất nên chưa thể QC")
 	}
 	return item.BatchItems, nil
 }
@@ -177,14 +177,26 @@ func (s *QCService) Pass(actor Actor, in QCDecisionInput) (*models.OrderItem, er
 		return nil, err
 	}
 	if item.Order != nil && item.Order.ReviewStatus != models.ReviewApproved {
-		return nil, apperr.Unprocessable("Order is not approved for production; cannot QC")
+		return nil, apperr.Unprocessable("Đơn chưa được duyệt để sản xuất nên chưa thể QC")
 	}
 	if item.MockupURL == "" {
-		return nil, apperr.Unprocessable("No mockup URL on file; QC requires a seller mockup to compare against")
+		return nil, apperr.Unprocessable("Item chưa có link mockup của seller để đối chiếu khi QC")
 	}
 	targets, err := s.targetBatchItems(item, in.BatchItemID)
 	if err != nil {
 		return nil, err
+	}
+	// Already fully QC-passed → refuse a re-scan so we don't write a duplicate QC
+	// record; the station surfaces this as "đã QC rồi".
+	allPassed := len(targets) > 0
+	for i := range targets {
+		if targets[i].Status != models.StatusQCPassed {
+			allPassed = false
+			break
+		}
+	}
+	if allPassed {
+		return nil, apperr.Unprocessable("Item này đã QC PASS rồi — không cần quét lại")
 	}
 
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
@@ -192,7 +204,7 @@ func (s *QCService) Pass(actor Actor, in QCDecisionInput) (*models.OrderItem, er
 		for i := range targets {
 			bi := &targets[i]
 			if bi.Status == models.StatusPending {
-				return apperr.Unprocessable("A production part of this item is not produced yet")
+				return apperr.Unprocessable("Item này còn phần sản xuất chưa hoàn thành (chưa in/cắt) — sản xuất xong mới QC được")
 			}
 			var bid = bi.ID
 			if err := txRepo.QC.Create(&models.QCRecord{
@@ -216,7 +228,7 @@ func (s *QCService) Pass(actor Actor, in QCDecisionInput) (*models.OrderItem, er
 		if ae, ok := apperr.As(err); ok {
 			return nil, ae
 		}
-		return nil, apperr.Internal("could not record QC pass").Wrap(err)
+		return nil, apperr.Internal("Không ghi được kết quả QC PASS").Wrap(err)
 	}
 
 	updated, _ := recomputeOrderItemStatus(s.repo, item.ID, actor)
@@ -277,7 +289,7 @@ func (s *QCService) Fail(actor Actor, in QCDecisionInput) (*models.Note, error) 
 		return txRepo.Note.Create(note)
 	})
 	if err != nil {
-		return nil, apperr.Internal("could not record QC fail").Wrap(err)
+		return nil, apperr.Internal("Không ghi được kết quả QC FAIL").Wrap(err)
 	}
 	s.audit.Log(actor, "QC_FAIL", "order_item", &item.ID, "QC fail for item "+item.InternalCode+" ("+reason+")", nil)
 	return note, nil

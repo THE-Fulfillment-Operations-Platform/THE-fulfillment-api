@@ -108,6 +108,10 @@ type PreviewResult struct {
 	ValidRows   int                    `json:"valid_rows"`
 	ErrorRows   int                    `json:"error_rows"`
 	Errors      []models.ImportError   `json:"errors"`
+	// Warnings are non-blocking heads-up rows (e.g. a StoreOrderID that already
+	// exists for the seller). They are still imported — the client highlights them
+	// so staff can eyeball a possible duplicate — and never gate the commit.
+	Warnings []models.ImportError `json:"warnings"`
 }
 
 // csvHeaderMap normalizes a header cell into a canonical key. It NFC-normalizes
@@ -149,6 +153,43 @@ var headerToField = map[string]func(*ImportRow, string){
 	"shippingemail":    func(r *ImportRow, v string) { r.ShippingEmail = v },
 	"ioss":             func(r *ImportRow, v string) { r.IOSS = v },
 	"note":             func(r *ImportRow, v string) { r.Note = v },
+}
+
+// orderImportTemplateHeaders are the exact column labels the parser recognises
+// (every entry normalizes to a headerToField key), in the canonical order sellers
+// fill them in. Keep this in sync with the front-end IMPORT_COLUMNS list.
+var orderImportTemplateHeaders = []string{
+	"StoreOrderID", "Account", "StoreName", "ShippingMethod", "Quantity",
+	"ProductName", "VariantCode", "SKU", "Mã ảnh", "Design", "Mockup",
+	"EngraveText", "ShippingName", "ShippingAddress1", "ShippingAddress2",
+	"ShippingCity", "ShippingZip", "ShippingProvince", "ShippingCountry",
+	"ShippingPhone", "ShippingEmail", "IOSS", "Note",
+}
+
+// orderImportTemplateSample mirrors the two example rows the front-end used to
+// ship in its client-side CSV, so the .xlsx download gives the same guidance.
+var orderImportTemplateSample = [][]string{
+	{"Etsy-9001", "acc-001", "Etsy-Demo", "Standard", "1", "Personalized Wood Sign", "VAR-1", "WOOD-01", "IMG-9001", "design-a", "https://mockups.example.com/etsy-9001-1.png", "Hello", "John Doe", "12 Main St", "", "Austin", "73301", "TX", "US", "+1900000000", "john@example.com", "", "First order"},
+	{"Etsy-9001", "acc-001", "Etsy-Demo", "Standard", "2", "Mica Plate", "VAR-2", "MICA-02", "IMG-9002", "design-b", "https://mockups.example.com/etsy-9001-2.png", "", "John Doe", "12 Main St", "", "Austin", "73301", "TX", "US", "+1900000000", "john@example.com", "", ""},
+}
+
+// orderImportTemplateWidths sets per-column Excel widths (in characters): wide for
+// the mockup URL / addresses / email, compact for quantity / zip.
+var orderImportTemplateWidths = []float64{
+	14, 12, 14, 14, 9, 24, 12, 14, 12, 12, 40, 16, 16, 22, 16, 14, 10, 12, 12, 16, 24, 10, 20,
+}
+
+// OrderImportTemplateXLSX renders the order-import template as a real .xlsx
+// workbook. Columns split cleanly in Excel on any locale — a comma CSV opened
+// with everything crammed into column A on machines whose list separator is ";"
+// — and the Vietnamese header "Mã ảnh" needs no BOM, so nothing comes out garbled.
+func (s *ImportService) OrderImportTemplateXLSX() ([]byte, string, error) {
+	grid := append([][]string{orderImportTemplateHeaders}, orderImportTemplateSample...)
+	data, err := buildTemplateXLSX("Đơn hàng", grid, orderImportTemplateWidths)
+	if err != nil {
+		return nil, "", err
+	}
+	return data, "order-import-template.xlsx", nil
 }
 
 // ParseCSV reads a CSV stream into rows using a flexible header mapping.
@@ -214,7 +255,7 @@ func rowsFromRecords(kind string, records [][]string) ([]ImportRow, error) {
 
 // validateRow checks a single row and returns a blocking error (or nil). The
 // rowNumber is 1-based across data rows (matching the wireframe error table).
-func (s *ImportService) validateRow(rowNumber int, sellerID uint, row ImportRow, seenInFile map[string]bool) *models.ImportError {
+func (s *ImportService) validateRow(rowNumber int, sellerID uint, row ImportRow) *models.ImportError {
 	mkErr := func(field, code, msg, suggestion string) *models.ImportError {
 		return &models.ImportError{
 			RowNumber: rowNumber, StoreOrderID: row.StoreOrderID, SKU: row.SKU,
@@ -264,61 +305,13 @@ func (s *ImportService) validateRow(rowNumber int, sellerID uint, row ImportRow,
 		return mkErr("Design", "DESIGN_INVALID", "Design URL is not a valid http(s) URL",
 			"Sửa lại link design hoặc để trống nếu chưa có")
 	}
-	// Dedup within the file is fine (multiple items per order); dedup against the
-	// database below.
-	key := strings.ToLower(strings.TrimSpace(row.StoreOrderID))
-	seenInFile[key] = true
-
-	if existing, err := s.repo.Order.FindBySellerAndStoreOrder(sellerID, strings.TrimSpace(row.StoreOrderID)); err == nil {
-		// A rejected / needs-correction / cancelled order is "dead": let the seller
-		// re-upload it — Commit overwrites that order in place (revive). Only an
-		// active order (pending review or approved / in production) blocks a dup.
-		if !isRevivable(existing) {
-			return mkErr("StoreOrderID", "ORD_DUPLICATE", "An order with this StoreOrderID already exists for the seller",
-				"Review source/idempotency")
-		}
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return mkErr("StoreOrderID", "LOOKUP_FAILED", "Could not check for duplicate order", "Retry import")
-	}
+	// StoreOrderID uniqueness is intentionally NOT enforced here: a store order id
+	// is a repeatable reference label (many items per order, and the same id may
+	// legitimately recur across imports). Every row still becomes its own item with
+	// its own unique InternalCode. A recurring StoreOrderID is surfaced by Preview
+	// as a non-blocking warning (so staff can double-check with the customer), never
+	// a blocking error.
 	return nil
-}
-
-// isRevivable reports whether an existing order is "dead" and may therefore be
-// overwritten by a fresh import of the same StoreOrderID: rejected, sent back for
-// correction, or cancelled. Such orders never entered production, so overwriting
-// them in place is safe and keeps the (seller, store_order) uniqueness intact.
-func isRevivable(o *models.Order) bool {
-	switch o.ReviewStatus {
-	case models.ReviewRejected, models.ReviewNeedsFix, models.ReviewCancelled:
-		return true
-	}
-	switch o.CancellationStatus {
-	case models.CancellationSeller, models.CancellationApproved:
-		return true
-	}
-	return false
-}
-
-// wipeOrderItems hard-deletes an order's items and their attached assets/notes so
-// a revived order can be rebuilt without colliding with the unique index on
-// order_items.internal_code. A revivable order was never approved, so it has no
-// batch items or packages to clean up.
-func wipeOrderItems(tx *gorm.DB, orderID uint) error {
-	var itemIDs []uint
-	if err := tx.Model(&models.OrderItem{}).Where("order_id = ?", orderID).Pluck("id", &itemIDs).Error; err != nil {
-		return err
-	}
-	if len(itemIDs) > 0 {
-		if err := tx.Unscoped().Where("order_item_id IN ?", itemIDs).Delete(&models.ItemAsset{}).Error; err != nil {
-			return err
-		}
-		if err := tx.Unscoped().
-			Where("entity_type = ? AND entity_id IN ?", models.EntityOrderItem, itemIDs).
-			Delete(&models.Note{}).Error; err != nil {
-			return err
-		}
-	}
-	return tx.Unscoped().Where("order_id = ?", orderID).Delete(&models.OrderItem{}).Error
 }
 
 // Preview validates every row, persists the valid rows on an ImportJob (status
@@ -332,18 +325,31 @@ func (s *ImportService) Preview(actor Actor, sellerID uint, source, filename str
 		return nil, apperr.BadRequest("no rows to import")
 	}
 
-	seenInFile := map[string]bool{}
 	var validRows []ImportRow
 	var importErrors []models.ImportError
+	var warnings []models.ImportError
 	orderSet := map[string]bool{}
 
 	for i, row := range rows {
-		if e := s.validateRow(i+1, sellerID, row, seenInFile); e != nil {
+		if e := s.validateRow(i+1, sellerID, row); e != nil {
 			importErrors = append(importErrors, *e)
 			continue
 		}
 		validRows = append(validRows, row)
 		orderSet[strings.ToLower(strings.TrimSpace(row.StoreOrderID))] = true
+		// Non-blocking heads-up: this StoreOrderID already exists for the seller
+		// from an earlier import. We still import it as a brand-new, independent
+		// order with its own internal code — a store order id is a repeatable label
+		// — but flag the row so staff can confirm with the customer it isn't an
+		// accidental re-send.
+		if _, err := s.repo.Order.FindBySellerAndStoreOrder(sellerID, strings.TrimSpace(row.StoreOrderID)); err == nil {
+			warnings = append(warnings, models.ImportError{
+				RowNumber: i + 1, StoreOrderID: row.StoreOrderID, SKU: row.SKU,
+				Field: "StoreOrderID", ErrorCode: "ORD_DUPLICATE",
+				Message:    "StoreOrderID đã tồn tại cho seller này — không chặn, kiểm tra kẻo trùng",
+				Suggestion: "Xác nhận với khách nếu đây là đơn đã có; nếu đúng là đơn mới thì bỏ qua",
+			})
+		}
 	}
 
 	raw, _ := models.ToJSONB(validRows)
@@ -374,7 +380,7 @@ func (s *ImportService) Preview(actor Actor, sellerID uint, source, filename str
 	return &PreviewResult{
 		ImportJobID: job.ID, Status: job.Status, TotalRows: len(rows),
 		OrderCount: len(orderSet), ValidRows: len(validRows), ErrorRows: len(importErrors),
-		Errors: importErrors,
+		Errors: importErrors, Warnings: warnings,
 	}, nil
 }
 
@@ -430,26 +436,11 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 		txRepo := repositories.New(tx)
 		for _, key := range orderKeys {
 			g := groups[key]
-			// Revive a dead order (rejected/cancelled/needs-correction) in place,
-			// otherwise create a fresh one. An active duplicate can't reach here —
-			// Preview blocks it as ORD_DUPLICATE.
-			existing, ferr := txRepo.Order.FindBySellerAndStoreOrder(*job.SellerID, key)
-			if ferr != nil && !errors.Is(ferr, gorm.ErrRecordNotFound) {
-				return ferr
-			}
-			reviving := ferr == nil && isRevivable(existing)
-			if ferr == nil && !reviving {
-				continue // defensive: an active duplicate slipped past preview
-			}
-
-			order := existing
-			if reviving {
-				if err := wipeOrderItems(tx, order.ID); err != nil {
-					return err
-				}
-			} else {
-				order = &models.Order{}
-			}
+			// StoreOrderID is a repeatable reference label, not a key: always create
+			// a fresh, independent order with its own system-generated internal code.
+			// The same store order id arriving again (a later import) simply becomes
+			// another order — never an overwrite of an existing one.
+			order := &models.Order{}
 			order.StoreOrderID = key
 			order.StoreOrderRef = key
 			order.SellerID = *job.SellerID
@@ -478,22 +469,17 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 			order.CancellationRequestedByID = nil
 			order.CancellationRequestedAt = nil
 			order.ImportJobID = &job.ID
-
-			if reviving {
-				if err := txRepo.Order.Update(order); err != nil {
-					return err
-				}
-			} else {
-				order.CreatedByID = actor.IDPtr()
-				if err := txRepo.Order.Create(order); err != nil {
-					return err
-				}
-				order.InternalCode = fmt.Sprintf("ORD-%06d", order.ID)
-				if err := txRepo.Order.Update(order); err != nil {
-					return err
-				}
+			order.CreatedByID = actor.IDPtr()
+			if err := txRepo.Order.Create(order); err != nil {
+				return err
+			}
+			// The base code needs the DB-assigned id, so stamp it after Create.
+			order.InternalCode = internalBaseCode(order.ID)
+			if err := txRepo.Order.Update(order); err != nil {
+				return err
 			}
 
+			total := len(g.items)
 			for lineNo, row := range g.items {
 				skuCode := models.NormalizeCode(row.SKU)
 				sku, _ := txRepo.SKU.FindByCode(skuCode)
@@ -508,7 +494,7 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 				item := &models.OrderItem{
 					OrderID:        order.ID,
 					LineNo:         lineNo + 1,
-					InternalCode:   fmt.Sprintf("ORD-%06d_%d", order.ID, lineNo+1),
+					InternalCode:   itemInternalCode(order.ID, lineNo+1, total),
 					SKUID:          skuID,
 					SKUCode:        skuCode,
 					ProductName:    row.ProductName,
@@ -587,6 +573,20 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// internalBaseCode returns the workshop-style 6-digit order base code (e.g.
+// "100035"), derived from the order's DB id so it is globally unique, monotonic,
+// and independent of the (freely repeating) StoreOrderID.
+func internalBaseCode(orderID uint) string {
+	return strconv.Itoa(100000 + int(orderID))
+}
+
+// itemInternalCode formats a workshop-style item code — "100035_1/5" — as
+// base_position/total: the item's position within its order out of the order's
+// total item count. This is the QR/tem code the workshop and scan stations read.
+func itemInternalCode(orderID uint, pos, total int) string {
+	return fmt.Sprintf("%s_%d/%d", internalBaseCode(orderID), pos, total)
 }
 
 // looksLikeURL reports whether v appears to be an attempted http(s) link (so it

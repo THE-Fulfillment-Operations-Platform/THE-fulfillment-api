@@ -1,6 +1,7 @@
 package repositories
 
 import (
+	"fmt"
 	"time"
 
 	"gorm.io/gorm"
@@ -83,6 +84,41 @@ func (r *OrderRepository) FindBySellerAndStoreOrder(sellerID uint, storeOrderID 
 		return nil, err
 	}
 	return &o, nil
+}
+
+// StoreOrderDupKey builds the lookup key used by DuplicateStoreOrderIDs.
+func StoreOrderDupKey(sellerID uint, storeOrderID string) string {
+	return fmt.Sprintf("%d|%s", sellerID, storeOrderID)
+}
+
+// DuplicateStoreOrderIDs returns the set of (seller_id, store_order_id) pairs —
+// keyed via StoreOrderDupKey — that map to MORE THAN ONE order, restricted to the
+// given store order ids. It counts across all (non-deleted) orders, not just a
+// single page, so the "duplicate" flag is stable regardless of pagination. A store
+// order id used by only one order (however many items) is not returned.
+func (r *OrderRepository) DuplicateStoreOrderIDs(storeOrderIDs []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	if len(storeOrderIDs) == 0 {
+		return out, nil
+	}
+	type dupRow struct {
+		SellerID     uint
+		StoreOrderID string
+	}
+	var rows []dupRow
+	err := r.db.Model(&models.Order{}).
+		Select("seller_id, store_order_id").
+		Where("store_order_id IN ?", storeOrderIDs).
+		Group("seller_id, store_order_id").
+		Having("COUNT(*) > 1").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		out[StoreOrderDupKey(row.SellerID, row.StoreOrderID)] = true
+	}
+	return out, nil
 }
 
 func (r *OrderRepository) baseQuery(f OrderFilter) *gorm.DB {

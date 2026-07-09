@@ -572,3 +572,30 @@ var viDiacritics = strings.NewReplacer(
 func removeVietnameseDiacritics(s string) string {
 	return viDiacritics.Replace(s)
 }
+
+// ---------- Sample template download ----------
+
+// masterTemplateHeaders are the only columns the importer reads. The file the
+// factory uploads may carry many more columns — those are ignored — but the
+// sample we hand back keeps just these two so the required format is obvious.
+var masterTemplateHeaders = []string{"SKU", "Loại VL"}
+
+// masterTemplateSample is a handful of example rows so the user can see exactly
+// what a valid SKU / Loại VL pairing looks like before filling in their own.
+var masterTemplateSample = [][]string{
+	{"BRA-1.6-KEP", "Mica trong 3 ly"},
+	{"LWD-12IN", "Gỗ 5 ly 3 lớp"},
+	{"NEW-SKU-X", "MDF 3 ly 80x120"},
+}
+
+// MasterTemplateXLSX renders the master-data import sample as a real .xlsx
+// workbook (SKU + Loại VL columns split cleanly in Excel on any locale, unlike
+// the old comma CSV that opened as garbled single-column text).
+func (s *MasterImportService) MasterTemplateXLSX() ([]byte, string, error) {
+	grid := append([][]string{masterTemplateHeaders}, masterTemplateSample...)
+	data, err := buildTemplateXLSX("Master data", grid, []float64{24, 28})
+	if err != nil {
+		return nil, "", err
+	}
+	return data, "master-data-template.xlsx", nil
+}

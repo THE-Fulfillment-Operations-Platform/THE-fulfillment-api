@@ -2,6 +2,7 @@ package services
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -18,9 +19,12 @@ type NoteService struct {
 	audit *AuditService
 }
 
-// NoteInput creates or updates a note. Severity/status default sensibly.
+// NoteInput creates or updates a note. Severity/status default sensibly. Title is
+// NOT bound as required here because the SAME struct backs partial updates (e.g.
+// "resolve" sends only status + is_required_attention); Create validates title in
+// the service instead so a partial update isn't rejected for a missing title.
 type NoteInput struct {
-	Title               string              `json:"title" binding:"required"`
+	Title               string              `json:"title"`
 	Body                string              `json:"body"`
 	ReasonCode          string              `json:"reason_code"`
 	Severity            models.NoteSeverity `json:"severity"`
@@ -35,6 +39,9 @@ type NoteInput struct {
 }
 
 func (s *NoteService) Create(actor Actor, in NoteInput) (*models.Note, error) {
+	if strings.TrimSpace(in.Title) == "" {
+		return nil, apperr.BadRequest("Tiêu đề ghi chú là bắt buộc")
+	}
 	severity := in.Severity
 	if severity == "" {
 		severity = models.SeverityNormal

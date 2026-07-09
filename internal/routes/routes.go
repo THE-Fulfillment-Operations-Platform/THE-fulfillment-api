@@ -140,6 +140,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		orders.GET("", middleware.RequireRoles(roleInternal...), h.ListOrders)
 		orders.GET("/:id", middleware.RequireRoles(roleInternal...), h.GetOrder)
 		orders.POST("", middleware.RequireRoles(roleOpsAdmin...), h.CreateOrderDirect)
+		orders.GET("/import/template.xlsx", middleware.RequireRoles(roleOpsAdmin...), h.DownloadOrderImportTemplate)
 		orders.POST("/import", middleware.RequireRoles(roleOpsAdmin...), h.ImportOrders)
 		orders.POST("/import/commit", middleware.RequireRoles(roleOpsAdmin...), h.CommitImport)
 	}
@@ -150,6 +151,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	// seed Materials, SKUs and the SKU↔Material mapping (preview → commit).
 	masterData := authd.Group("/master-data", middleware.RequireRoles(roleOpsAdmin...))
 	{
+		masterData.GET("/template.xlsx", h.DownloadMasterTemplate)
 		masterData.POST("/import/preview", h.MasterImportPreview)
 		masterData.POST("/import/commit", h.MasterImportCommit)
 		masterData.GET("/import-jobs", h.ListMasterImportJobs)
@@ -238,6 +240,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		seller.GET("/orders", h.SellerOrders)
 		seller.GET("/orders/:id", h.SellerOrderDetail)
 		// Seller self-upload: seller_id is forced to the authenticated seller.
+		seller.GET("/orders/import/template.xlsx", h.DownloadOrderImportTemplate)
 		seller.POST("/orders/import", h.SellerImportOrders)
 		seller.POST("/orders/import/commit", h.SellerCommitImport)
 		seller.POST("/orders/:id/cancel", h.SellerCancelOrder)

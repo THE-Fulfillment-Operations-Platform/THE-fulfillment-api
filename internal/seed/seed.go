@@ -234,7 +234,7 @@ func seedDemoOrders(db *gorm.DB, seller *models.Seller, skus map[string]models.S
 			if err := tx.Create(&order).Error; err != nil {
 				return err
 			}
-			order.InternalCode = fmt.Sprintf("ORD-%06d", order.ID)
+			order.InternalCode = fmt.Sprintf("%d", 100000+order.ID)
 			if err := tx.Save(&order).Error; err != nil {
 				return err
 			}
@@ -249,7 +249,7 @@ func seedDemoOrders(db *gorm.DB, seller *models.Seller, skus map[string]models.S
 				}
 				item := models.OrderItem{
 					OrderID: order.ID, LineNo: i + 1,
-					InternalCode: fmt.Sprintf("ORD-%06d_%d", order.ID, i+1),
+					InternalCode: fmt.Sprintf("%d_%d/%d", 100000+order.ID, i+1, len(od.items)),
 					SKUID:        &sku.ID, SKUCode: sku.Code, ProductName: sku.ProductName,
 					Quantity: it.qty, MockupURL: it.mockup,
 					InternalStatus: models.StatusPending, DesignStatus: ds,

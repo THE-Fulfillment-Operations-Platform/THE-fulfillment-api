@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -124,6 +125,20 @@ func (h *Handlers) SellerImportOrders(c *gin.Context) {
 		return
 	}
 	h.runImport(c, sellerID, rows, source, filename, commit)
+}
+
+// DownloadOrderImportTemplate streams the order-import template as an .xlsx
+// download (all columns split cleanly in Excel on any locale, unlike a comma
+// CSV). Shared by the ops import screen and the seller self-upload screen.
+// GET /api/orders/import/template.xlsx and /api/seller/orders/import/template.xlsx
+func (h *Handlers) DownloadOrderImportTemplate(c *gin.Context) {
+	data, filename, err := h.svc.Import.OrderImportTemplateXLSX()
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
+	c.Data(http.StatusOK, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", data)
 }
 
 // CommitImport commits a previously previewed import job.

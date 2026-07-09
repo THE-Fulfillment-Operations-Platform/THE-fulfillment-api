@@ -22,7 +22,14 @@ type OrderService struct {
 
 func (s *OrderService) ListOrders(f repositories.OrderFilter) ([]models.Order, int64, error) {
 	f.Page = f.Page.Normalize()
-	return s.repo.Order.List(f)
+	rows, total, err := s.repo.Order.List(f)
+	if err != nil {
+		return rows, total, err
+	}
+	if err := annotateStoreOrderDupSlice(s.repo, rows); err != nil {
+		return rows, total, err
+	}
+	return rows, total, nil
 }
 
 func (s *OrderService) GetOrder(id uint) (*models.Order, error) {
@@ -40,7 +47,59 @@ func (s *OrderService) GetOrder(id uint) (*models.Order, error) {
 
 func (s *OrderService) ListItems(f repositories.ItemFilter) ([]models.OrderItem, int64, error) {
 	f.Page = f.Page.Normalize()
-	return s.repo.OrderItem.List(f)
+	rows, total, err := s.repo.OrderItem.List(f)
+	if err != nil {
+		return rows, total, err
+	}
+	orders := make([]*models.Order, 0, len(rows))
+	for i := range rows {
+		if rows[i].Order != nil {
+			orders = append(orders, rows[i].Order)
+		}
+	}
+	if err := annotateStoreOrderDup(s.repo, orders); err != nil {
+		return rows, total, err
+	}
+	return rows, total, nil
+}
+
+// annotateStoreOrderDup sets Order.StoreOrderDup on every order whose StoreOrderID
+// is shared by more than one order for the same seller. Used by list endpoints so
+// Orders / Chờ duyệt / seller screens highlight repeated store order ids the same
+// way the importer does — with a single extra query, stable across pagination.
+func annotateStoreOrderDup(repo *repositories.Repositories, orders []*models.Order) error {
+	if len(orders) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	ids := make([]string, 0, len(orders))
+	for _, o := range orders {
+		if o == nil || o.StoreOrderID == "" || seen[o.StoreOrderID] {
+			continue
+		}
+		seen[o.StoreOrderID] = true
+		ids = append(ids, o.StoreOrderID)
+	}
+	dup, err := repo.Order.DuplicateStoreOrderIDs(ids)
+	if err != nil {
+		return err
+	}
+	for _, o := range orders {
+		if o != nil && dup[repositories.StoreOrderDupKey(o.SellerID, o.StoreOrderID)] {
+			o.StoreOrderDup = true
+		}
+	}
+	return nil
+}
+
+// annotateStoreOrderDupSlice is annotateStoreOrderDup for a value slice: it marks
+// StoreOrderDup in place on each element via a pointer into the backing array.
+func annotateStoreOrderDupSlice(repo *repositories.Repositories, rows []models.Order) error {
+	ptrs := make([]*models.Order, len(rows))
+	for i := range rows {
+		ptrs[i] = &rows[i]
+	}
+	return annotateStoreOrderDup(repo, ptrs)
 }
 
 func (s *OrderService) GetItem(id uint) (*models.OrderItem, error) {
@@ -228,9 +287,8 @@ func (s *OrderService) CreateOrderDirect(actor Actor, in DirectOrderInput) (*mod
 	if _, err := s.repo.Seller.FindByID(in.SellerID); err != nil {
 		return nil, apperr.BadRequest("seller_id does not reference an existing seller")
 	}
-	if _, err := s.repo.Order.FindBySellerAndStoreOrder(in.SellerID, in.StoreOrderID); err == nil {
-		return nil, apperr.Conflict("An order with this StoreOrderID already exists for the seller")
-	}
+	// StoreOrderID is a repeatable reference label, not a unique key — so no
+	// duplicate check here. Every order gets its own system-generated InternalCode.
 
 	var order *models.Order
 	err := s.repo.DB.Transaction(func(tx *gorm.DB) error {
@@ -249,7 +307,7 @@ func (s *OrderService) CreateOrderDirect(actor Actor, in DirectOrderInput) (*mod
 		if err := txRepo.Order.Create(order); err != nil {
 			return err
 		}
-		order.InternalCode = "ORD-" + pad6(order.ID)
+		order.InternalCode = internalBaseCode(order.ID)
 		if err := txRepo.Order.Update(order); err != nil {
 			return err
 		}
@@ -265,7 +323,7 @@ func (s *OrderService) CreateOrderDirect(actor Actor, in DirectOrderInput) (*mod
 				ds = models.DesignMissing
 			}
 			item := &models.OrderItem{
-				OrderID: order.ID, LineNo: i + 1, InternalCode: "ORD-" + pad6(order.ID) + "_" + itoa(i+1),
+				OrderID: order.ID, LineNo: i + 1, InternalCode: itemInternalCode(order.ID, i+1, len(in.Items)),
 				SKUID: skuID, SKUCode: skuCode, ProductName: it.ProductName, VariantCode: it.VariantCode,
 				Quantity: maxInt(it.Quantity, 1), ImageCode: it.ImageCode, MockupURL: it.MockupURL, EngraveText: it.EngraveText,
 				InternalStatus: models.StatusPending, DesignStatus: ds,
@@ -291,8 +349,11 @@ type SellerOrderView struct {
 	ID           uint                `json:"id"`
 	InternalCode string              `json:"internal_code"`
 	StoreOrderID string              `json:"store_order_id"`
-	StoreName    string              `json:"store_name"`
-	Status       models.SellerStatus `json:"status"` // production phase (only meaningful once approved)
+	// StoreOrderDup: this store order id is shared by more than one order (repeated
+	// upload) — the seller UI flags it so they can spot an accidental re-send.
+	StoreOrderDup bool                `json:"store_order_dup"`
+	StoreName     string              `json:"store_name"`
+	Status        models.SellerStatus `json:"status"` // production phase (only meaningful once approved)
 	// Review / cancellation state. The seller UI shows the review status until an
 	// order is APPROVED, then falls through to the production Status above.
 	ReviewStatus       models.ReviewStatus       `json:"review_status"`
@@ -320,7 +381,8 @@ func toSellerView(o models.Order, withItems bool) SellerOrderView {
 	action := sellerCancelActionForOrder(&o)
 	v := SellerOrderView{
 		ID: o.ID, InternalCode: o.InternalCode, StoreOrderID: o.StoreOrderID,
-		StoreName: o.StoreName, Status: o.SellerStatus,
+		StoreOrderDup: o.StoreOrderDup,
+		StoreName:     o.StoreName, Status: o.SellerStatus,
 		ReviewStatus: o.ReviewStatus, CancellationStatus: o.CancellationStatus, ReviewNote: o.ReviewNote,
 		CanCancel:              action == SellerActionCancel,
 		CanRequestCancellation: action == SellerActionRequest,
@@ -345,6 +407,9 @@ func (s *OrderService) SellerOrders(sellerID uint, f repositories.OrderFilter) (
 	if err != nil {
 		return nil, 0, apperr.Internal("could not list seller orders").Wrap(err)
 	}
+	if err := annotateStoreOrderDupSlice(s.repo, orders); err != nil {
+		return nil, 0, apperr.Internal("could not flag duplicate store orders").Wrap(err)
+	}
 	out := make([]SellerOrderView, 0, len(orders))
 	for _, o := range orders {
 		out = append(out, toSellerView(o, false))
@@ -363,14 +428,6 @@ func (s *OrderService) SellerOrderDetail(sellerID, orderID uint) (*SellerOrderVi
 	}
 	v := toSellerView(*o, true)
 	return &v, nil
-}
-
-func pad6(n uint) string {
-	s := itoa(int(n))
-	for len(s) < 6 {
-		s = "0" + s
-	}
-	return s
 }
 
 func itoa(n int) string {

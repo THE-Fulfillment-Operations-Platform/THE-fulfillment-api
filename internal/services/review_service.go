@@ -136,7 +136,14 @@ func (s *ReviewService) ListReviewOrders(f repositories.OrderFilter) ([]models.O
 	if f.ReviewStatus == "" && len(f.ReviewStatuses) == 0 {
 		f.ReviewStatuses = []string{string(models.ReviewPending), string(models.ReviewNeedsFix)}
 	}
-	return s.repo.Order.List(f)
+	rows, total, err := s.repo.Order.List(f)
+	if err != nil {
+		return rows, total, err
+	}
+	if err := annotateStoreOrderDupSlice(s.repo, rows); err != nil {
+		return rows, total, err
+	}
+	return rows, total, nil
 }
 
 // ReviewIssue is a single validation finding surfaced to the reviewer so they can
@@ -374,7 +381,14 @@ func (s *ReviewService) SellerRequestCancellation(actor Actor, sellerID, orderID
 func (s *ReviewService) ListCancellationRequests(f repositories.OrderFilter) ([]models.Order, int64, error) {
 	f.Page = f.Page.Normalize()
 	f.CancellationStatus = string(models.CancellationRequested)
-	return s.repo.Order.List(f)
+	rows, total, err := s.repo.Order.List(f)
+	if err != nil {
+		return rows, total, err
+	}
+	if err := annotateStoreOrderDupSlice(s.repo, rows); err != nil {
+		return rows, total, err
+	}
+	return rows, total, nil
 }
 
 // ApproveCancellation approves a pending cancellation request and cancels the

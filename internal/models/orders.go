@@ -45,7 +45,7 @@ type Order struct {
 	Base
 	InternalCode string `json:"internal_code" gorm:"uniqueIndex;size:48;not null"`
 	StoreOrderID string `json:"store_order_id" gorm:"size:120;index;not null"`
-	SellerID     uint   `json:"seller_id" gorm:"index;not null;uniqueIndex:idx_seller_store_order"`
+	SellerID     uint   `json:"seller_id" gorm:"index;not null"`
 	Seller       Seller `json:"seller,omitempty" gorm:"foreignKey:SellerID"`
 	StoreID      *uint  `json:"store_id" gorm:"index"`
 	StoreName    string `json:"store_name" gorm:"size:160"`
@@ -68,9 +68,12 @@ type Order struct {
 	IOSS             string `json:"ioss" gorm:"size:60"`
 	Note             string `json:"note" gorm:"size:1000"`
 
-	// StoreOrderRef is duplicated into a unique composite index with SellerID so a
-	// seller cannot import the same store order twice.
-	StoreOrderRef string `json:"-" gorm:"size:120;uniqueIndex:idx_seller_store_order"`
+	// StoreOrderRef mirrors StoreOrderID. It once backed a unique (seller,
+	// store_order) index, but a StoreOrderID is a repeatable reference label — the
+	// same store order legitimately spans many items and re-imports — so uniqueness
+	// now lives solely on the system-generated InternalCode. Kept as a plain indexed
+	// column for lookups; the legacy unique index is dropped in AutoMigrate.
+	StoreOrderRef string `json:"-" gorm:"size:120;index"`
 
 	SellerStatus SellerStatus `json:"seller_status" gorm:"size:20;not null;index;default:'PRODUCTION'"`
 	ImportJobID  *uint        `json:"import_job_id" gorm:"index"`
@@ -95,6 +98,12 @@ type Order struct {
 	CancellationResolutionNote string             `json:"cancellation_resolution_note" gorm:"size:1000"`
 
 	Items []OrderItem `json:"items,omitempty" gorm:"foreignKey:OrderID"`
+
+	// StoreOrderDup is a computed, non-persisted flag: true when this StoreOrderID
+	// is shared by more than one order for the same seller (a repeated store order
+	// id, not merely multiple items of one order). List endpoints set it so every
+	// screen can highlight possible duplicates the same way the importer does.
+	StoreOrderDup bool `json:"store_order_dup" gorm:"-"`
 }
 
 func (Order) TableName() string { return "orders" }

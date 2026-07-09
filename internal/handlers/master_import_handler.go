@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"net/http"
 	"path/filepath"
 	"strings"
 
@@ -82,6 +83,19 @@ func (h *Handlers) MasterImportPreview(c *gin.Context) {
 		return
 	}
 	response.OK(c, preview)
+}
+
+// DownloadMasterTemplate streams the master-data import sample as an .xlsx
+// download (SKU + Loại VL columns split cleanly in Excel on any locale).
+// GET /api/master-data/template.xlsx
+func (h *Handlers) DownloadMasterTemplate(c *gin.Context) {
+	data, filename, err := h.svc.MasterImport.MasterTemplateXLSX()
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
+	c.Data(http.StatusOK, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", data)
 }
 
 // MasterImportCommit applies a previously previewed master-data import job.
