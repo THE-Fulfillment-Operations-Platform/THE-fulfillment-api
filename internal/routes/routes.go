@@ -17,11 +17,14 @@ import (
 )
 
 // resetEnabled blocks the destructive data-reset route unless ALLOW_DATA_RESET
-// is on and we're not in production — a safety valve against accidental wipes.
+// is on. This is an operator kill-switch, NOT an environment gate: the route is
+// a normal OWNER-only feature (role + a server-verified typed confirmation), so
+// it is allowed to run in production once the flag is turned on. Flip the flag
+// off to disable the feature entirely.
 func resetEnabled(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !cfg.AllowDataReset || cfg.IsProduction() {
-			response.AbortForbidden(c, "Chức năng xoá dữ liệu đang tắt trên môi trường này")
+		if !cfg.AllowDataReset {
+			response.AbortForbidden(c, "Chức năng xoá dữ liệu đang tắt (ALLOW_DATA_RESET=false)")
 			return
 		}
 		c.Next()
