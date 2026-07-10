@@ -43,6 +43,12 @@ type Config struct {
 
 	// Ops / danger zone
 	AllowDataReset bool
+
+	// Maintenance: periodically hard-delete rows soft-deleted longer ago than the
+	// retention window, so GORM soft-deletes don't accumulate without bound.
+	PurgeEnabled       bool
+	PurgeRetentionDays int
+	PurgeInterval      time.Duration
 }
 
 // Load reads configuration from a .env file (if present) and the process
@@ -76,6 +82,21 @@ func Load() *Config {
 		DemoPassword:   getEnv("SEED_DEMO_PASSWORD", "Password123!"),
 
 		AllowDataReset: getEnvAsBool("ALLOW_DATA_RESET", false),
+
+		PurgeEnabled:       getEnvAsBool("PURGE_ENABLED", true),
+		PurgeRetentionDays: getEnvAsInt("PURGE_RETENTION_DAYS", 30),
+		PurgeInterval:      time.Duration(getEnvAsInt("PURGE_INTERVAL_HOURS", 24)) * time.Hour,
+	}
+
+	// Guard the purge window: a non-positive retention would hard-delete every
+	// soft-deleted row immediately, so a misconfigured value falls back to 30 days.
+	if cfg.PurgeRetentionDays <= 0 {
+		log.Printf("config: PURGE_RETENTION_DAYS=%d invalid (must be > 0); using 30", cfg.PurgeRetentionDays)
+		cfg.PurgeRetentionDays = 30
+	}
+	if cfg.PurgeInterval <= 0 {
+		log.Printf("config: PURGE_INTERVAL_HOURS invalid (must be > 0); using 24h")
+		cfg.PurgeInterval = 24 * time.Hour
 	}
 
 	return cfg

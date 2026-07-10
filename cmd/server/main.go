@@ -15,6 +15,7 @@ import (
 	"the-fulfillment/backend/internal/config"
 	"the-fulfillment/backend/internal/database"
 	"the-fulfillment/backend/internal/handlers"
+	"the-fulfillment/backend/internal/maintenance"
 	"the-fulfillment/backend/internal/repositories"
 	"the-fulfillment/backend/internal/routes"
 	"the-fulfillment/backend/internal/seed"
@@ -50,6 +51,15 @@ func main() {
 	svc := services.New(repo, jwtManager, carrier)
 	h := handlers.New(svc)
 	router := routes.New(cfg, h, jwtManager)
+
+	// Background maintenance: periodically hard-delete rows soft-deleted longer
+	// ago than the retention window, so GORM soft-deletes don't pile up forever.
+	purgeCtx, stopPurge := context.WithCancel(context.Background())
+	defer stopPurge()
+	if cfg.PurgeEnabled {
+		maintenance.NewPurgeScheduler(repo.Admin, cfg.PurgeRetentionDays, cfg.PurgeInterval).Start(purgeCtx)
+		log.Printf("maintenance: purge scheduler on (retention=%dd, interval=%s)", cfg.PurgeRetentionDays, cfg.PurgeInterval)
+	}
 
 	// Dev convenience: free the port if a previous run left an orphaned process
 	// holding it (a `go run` restart gotcha). No-op in production.
