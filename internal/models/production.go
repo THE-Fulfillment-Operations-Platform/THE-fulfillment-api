@@ -18,6 +18,17 @@ type Batch struct {
 	CreatedBy   *User          `json:"created_by,omitempty" gorm:"foreignKey:CreatedByID"`
 
 	Items []BatchItem `json:"items,omitempty" gorm:"foreignKey:BatchID"`
+
+	// ---- Parent/child batches (split by a material's production quota) ----
+	// A "parent" batch groups several "child" batches; each child holds at most
+	// Material.ProductsPerUnit products. A flat (un-split) batch leaves all of these
+	// at their zero value. Children carry ParentBatchID + Sequence and hold the
+	// items; the parent holds no items and only aggregates the children.
+	ParentBatchID *uint   `json:"parent_batch_id" gorm:"index"`
+	IsParent      bool    `json:"is_parent" gorm:"not null;default:false"`
+	Sequence      int     `json:"sequence" gorm:"not null;default:0"`    // 1..k position of a child within its parent
+	ChildCount    int     `json:"child_count" gorm:"not null;default:0"` // number of children (on the parent)
+	ChildBatches  []Batch `json:"child_batches,omitempty" gorm:"foreignKey:ParentBatchID"`
 }
 
 func (Batch) TableName() string { return "batches" }

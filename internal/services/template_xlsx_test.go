@@ -56,10 +56,18 @@ func TestMasterTemplateXLSX_RoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 3 {
-		t.Fatalf("want 3 sample rows, got %d", len(rows))
+	if len(rows) != 4 {
+		t.Fatalf("want 4 sample rows, got %d", len(rows))
 	}
 	if rows[0].SKU != "BRA-1.6-KEP" || rows[0].Material != "Mica trong 3 ly" {
 		t.Fatalf("row0 not split cleanly: %+v", rows[0])
+	}
+	// The combo sample row must survive the round-trip and split into 2 materials.
+	combo := rows[3]
+	if combo.SKU != "COMBO-A2-GAI" {
+		t.Fatalf("combo row not split cleanly: %+v", combo)
+	}
+	if mats := splitMaterials(combo.Material); len(mats) != 2 {
+		t.Fatalf("combo cell should split into 2 materials, got %v", mats)
 	}
 }

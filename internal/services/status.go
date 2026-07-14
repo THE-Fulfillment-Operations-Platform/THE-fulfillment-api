@@ -62,6 +62,44 @@ func recomputeBatchStatus(repo *repositories.Repositories, batchID uint, actor A
 		}
 		_ = recordStatus(repo, models.EntityBatch, batch.ID, old, string(newStatus), actor, "derived from batch items")
 	}
+	// A child batch's change rolls up to its parent's aggregate status.
+	if batch.ParentBatchID != nil {
+		return recomputeParentBatchStatus(repo, *batch.ParentBatchID, actor)
+	}
+	return nil
+}
+
+// recomputeParentBatchStatus recalculates and persists a parent batch's status as
+// the least-advanced status across its child batches — the parent reaches
+// QC_PASSED only when every child has. Called whenever a child's status changes
+// (QC roll-up or the production board cascade). A batch with no children is left
+// untouched, so it is safe to call on any batch id.
+func recomputeParentBatchStatus(repo *repositories.Repositories, parentID uint, actor Actor) error {
+	children, err := repo.Batch.ChildBatchesFor(parentID)
+	if err != nil {
+		return err
+	}
+	if len(children) == 0 {
+		return nil
+	}
+	newStatus := models.StatusQCPassed
+	for _, c := range children {
+		if c.Status.Rank() < newStatus.Rank() {
+			newStatus = c.Status
+		}
+	}
+	parent, err := repo.Batch.FindByID(parentID)
+	if err != nil {
+		return err
+	}
+	if newStatus != parent.Status {
+		old := string(parent.Status)
+		parent.Status = newStatus
+		if err := repo.Batch.Update(parent); err != nil {
+			return err
+		}
+		_ = recordStatus(repo, models.EntityBatch, parent.ID, old, string(newStatus), actor, "derived from child batches")
+	}
 	return nil
 }
 

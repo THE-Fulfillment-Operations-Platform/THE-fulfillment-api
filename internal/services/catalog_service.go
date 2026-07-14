@@ -22,6 +22,29 @@ type MaterialInput struct {
 	Code        string `json:"code" binding:"required"`
 	Name        string `json:"name" binding:"required"`
 	Description string `json:"description"`
+	// ProductsPerUnit is the production quota (max products per unit of this
+	// material). Only OWNER may set it; other roles' values are ignored. nil or ≤0
+	// means unlimited (batches for this material are never split).
+	ProductsPerUnit *int `json:"products_per_unit"`
+}
+
+// MaterialUpdateInput is a partial-update payload for a material. Unlike
+// MaterialInput, code/name are NOT required: the Materials screen edits name /
+// description / quota and never resends the (immutable) code — mirroring the
+// SKUUpdateInput convention so a code-less update isn't rejected by validation.
+type MaterialUpdateInput struct {
+	Name            string `json:"name"`
+	Description     string `json:"description"`
+	ProductsPerUnit *int   `json:"products_per_unit"`
+}
+
+// normalizeQuota coerces a raw quota into the stored form: a positive quota is
+// kept, anything ≤0 or absent becomes nil (unlimited).
+func normalizeQuota(v *int) *int {
+	if v == nil || *v <= 0 {
+		return nil
+	}
+	return v
 }
 
 func (s *CatalogService) CreateMaterial(actor Actor, in MaterialInput) (*models.Material, error) {
@@ -30,6 +53,11 @@ func (s *CatalogService) CreateMaterial(actor Actor, in MaterialInput) (*models.
 		return nil, apperr.Conflict("A material with this code already exists")
 	}
 	m := &models.Material{Code: in.Code, Name: in.Name, Description: in.Description}
+	// The production quota is an OWNER-only lever; ignore it for any other role so a
+	// non-owner client can't set/clear it by sending the field.
+	if actor.Role == models.RoleOwner {
+		m.ProductsPerUnit = normalizeQuota(in.ProductsPerUnit)
+	}
 	if err := s.repo.Material.Create(m); err != nil {
 		return nil, apperr.Internal("could not create material").Wrap(err)
 	}
@@ -52,7 +80,7 @@ func (s *CatalogService) ListMaterials(page repositories.Page) ([]models.Materia
 	return s.repo.Material.List(page.Normalize())
 }
 
-func (s *CatalogService) UpdateMaterial(actor Actor, id uint, in MaterialInput) (*models.Material, error) {
+func (s *CatalogService) UpdateMaterial(actor Actor, id uint, in MaterialUpdateInput) (*models.Material, error) {
 	m, err := s.GetMaterial(id)
 	if err != nil {
 		return nil, err
@@ -61,6 +89,11 @@ func (s *CatalogService) UpdateMaterial(actor Actor, id uint, in MaterialInput) 
 		m.Name = in.Name
 	}
 	m.Description = in.Description
+	// Only OWNER may change the production quota. For other roles it is left as-is,
+	// so an ADMIN/OPS name/description edit can't wipe a quota the owner set.
+	if actor.Role == models.RoleOwner {
+		m.ProductsPerUnit = normalizeQuota(in.ProductsPerUnit)
+	}
 	if err := s.repo.Material.Update(m); err != nil {
 		return nil, apperr.Internal("could not update material").Wrap(err)
 	}

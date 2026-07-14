@@ -60,25 +60,21 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 		priority = models.PriorityNormal
 	}
 
-	var batch *models.Batch
+	// Production quota of this material (0 = unlimited → never split).
+	quota := 0
+	if material.ProductsPerUnit != nil {
+		quota = *material.ProductsPerUnit
+	}
+
+	var rootBatch *models.Batch // the batch returned to the caller (flat batch or parent)
 	var skipped []uint
 
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
 		txRepo := repositories.New(tx)
 
-		batch = &models.Batch{
-			MaterialID: material.ID, Status: models.StatusPending, Priority: priority,
-			DueDate: in.DueDate.TimePtr(), Note: in.Note, CreatedByID: actor.IDPtr(),
-		}
-		if err := txRepo.Batch.Create(batch); err != nil {
-			return err
-		}
-		batch.Code = fmt.Sprintf("#%d", 101000+batch.ID)
-		if err := txRepo.Batch.Update(batch); err != nil {
-			return err
-		}
-
-		var batchItems []models.BatchItem
+		// Resolve eligible items in the caller's order (so the quota split groups them
+		// in that same order); everything ineligible is reported back as skipped.
+		var eligible []*models.OrderItem
 		for _, itemID := range in.OrderItemIDs {
 			item, err := txRepo.OrderItem.FindByID(itemID)
 			if err != nil {
@@ -100,20 +96,87 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 				skipped = append(skipped, itemID)
 				continue
 			}
-			batchItems = append(batchItems, models.BatchItem{
-				BatchID: batch.ID, OrderItemID: item.ID, MaterialID: material.ID, Status: models.StatusPending,
-			})
+			eligible = append(eligible, item)
 		}
-		if len(batchItems) == 0 {
+		if len(eligible) == 0 {
 			return apperr.Unprocessable("No eligible items for this material (items must be design-ready, include the material, and not already batched)")
 		}
-		if err := txRepo.Batch.CreateItems(batchItems); err != nil {
+
+		groups := planBatchSplit(eligible, quota)
+
+		// newBatch builds a batch carrying the shared attributes; createWithItems
+		// persists a batch, stamps its code, attaches items and records history.
+		newBatch := func() *models.Batch {
+			return &models.Batch{
+				MaterialID: material.ID, Status: models.StatusPending, Priority: priority,
+				DueDate: in.DueDate.TimePtr(), Note: in.Note, CreatedByID: actor.IDPtr(),
+			}
+		}
+		attachItems := func(batch *models.Batch, items []*models.OrderItem) error {
+			batchItems := make([]models.BatchItem, 0, len(items))
+			for _, item := range items {
+				batchItems = append(batchItems, models.BatchItem{
+					BatchID: batch.ID, OrderItemID: item.ID, MaterialID: material.ID, Status: models.StatusPending,
+				})
+			}
+			if err := txRepo.Batch.CreateItems(batchItems); err != nil {
+				return err
+			}
+			for _, bi := range batchItems {
+				_ = recordStatus(txRepo, models.EntityBatchItem, bi.ID, "", string(models.StatusPending), actor, "added to batch "+batch.Code)
+			}
+			return nil
+		}
+
+		// Within quota (or unlimited): one flat batch — identical to legacy behaviour.
+		if len(groups) <= 1 {
+			batch := newBatch()
+			if err := txRepo.Batch.Create(batch); err != nil {
+				return err
+			}
+			batch.Code = fmt.Sprintf("#%d", 101000+batch.ID)
+			if err := txRepo.Batch.Update(batch); err != nil {
+				return err
+			}
+			if err := attachItems(batch, eligible); err != nil {
+				return err
+			}
+			_ = recordStatus(txRepo, models.EntityBatch, batch.ID, "", string(models.StatusPending), actor, "batch created")
+			rootBatch = batch
+			return nil
+		}
+
+		// Over quota: a parent batch (holds no items) + one child batch per group,
+		// each capped at the material's quota. Codes: parent "#<n>", child "#<n>-<seq>".
+		parent := newBatch()
+		parent.IsParent = true
+		parent.ChildCount = len(groups)
+		if err := txRepo.Batch.Create(parent); err != nil {
 			return err
 		}
-		for _, bi := range batchItems {
-			_ = recordStatus(txRepo, models.EntityBatchItem, bi.ID, "", string(models.StatusPending), actor, "added to batch "+batch.Code)
+		parent.Code = fmt.Sprintf("#%d", 101000+parent.ID)
+		if err := txRepo.Batch.Update(parent); err != nil {
+			return err
 		}
-		_ = recordStatus(txRepo, models.EntityBatch, batch.ID, "", string(models.StatusPending), actor, "batch created")
+		parentID := parent.ID
+		for i, group := range groups {
+			child := newBatch()
+			child.ParentBatchID = &parentID
+			child.Sequence = i + 1
+			if err := txRepo.Batch.Create(child); err != nil {
+				return err
+			}
+			child.Code = fmt.Sprintf("%s-%d", parent.Code, i+1)
+			if err := txRepo.Batch.Update(child); err != nil {
+				return err
+			}
+			if err := attachItems(child, group); err != nil {
+				return err
+			}
+			_ = recordStatus(txRepo, models.EntityBatch, child.ID, "", string(models.StatusPending), actor, "child batch created under "+parent.Code)
+		}
+		_ = recordStatus(txRepo, models.EntityBatch, parent.ID, "", string(models.StatusPending), actor, "parent batch created")
+		rootBatch = parent
 		return nil
 	})
 	if err != nil {
@@ -128,10 +191,48 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 		_, _ = recomputeOrderItemStatus(s.repo, itemID, actor)
 	}
 
-	full, _ := s.repo.Batch.FindByID(batch.ID)
-	s.audit.Log(actor, "BATCH_CREATE", "batch", &batch.ID,
-		fmt.Sprintf("Created batch %s (material=%s)", batch.Code, material.Code), models.JSONMap{"skipped": skipped})
+	full, _ := s.repo.Batch.FindByID(rootBatch.ID)
+	s.audit.Log(actor, "BATCH_CREATE", "batch", &rootBatch.ID,
+		fmt.Sprintf("Created batch %s (material=%s)", rootBatch.Code, material.Code),
+		models.JSONMap{"skipped": skipped, "children": rootBatch.ChildCount})
 	return full, skipped, nil
+}
+
+// planBatchSplit partitions items into groups, each holding at most `quota`
+// products (sum of Quantity), never splitting a single item across groups (an
+// item whose own quantity exceeds the quota gets its own over-quota group).
+// quota ≤ 0 means unlimited → a single group. Mirrors the web app's
+// utils/batch.ts planBatchSplit so the split preview and the created batches
+// always agree.
+func planBatchSplit(items []*models.OrderItem, quota int) [][]*models.OrderItem {
+	if len(items) == 0 {
+		return nil
+	}
+	if quota <= 0 {
+		return [][]*models.OrderItem{items}
+	}
+	var groups [][]*models.OrderItem
+	var current []*models.OrderItem
+	count := 0
+	for _, it := range items {
+		q := it.Quantity
+		if q < 1 {
+			q = 1
+		}
+		// Start a new group when the current one is non-empty and adding this item
+		// would exceed the quota.
+		if len(current) > 0 && count+q > quota {
+			groups = append(groups, current)
+			current = nil
+			count = 0
+		}
+		current = append(current, it)
+		count += q
+	}
+	if len(current) > 0 {
+		groups = append(groups, current)
+	}
+	return groups
 }
 
 func (s *BatchService) Get(id uint) (*models.Batch, error) {
@@ -163,6 +264,13 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 	newStatus := models.InternalStatus(in.Status)
 	if !newStatus.Valid() {
 		return nil, apperr.BadRequest("Invalid status (PENDING|PRINTED|CUT|QC_PASSED)")
+	}
+	// The production board only advances fabrication stages (PENDING/PRINTED/CUT).
+	// QC_PASSED is a product-level gate set exactly once at the QC station when the
+	// whole finished product (every material part) is done — not per-material batch.
+	// A batch still reaches QC_PASSED, but only by rolling up from its QC-passed items.
+	if newStatus == models.StatusQCPassed {
+		return nil, apperr.Unprocessable("Không đặt 'Đã QC' ở bảng sản xuất. QC được thực hiện 1 lần ở trạm QC khi cả sản phẩm (mọi NVL) đã sản xuất xong.")
 	}
 	batch, err := s.Get(batchID)
 	if err != nil {
@@ -207,6 +315,11 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 
 	for itemID := range affectedItems {
 		_, _ = recomputeOrderItemStatus(s.repo, itemID, actor)
+	}
+
+	// If this is a child batch, roll the change up into its parent's status.
+	if batch.ParentBatchID != nil {
+		_ = recomputeParentBatchStatus(s.repo, *batch.ParentBatchID, actor)
 	}
 
 	s.audit.Log(actor, "BATCH_STATUS_UPDATE", "batch", &batch.ID,

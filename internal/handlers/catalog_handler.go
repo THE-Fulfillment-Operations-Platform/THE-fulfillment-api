@@ -50,7 +50,7 @@ func (h *Handlers) UpdateMaterial(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var in services.MaterialInput
+	var in services.MaterialUpdateInput
 	if !bindJSON(c, &in) {
 		return
 	}

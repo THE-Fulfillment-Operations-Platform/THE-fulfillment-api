@@ -17,6 +17,10 @@ type BatchFilter struct {
 	Priority   string
 	DateFrom   *time.Time
 	DateTo     *time.Time
+	// ParentBatchID scopes the list to the children of one parent batch. When nil
+	// (the default), children are hidden and only parent + flat batches are listed
+	// (see baseQuery) so the list isn't cluttered with split sub-batches.
+	ParentBatchID *uint
 }
 
 type BatchRepository struct{ db *gorm.DB }
@@ -44,11 +48,23 @@ func (r *BatchRepository) FindByID(id uint) (*models.Batch, error) {
 		Preload("Items", activeBatchItems).
 		Preload("Items.OrderItem.Order").
 		Preload("Items.Material").
+		// A parent batch preloads its children (with each child's active items so the
+		// detail view can show per-child item counts). Children/flat batches have none.
+		Preload("ChildBatches", func(db *gorm.DB) *gorm.DB { return db.Order("sequence asc") }).
+		Preload("ChildBatches.Items", activeBatchItems).
 		First(&b, id).Error
 	if err != nil {
 		return nil, err
 	}
 	return &b, nil
+}
+
+// ChildBatchesFor returns the child batches of a parent (id + status are enough
+// for the parent status roll-up). Ordered by sequence for stable display.
+func (r *BatchRepository) ChildBatchesFor(parentID uint) ([]models.Batch, error) {
+	var rows []models.Batch
+	err := r.db.Where("parent_batch_id = ?", parentID).Order("sequence asc").Find(&rows).Error
+	return rows, err
 }
 
 func (r *BatchRepository) FindByCode(code string) (*models.Batch, error) {
@@ -75,6 +91,13 @@ func (r *BatchRepository) baseQuery(f BatchFilter) *gorm.DB {
 	}
 	if f.DateTo != nil {
 		q = q.Where("created_at <= ?", *f.DateTo)
+	}
+	// Child-scoping: with a parent id, list only that parent's children; otherwise
+	// hide children entirely so the default list shows parent + flat batches only.
+	if f.ParentBatchID != nil {
+		q = q.Where("parent_batch_id = ?", *f.ParentBatchID)
+	} else {
+		q = q.Where("parent_batch_id IS NULL")
 	}
 	return q
 }

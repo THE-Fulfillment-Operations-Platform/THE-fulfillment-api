@@ -1,12 +1,14 @@
-// Package seed populates demo data so the frontend can exercise the full flow:
-// roles, one demo user per role, materials, SKUs (single + combo), a seller with
-// a store, and a handful of orders/items in different states.
+// Package seed populates the minimum data the system needs to run: the role
+// catalog (required for RBAC), a demo seller (so the SELLER demo login has a
+// seller to belong to) and — gated behind SEED_DEMO_USERS — one demo login per
+// role. It deliberately does NOT seed any master catalog (materials, SKUs) or
+// orders: that operational data is created by the real import/setup flows, so
+// nothing junk reappears on restart.
 package seed
 
 import (
 	"fmt"
 	"log"
-	"strings"
 
 	"gorm.io/gorm"
 
@@ -15,18 +17,12 @@ import (
 	"the-fulfillment/backend/internal/models"
 )
 
-// Run seeds the database. It is idempotent: master data uses find-or-create and
-// demo orders are only created once (when no orders exist yet).
+// Run seeds only what the system needs to run: the role catalog, a demo seller,
+// and (gated) the demo login accounts. It is idempotent (find-or-create) and
+// never seeds master catalog or orders — that data comes from the real
+// import/setup flows, so nothing reappears on restart.
 func Run(db *gorm.DB, cfg *config.Config) error {
 	if err := seedRoles(db); err != nil {
-		return err
-	}
-	materials, err := seedMaterials(db)
-	if err != nil {
-		return err
-	}
-	skus, err := seedSKUs(db, materials)
-	if err != nil {
 		return err
 	}
 	seller, err := seedSeller(db)
@@ -43,17 +39,6 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 		}
 	} else {
 		log.Println("seed: demo users skipped (SEED_DEMO_USERS=false)")
-	}
-	// Demo orders are opt-in: after a data reset the orders table is empty, so the
-	// old "seed once when no orders exist" guard would re-create them on the next
-	// boot. Gate them behind SEED_DEMO_ORDERS (default off) so a clean re-import
-	// starts from a truly empty order set.
-	if cfg.SeedDemoOrders {
-		if err := seedDemoOrders(db, seller, skus, materials); err != nil {
-			return err
-		}
-	} else {
-		log.Println("seed: demo orders skipped (SEED_DEMO_ORDERS=false)")
 	}
 	log.Println("seed: completed")
 	return nil
@@ -78,77 +63,6 @@ func seedRoles(db *gorm.DB) error {
 		}
 	}
 	return nil
-}
-
-func seedMaterials(db *gorm.DB) (map[string]models.Material, error) {
-	defs := []models.Material{
-		{Code: "WOOD", Name: "Gỗ", Description: "Gỗ tự nhiên / plywood"},
-		{Code: "MICA", Name: "Mica", Description: "Mica / acrylic mỏng"},
-		{Code: "ACRYLIC", Name: "Acrylic", Description: "Acrylic dày"},
-		{Code: "METAL", Name: "Metal", Description: "Kim loại"},
-		// Real materials taken from the factory's operational spreadsheet ("Loại VL").
-		// Codes match the legacy-import code generator so a re-import detects them.
-		{Code: "MICA-TRONG-3-LY", Name: "Mica trong 3 ly", Description: "Mica trong dày 3 ly"},
-		{Code: "MICA-START-HOLOGRAM", Name: "Mica start Hologram", Description: "Mica hiệu ứng hologram"},
-		{Code: "GO-5-LY-3-LAYER", Name: "Gỗ 5 ly 3 layer", Description: "Gỗ dán 5 ly, 3 lớp"},
-		{Code: "MDF-3LY-80X120", Name: "MDF 3ly 80x120", Description: "Ván MDF 3 ly khổ 80x120"},
-	}
-	out := map[string]models.Material{}
-	for _, m := range defs {
-		rec := m
-		if err := db.Where("code = ?", m.Code).FirstOrCreate(&rec).Error; err != nil {
-			return nil, fmt.Errorf("seed materials: %w", err)
-		}
-		out[rec.Code] = rec
-	}
-	return out, nil
-}
-
-func seedSKUs(db *gorm.DB, materials map[string]models.Material) (map[string]models.SKU, error) {
-	type skuDef struct {
-		code, name, product string
-		mats                []string
-	}
-	defs := []skuDef{
-		{"WOOD-01", "Wood Sign 01", "Personalized Wood Sign", []string{"WOOD"}},
-		{"WOOD-03", "Wood Ornament 03", "Wood Ornament", []string{"WOOD"}},
-		{"MICA-02", "Mica Plaque 02", "Mica Plaque", []string{"MICA"}},
-		{"ACR-05", "Acrylic Stand 05", "Acrylic Stand", []string{"ACRYLIC"}},
-		{"COMBO-01", "Combo Wood+Mica 01", "Combo Wood & Mica Sign", []string{"WOOD", "MICA"}},
-		// Real SKUs from the factory spreadsheet. Codes are uppercased so an order
-		// file SKU ("BR A 1.6 kep") matches after the importer uppercases it.
-		// Mappings are set ONLY where the source data made them unambiguous — the
-		// rest are intentionally left unmapped so the SKU_UNMAPPED / Master Data
-		// flow can resolve them (we never guess a material).
-		{"BR A 1.6 KEP", "BR A 1.6 kep", "Bracelet A 1.6 kẹp", []string{"MICA-TRONG-3-LY"}},
-		{"BR SHC 2 KEP", "BR SHC 2 kep", "Bracelet SHC 2 kẹp", []string{"MICA-START-HOLOGRAM"}},
-		{"3LWD 12IN", "3LWD 12in", "3-Layer Wood 12 inch", []string{"GO-5-LY-3-LAYER"}},
-		{"BR HC 2.5 KEP", "BR HC 2.5 kep", "Bracelet HC 2.5 kẹp", nil}, // material chưa rõ
-		{"BR A 1.6 GAI", "BR A 1.6 Gai", "Bracelet A 1.6 gai", nil},    // material chưa rõ
-		{"NL C 5.5", "NL C 5.5", "NL C 5.5", nil},                      // material chưa rõ
-	}
-	out := map[string]models.SKU{}
-	for _, d := range defs {
-		var existing models.SKU
-		if err := db.Where("code = ?", d.code).First(&existing).Error; err == nil {
-			out[existing.Code] = existing
-			continue
-		}
-		sku := models.SKU{
-			Code: d.code, Name: d.name, ProductName: d.product,
-			IsCombo: len(d.mats) > 1, IsActive: true,
-		}
-		for _, mc := range d.mats {
-			sku.Materials = append(sku.Materials, models.SKUMaterial{
-				MaterialID: materials[mc].ID, QuantityPerUnit: 1,
-			})
-		}
-		if err := db.Create(&sku).Error; err != nil {
-			return nil, fmt.Errorf("seed skus: %w", err)
-		}
-		out[sku.Code] = sku
-	}
-	return out, nil
 }
 
 func seedSeller(db *gorm.DB) (*models.Seller, error) {
@@ -205,118 +119,3 @@ func seedUsers(db *gorm.DB, cfg *config.Config, sellerID uint) error {
 	return nil
 }
 
-// seedDemoOrders creates a few orders/items in varied states (only once).
-func seedDemoOrders(db *gorm.DB, seller *models.Seller, skus map[string]models.SKU, materials map[string]models.Material) error {
-	var count int64
-	db.Model(&models.Order{}).Count(&count)
-	if count > 0 {
-		return nil
-	}
-
-	type itemDef struct {
-		skuCode     string
-		qty         int
-		mockup      string
-		designReady bool
-	}
-	type orderDef struct {
-		storeOrderID string
-		items        []itemDef
-	}
-	defs := []orderDef{
-		{"Etsy-7821", []itemDef{{"WOOD-01", 1, "https://mockups.example.com/etsy-7821-1.png", true}}},
-		{"Etsy-7822", []itemDef{{"MICA-02", 1, "https://mockups.example.com/etsy-7822-1.png", false}}},
-		{"Etsy-7823", []itemDef{{"COMBO-01", 1, "https://mockups.example.com/etsy-7823-1.png", true}}},
-		{"Etsy-7824", []itemDef{{"WOOD-01", 2, "", false}}}, // missing mockup -> required attention
-	}
-
-	return db.Transaction(func(tx *gorm.DB) error {
-		var woodReadyItemIDs []uint
-		for _, od := range defs {
-			order := models.Order{
-				StoreOrderID: od.storeOrderID, StoreOrderRef: od.storeOrderID, SellerID: seller.ID,
-				StoreName: "Etsy-Demo", ShippingMethod: "Standard", ShippingName: "John Doe",
-				ShippingAddress1: "123 Demo St", ShippingCity: "Austin", ShippingProvince: "TX",
-				ShippingZip: "78701", ShippingCountry: "US", ShippingEmail: "john@example.com",
-				SellerStatus: models.SellerStatusProduction,
-			}
-			if err := tx.Create(&order).Error; err != nil {
-				return err
-			}
-			order.InternalCode = fmt.Sprintf("%d", 100000+order.ID)
-			if err := tx.Save(&order).Error; err != nil {
-				return err
-			}
-
-			for i, it := range od.items {
-				sku := skus[it.skuCode]
-				ds := models.DesignPending
-				if it.mockup == "" {
-					ds = models.DesignMissing
-				} else if it.designReady {
-					ds = models.DesignReady
-				}
-				item := models.OrderItem{
-					OrderID: order.ID, LineNo: i + 1,
-					InternalCode: fmt.Sprintf("%d_%d/%d", 100000+order.ID, i+1, len(od.items)),
-					SKUID:        &sku.ID, SKUCode: sku.Code, ProductName: sku.ProductName,
-					Quantity: it.qty, MockupURL: it.mockup,
-					InternalStatus: models.StatusPending, DesignStatus: ds,
-				}
-				if err := tx.Create(&item).Error; err != nil {
-					return err
-				}
-				if it.mockup != "" {
-					if err := tx.Create(&models.ItemAsset{
-						OrderItemID: item.ID, AssetType: "MOCKUP", URL: it.mockup, Version: 1,
-					}).Error; err != nil {
-						return err
-					}
-				} else {
-					if err := tx.Create(&models.Note{
-						Title: "Thiếu Mockup URL", Body: "Item " + item.InternalCode + " chưa có mockup để QC.",
-						ReasonCode: "ART_MISSING", Severity: models.SeverityHigh, Status: models.NoteOpen,
-						IsRequiredAttention: true, EntityType: models.EntityOrderItem, EntityID: &item.ID,
-						OwnerRole: models.RoleDesigner,
-					}).Error; err != nil {
-						return err
-					}
-				}
-				// Track design-ready wood items for a demo batch.
-				if it.designReady && strings.HasPrefix(it.skuCode, "WOOD") {
-					woodReadyItemIDs = append(woodReadyItemIDs, item.ID)
-				}
-			}
-		}
-
-		// Demo batch: wood material, containing the design-ready wood item(s), at PRINTED.
-		if len(woodReadyItemIDs) > 0 {
-			wood := materials["WOOD"]
-			batch := models.Batch{MaterialID: wood.ID, Status: models.StatusPrinted, Priority: models.PriorityNormal}
-			if err := tx.Create(&batch).Error; err != nil {
-				return err
-			}
-			batch.Code = fmt.Sprintf("#%d", 101000+batch.ID)
-			if err := tx.Save(&batch).Error; err != nil {
-				return err
-			}
-			for _, itemID := range woodReadyItemIDs {
-				bi := models.BatchItem{
-					BatchID: batch.ID, OrderItemID: itemID, MaterialID: wood.ID, Status: models.StatusPrinted,
-				}
-				if err := tx.Create(&bi).Error; err != nil {
-					return err
-				}
-				// Item internal status follows its (single) wood part here.
-				if err := tx.Model(&models.OrderItem{}).Where("id = ?", itemID).
-					Update("internal_status", models.StatusPrinted).Error; err != nil {
-					return err
-				}
-			}
-			log.Printf("seed: demo batch %s created (PRINTED) with %d item(s)", batch.Code, len(woodReadyItemIDs))
-		}
-
-		log.Printf("seed: %d demo orders created", len(defs))
-		return nil
-	})
-}

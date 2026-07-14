@@ -180,8 +180,9 @@ type ItemFilter struct {
 	InternalStatus string
 	DesignStatus   string
 	BatchID        *uint
-	NeedsDesign    bool // design queue: design not ready
-	ReviewApproved bool // only items whose order review_status = APPROVED
+	IDs            []uint // restrict to specific item ids (e.g. selected rows for a ZIP export)
+	NeedsDesign    bool   // design queue: design not ready
+	ReviewApproved bool   // only items whose order review_status = APPROVED
 	DateFrom       *time.Time
 	DateTo         *time.Time
 }
@@ -264,6 +265,9 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 		q = q.Where("order_items.id IN (?)",
 			r.db.Model(&models.BatchItem{}).Select("order_item_id").Where("batch_id = ?", *f.BatchID))
 	}
+	if len(f.IDs) > 0 {
+		q = q.Where("order_items.id IN ?", f.IDs)
+	}
 	if f.DateFrom != nil {
 		q = q.Where("order_items.created_at >= ?", *f.DateFrom)
 	}
@@ -285,6 +289,19 @@ func (r *OrderItemRepository) List(f ItemFilter) ([]models.OrderItem, int64, err
 		Order("order_items.id desc").
 		Limit(f.PageSize).Offset(f.Offset()).Find(&rows).Error
 	return rows, total, err
+}
+
+// ListAll returns every item matching the filter, ignoring pagination. Used by
+// bulk exports (e.g. the design-queue asset ZIP) that must cover the whole set,
+// not a single page.
+func (r *OrderItemRepository) ListAll(f ItemFilter) ([]models.OrderItem, error) {
+	var rows []models.OrderItem
+	err := r.baseQuery(f).
+		Preload("Order.Seller").
+		Preload("SKU").
+		Order("order_items.id desc").
+		Find(&rows).Error
+	return rows, err
 }
 
 // MaterialBucket groups design-ready, not-yet-batched item parts by material so

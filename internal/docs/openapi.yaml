@@ -291,7 +291,11 @@ paths:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
     patch:
       tags: [Batches]
-      summary: Cập nhật status batch (Pending/Đã in/Đã cắt/Đã QC)
+      summary: Cập nhật chặng sản xuất của batch (Pending/Đã in/Đã cắt)
+      description: >-
+        Bảng sản xuất chỉ đặt các chặng gia công (PENDING/PRINTED/CUT). QC_PASSED
+        là cổng cấp sản phẩm, chỉ đặt 1 lần ở trạm QC (/api/qc/pass) khi mọi NVL
+        đã sản xuất xong; batch tự lên QC_PASSED nhờ roll-up từ item đã QC.
       requestBody:
         required: true
         content:
@@ -300,7 +304,7 @@ paths:
               type: object
               required: [status]
               properties:
-                status: { type: string, enum: [PENDING, PRINTED, CUT, QC_PASSED] }
+                status: { type: string, enum: [PENDING, PRINTED, CUT] }
                 note: { type: string }
       responses: { '200': { description: OK } }
   /api/qc/scan:
@@ -318,6 +322,9 @@ paths:
     post:
       tags: [QC]
       summary: Xác nhận QC pass (sản phẩm khớp mockup) → Đã QC
+      description: >-
+        QC cấp sản phẩm, làm 1 lần: PASS đánh dấu Đã QC cho toàn bộ phần NVL của
+        item cùng lúc. Chỉ hợp lệ khi mọi NVL của sản phẩm đã sản xuất xong.
       requestBody:
         content:
           application/json:
@@ -326,7 +333,6 @@ paths:
               properties:
                 code: { type: string }
                 item_id: { type: integer }
-                batch_item_id: { type: integer }
                 note: { type: string }
       responses: { '200': { description: OK } }
   /api/qc/fail:

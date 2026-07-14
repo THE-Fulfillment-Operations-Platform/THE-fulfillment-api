@@ -52,10 +52,9 @@ type Config struct {
 	TrustedProxies []string
 
 	// Seed
-	SeedOnStart    bool
-	SeedDemoUsers  bool
-	SeedDemoOrders bool
-	DemoPassword   string
+	SeedOnStart   bool
+	SeedDemoUsers bool
+	DemoPassword  string
 
 	// Ops / danger zone
 	AllowDataReset bool
@@ -95,10 +94,9 @@ func Load() *Config {
 
 		TrustedProxies: splitAndTrim(getEnv("TRUSTED_PROXIES", "")),
 
-		SeedOnStart:    getEnvAsBool("SEED_ON_START", true),
-		SeedDemoUsers:  getEnvAsBool("SEED_DEMO_USERS", true),
-		SeedDemoOrders: getEnvAsBool("SEED_DEMO_ORDERS", false),
-		DemoPassword:   getEnv("SEED_DEMO_PASSWORD", DefaultDemoPassword),
+		SeedOnStart:   getEnvAsBool("SEED_ON_START", true),
+		SeedDemoUsers: getEnvAsBool("SEED_DEMO_USERS", true),
+		DemoPassword:  getEnv("SEED_DEMO_PASSWORD", DefaultDemoPassword),
 
 		AllowDataReset: getEnvAsBool("ALLOW_DATA_RESET", false),
 

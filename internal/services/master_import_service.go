@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -21,25 +23,33 @@ import (
 // MasterImportService seeds master data (Materials, SKUs, SKU↔Material mapping)
 // from the factory's existing operational spreadsheet. It reuses the two columns
 // that already exist in that file — `SKU` and `Loại VL` — and never invents a
-// material: a SKU with no Loại VL is flagged "missing material" and a SKU seen
-// with several different Loại VL is flagged "needs review" (never auto-merged).
+// material: a SKU with no Loại VL is flagged "missing material".
+//
+// A single "Loại VL" cell may list several materials joined by "+" (or line
+// breaks inside the cell), e.g. "Mica trong 3 ly + Basswood 5mm" — that is a
+// combo SKU built from all of them, so every part is created and mapped and the
+// SKU is flagged IsCombo. When the same SKU is spelled with *different* material
+// sets across rows the plan still maps their union but flags "needs review" so a
+// human can double-check an inconsistent file (nothing is dropped or merged away).
 type MasterImportService struct {
 	repo  *repositories.Repositories
 	audit *AuditService
 }
 
-// LegacyRow is one parsed spreadsheet row reduced to the two fields we care about
-// for master-data setup. RowNumber is 1-based across data rows.
+// LegacyRow is one parsed spreadsheet row reduced to the fields we care about for
+// master-data setup. RowNumber is 1-based across data rows. ProductName is the
+// human-readable product name ("Tên sản phẩm") — optional; older files omit it.
 type LegacyRow struct {
-	RowNumber int    `json:"row_number"`
-	SKU       string `json:"sku"`
-	Material  string `json:"material"`
+	RowNumber   int    `json:"row_number"`
+	SKU         string `json:"sku"`
+	Material    string `json:"material"`
+	ProductName string `json:"product_name"`
 }
 
 // SKU status codes surfaced in the preview.
 const (
-	skuStatusOK       = "OK"               // exactly one Loại VL → will map
-	skuStatusReview   = "NEEDS_REVIEW"     // several distinct Loại VL → do not merge
+	skuStatusOK       = "OK"               // consistent material set → will map (single or combo)
+	skuStatusReview   = "NEEDS_REVIEW"     // rows disagree on the set → mapped as union, double-check
 	skuStatusMissing  = "MISSING_MATERIAL" // SKU present but no Loại VL anywhere
 	errSKUMissing     = "SKU_MISSING"
 	mappingSourceNote = "Từ import vận hành cũ"
@@ -56,10 +66,13 @@ type MaterialPlan struct {
 type SKUPlan struct {
 	Code          string   `json:"code"`
 	Name          string   `json:"name"`
+	ProductName   string   `json:"product_name"`             // representative human-readable name (first seen)
+	ProductNames  []string `json:"product_names,omitempty"`  // all distinct names for this SKU (one spec can label many products)
 	Exists        bool     `json:"exists"`
 	MaterialNames []string `json:"material_names"`
 	Status        string   `json:"status"`
 	RowCount      int      `json:"row_count"`
+	IsCombo       bool     `json:"is_combo"` // built from ≥2 materials (BOM)
 }
 
 type MappingPlan struct {
@@ -119,6 +132,14 @@ var legacyMaterialHeaders = map[string]bool{
 	"loainvl": true, "nvl": true, "vatlieu": true, "material": true, "chatlieu": true,
 }
 
+// legacyProductHeaders: the human-readable product name column ("Tên sản phẩm").
+// Optional — a file without it behaves exactly as before (product name falls back
+// to the SKU display name on create).
+var legacyProductHeaders = map[string]bool{
+	"tensanpham": true, "tensp": true, "tenhienthi": true, "tensanphamhienthi": true,
+	"sanpham": true, "productname": true, "product": true,
+}
+
 // ParseLegacyFile parses a CSV or XLSX stream into LegacyRows, auto-detecting the
 // SKU and Loại VL columns. source is "XLSX" or "CSV".
 func ParseLegacyFile(source string, r io.Reader) ([]LegacyRow, error) {
@@ -161,7 +182,7 @@ func legacyRowsFromGrid(records [][]string) ([]LegacyRow, error) {
 		return nil, apperr.BadRequest("File phải có dòng tiêu đề và ít nhất một dòng dữ liệu")
 	}
 	header := records[0]
-	skuIdx, matIdx := -1, -1
+	skuIdx, matIdx, prodIdx := -1, -1, -1
 	for i, h := range header {
 		n := normalizeLegacyHeader(h)
 		if skuIdx == -1 && legacySKUHeaders[n] {
@@ -170,12 +191,16 @@ func legacyRowsFromGrid(records [][]string) ([]LegacyRow, error) {
 		if matIdx == -1 && legacyMaterialHeaders[n] {
 			matIdx = i
 		}
+		if prodIdx == -1 && legacyProductHeaders[n] {
+			prodIdx = i
+		}
 	}
 	if skuIdx == -1 {
 		return nil, apperr.BadRequest("Không tìm thấy cột 'SKU' trong file — kiểm tra lại dòng tiêu đề")
 	}
 	// matIdx == -1 is allowed: the file has no 'Loại VL' column, so every SKU will
-	// be flagged MISSING_MATERIAL (we never guess a material).
+	// be flagged MISSING_MATERIAL (we never guess a material). prodIdx == -1 is also
+	// allowed: no 'Tên sản phẩm' column → no product name captured.
 	rows := make([]LegacyRow, 0, len(records)-1)
 	for di, rec := range records[1:] {
 		lr := LegacyRow{RowNumber: di + 1}
@@ -185,6 +210,9 @@ func legacyRowsFromGrid(records [][]string) ([]LegacyRow, error) {
 		if matIdx >= 0 && matIdx < len(rec) {
 			lr.Material = strings.TrimSpace(rec[matIdx])
 		}
+		if prodIdx >= 0 && prodIdx < len(rec) {
+			lr.ProductName = strings.TrimSpace(rec[prodIdx])
+		}
 		rows = append(rows, lr)
 	}
 	return rows, nil
@@ -193,11 +221,13 @@ func legacyRowsFromGrid(records [][]string) ([]LegacyRow, error) {
 // ---------- Analysis ----------
 
 type skuAgg struct {
-	code      string
-	name      string
-	matNames  []string
-	rowCount  int
-	firstSeen int
+	code         string
+	name         string
+	matNames     []string        // union of every material seen for this SKU, first-seen order
+	productNames []string        // distinct human-readable product names seen, first-seen order
+	rowSigs      map[string]bool // distinct per-row material-set signatures (blank rows excluded)
+	rowCount     int
+	firstSeen    int
 }
 
 // analyze groups the file rows by SKU and by material and derives the full plan.
@@ -211,14 +241,15 @@ func (s *MasterImportService) analyze(rows []LegacyRow) *MasterImportPreview {
 
 	for _, r := range rows {
 		sku := strings.TrimSpace(r.SKU)
-		mat := strings.TrimSpace(r.Material)
-		if sku == "" && mat == "" {
+		// A cell may pack several materials for a combo SKU ("Mica + Basswood").
+		mats := splitMaterials(r.Material)
+		if sku == "" && len(mats) == 0 {
 			continue // blank line — ignore silently
 		}
 		total++
 		if sku == "" {
 			rowErrors = append(rowErrors, LegacyRowError{
-				RowNumber: r.RowNumber, Material: mat, ErrorCode: errSKUMissing,
+				RowNumber: r.RowNumber, Material: strings.TrimSpace(r.Material), ErrorCode: errSKUMissing,
 				Message: "Dòng có Loại VL nhưng thiếu SKU",
 			})
 			continue
@@ -226,19 +257,25 @@ func (s *MasterImportService) analyze(rows []LegacyRow) *MasterImportPreview {
 		code := normalizeSKUCode(sku)
 		agg := skuMap[code]
 		if agg == nil {
-			agg = &skuAgg{code: code, name: sku, firstSeen: len(skuOrder)}
+			agg = &skuAgg{code: code, name: sku, rowSigs: map[string]bool{}, firstSeen: len(skuOrder)}
 			skuMap[code] = agg
 			skuOrder = append(skuOrder, code)
 		}
 		agg.rowCount++
-		if mat != "" {
-			lm := strings.ToLower(mat)
-			if !containsFold(agg.matNames, mat) {
-				agg.matNames = append(agg.matNames, mat)
-			}
-			if !matSeen[lm] {
-				matSeen[lm] = true
-				matOrder = append(matOrder, mat)
+		if pn := strings.TrimSpace(r.ProductName); pn != "" && !containsFold(agg.productNames, pn) {
+			agg.productNames = append(agg.productNames, pn)
+		}
+		if len(mats) > 0 {
+			agg.rowSigs[rowSignature(mats)] = true
+			for _, name := range mats {
+				if !containsFold(agg.matNames, name) {
+					agg.matNames = append(agg.matNames, name)
+				}
+				lm := strings.ToLower(name)
+				if !matSeen[lm] {
+					matSeen[lm] = true
+					matOrder = append(matOrder, name)
+				}
 			}
 		}
 	}
@@ -271,40 +308,49 @@ func (s *MasterImportService) analyze(rows []LegacyRow) *MasterImportPreview {
 			sum.NewSKUs++
 		}
 
+		// A SKU with no material at all is "missing"; otherwise it maps its full
+		// material set (single or combo). We only flag "needs review" when the SKU's
+		// rows *disagree* on the set — that is a data-entry inconsistency worth a
+		// human glance, but we still map the union rather than silently dropping it.
+		isCombo := len(agg.matNames) >= 2
 		status := skuStatusOK
-		switch len(agg.matNames) {
-		case 0:
+		switch {
+		case len(agg.matNames) == 0:
 			status = skuStatusMissing
 			sum.MissingCount++
-		case 1:
-			status = skuStatusOK
-		default:
+		case len(agg.rowSigs) > 1:
 			status = skuStatusReview
 			sum.ReviewCount++
 		}
 
+		productName := ""
+		if len(agg.productNames) > 0 {
+			productName = agg.productNames[0]
+		}
 		pv.SKUs = append(pv.SKUs, SKUPlan{
-			Code: agg.code, Name: agg.name, Exists: skuExists,
-			MaterialNames: agg.matNames, Status: status, RowCount: agg.rowCount,
+			Code: agg.code, Name: agg.name, ProductName: productName, ProductNames: agg.productNames,
+			Exists: skuExists, MaterialNames: agg.matNames, Status: status, RowCount: agg.rowCount, IsCombo: isCombo,
 		})
 
-		// Only single-material SKUs produce an auto mapping.
-		if status == skuStatusOK {
-			matName := agg.matNames[0]
-			exists := false
-			if skuExists && skuRec != nil {
-				if matRec, _ := s.repo.Material.FindByNameInsensitive(matName); matRec != nil {
-					if ok, _ := s.repo.SKU.MappingExists(skuRec.ID, matRec.ID); ok {
-						exists = true
+		// Every material of a non-missing SKU produces a mapping (a combo SKU maps
+		// to all of its materials). Mappings that already exist are marked so.
+		if status != skuStatusMissing {
+			for _, matName := range agg.matNames {
+				exists := false
+				if skuExists && skuRec != nil {
+					if matRec, _ := s.repo.Material.FindByNameInsensitive(matName); matRec != nil {
+						if ok, _ := s.repo.SKU.MappingExists(skuRec.ID, matRec.ID); ok {
+							exists = true
+						}
 					}
 				}
+				if !exists {
+					sum.NewMappings++
+				}
+				pv.Mappings = append(pv.Mappings, MappingPlan{
+					SKUCode: agg.code, MaterialCode: materialCode(matName), MaterialName: matName, Exists: exists,
+				})
 			}
-			if !exists {
-				sum.NewMappings++
-			}
-			pv.Mappings = append(pv.Mappings, MappingPlan{
-				SKUCode: agg.code, MaterialCode: materialCode(matName), MaterialName: matName, Exists: exists,
-			})
 		}
 	}
 
@@ -397,15 +443,28 @@ func (s *MasterImportService) Commit(actor Actor, jobID uint) (*MasterImportPrev
 
 		skuIDByCode := map[string]uint{}
 		for _, sp := range pv.SKUs {
+			// Product name comes from the file's "Tên sản phẩm" column; when the file
+			// has no such column, fall back to the SKU display name (legacy behaviour).
+			productName := sp.ProductName
+			if productName == "" {
+				productName = sp.Name
+			}
 			rec, err := txRepo.SKU.FindByCode(sp.Code)
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				rec = &models.SKU{Code: sp.Code, Name: sp.Name, ProductName: sp.Name, IsActive: true}
+				rec = &models.SKU{Code: sp.Code, Name: sp.Name, ProductName: productName, IsActive: true, IsCombo: sp.IsCombo}
 				if err := txRepo.SKU.Create(rec); err != nil {
 					return err
 				}
 				applied.SKUsCreated++
 			} else if err != nil {
 				return err
+			} else if sp.ProductName != "" && rec.ProductName != sp.ProductName {
+				// Existing SKU: refresh the human-readable name from the file (source of
+				// truth for it). Scoped update — never touches the material mapping.
+				if err := tx.Model(&models.SKU{}).Where("id = ?", rec.ID).
+					Update("product_name", sp.ProductName).Error; err != nil {
+					return err
+				}
 			}
 			skuIDByCode[sp.Code] = rec.ID
 		}
@@ -425,6 +484,24 @@ func (s *MasterImportService) Commit(actor Actor, jobID uint) (*MasterImportPrev
 					return err
 				}
 				applied.MappingsCreated++
+			}
+		}
+
+		// Flag as combo any SKU that ended up mapped to ≥2 materials. Counting the
+		// real mappings (not just this file's plan) keeps it correct when an import
+		// additively pushes an existing single-material SKU over into a combo. This
+		// is upgrade-only: an additive import must never clear a manual combo flag.
+		for _, skuID := range skuIDByCode {
+			n, err := txRepo.SKU.CountMaterials(skuID)
+			if err != nil {
+				return err
+			}
+			if n >= 2 {
+				if err := tx.Model(&models.SKU{}).
+					Where("id = ? AND is_combo = ?", skuID, false).
+					Update("is_combo", true).Error; err != nil {
+					return err
+				}
 			}
 		}
 
@@ -551,6 +628,40 @@ func containsFold(list []string, v string) bool {
 	return false
 }
 
+// materialSplitRe splits a "Loại VL" cell into its component materials. A combo
+// SKU lists several materials in one cell joined by "+", and Excel/CSV cells can
+// also carry embedded line breaks — both act as separators. A material name must
+// therefore never itself contain a "+".
+var materialSplitRe = regexp.MustCompile(`[+\r\n]+`)
+
+// splitMaterials turns one cell into its distinct, trimmed material names, e.g.
+// "Mica trong 3 ly + Basswood 5mm" → ["Mica trong 3 ly", "Basswood 5mm"].
+// Blanks are dropped and case-insensitive duplicates within the cell collapsed.
+func splitMaterials(cell string) []string {
+	parts := materialSplitRe.Split(cell, -1)
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" || containsFold(out, p) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// rowSignature is a stable key for the *set* of materials on a single row, used
+// to detect when different rows of the same SKU disagree. Order-insensitive and
+// case-insensitive: "A + B" and "b + a" produce the same signature.
+func rowSignature(mats []string) string {
+	norm := make([]string, len(mats))
+	for i, m := range mats {
+		norm[i] = strings.ToLower(strings.TrimSpace(m))
+	}
+	sort.Strings(norm)
+	return strings.Join(norm, "|")
+}
+
 // viDiacritics maps lowercase Vietnamese vowels/consonants to ASCII. Callers must
 // lowercase first.
 var viDiacritics = strings.NewReplacer(
@@ -575,25 +686,28 @@ func removeVietnameseDiacritics(s string) string {
 
 // ---------- Sample template download ----------
 
-// masterTemplateHeaders are the only columns the importer reads. The file the
-// factory uploads may carry many more columns — those are ignored — but the
-// sample we hand back keeps just these two so the required format is obvious.
-var masterTemplateHeaders = []string{"SKU", "Loại VL"}
+// masterTemplateHeaders are the columns the importer reads: the human-readable
+// "Tên sản phẩm" (optional), "SKU" and "Loại VL". The file the factory uploads may
+// carry many more columns — those are ignored — but the sample we hand back keeps
+// just these so the required format is obvious.
+var masterTemplateHeaders = []string{"Tên sản phẩm", "SKU", "Loại VL"}
 
 // masterTemplateSample is a handful of example rows so the user can see exactly
-// what a valid SKU / Loại VL pairing looks like before filling in their own.
+// what a valid Tên sản phẩm / SKU / Loại VL row looks like before filling in their
+// own. The last row shows a combo SKU: several materials in one cell joined by " + ".
 var masterTemplateSample = [][]string{
-	{"BRA-1.6-KEP", "Mica trong 3 ly"},
-	{"LWD-12IN", "Gỗ 5 ly 3 lớp"},
-	{"NEW-SKU-X", "MDF 3 ly 80x120"},
+	{"Kệ gỗ treo tường", "BRA-1.6-KEP", "Mica trong 3 ly"},
+	{"Thớt gỗ khắc tên", "LWD-12IN", "Gỗ 5 ly 3 lớp"},
+	{"Bảng tên để bàn", "NEW-SKU-X", "MDF 3 ly 80x120"},
+	{"Đèn gỗ combo", "COMBO-A2-GAI", "Mica trong 3 ly + Mica Hologram"},
 }
 
 // MasterTemplateXLSX renders the master-data import sample as a real .xlsx
-// workbook (SKU + Loại VL columns split cleanly in Excel on any locale, unlike
-// the old comma CSV that opened as garbled single-column text).
+// workbook (Tên sản phẩm + SKU + Loại VL columns split cleanly in Excel on any
+// locale, unlike the old comma CSV that opened as garbled single-column text).
 func (s *MasterImportService) MasterTemplateXLSX() ([]byte, string, error) {
 	grid := append([][]string{masterTemplateHeaders}, masterTemplateSample...)
-	data, err := buildTemplateXLSX("Master data", grid, []float64{24, 28})
+	data, err := buildTemplateXLSX("Master data", grid, []float64{28, 24, 28})
 	if err != nil {
 		return nil, "", err
 	}

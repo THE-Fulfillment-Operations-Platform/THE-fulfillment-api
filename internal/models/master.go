@@ -57,6 +57,12 @@ type Material struct {
 	Code        string `json:"code" gorm:"uniqueIndex;size:32;not null"`
 	Name        string `json:"name" gorm:"size:120;not null"`
 	Description string `json:"description" gorm:"size:255"`
+	// ProductsPerUnit is the production quota of one unit of this material: the max
+	// number of products a single unit (one sheet / one lot) can yield. When a batch
+	// is created whose total products exceed this, it is split into a parent batch
+	// plus child batches, each capped at this many products (see Batch.ParentBatchID).
+	// nil = unlimited (no split). Only OWNER may set it (guarded in CatalogService).
+	ProductsPerUnit *int `json:"products_per_unit"`
 }
 
 func (Material) TableName() string { return "materials" }
@@ -105,7 +111,7 @@ type MasterImportJob struct {
 	NewMaterials int `json:"new_materials"`
 	NewSKUs      int `json:"new_skus"`
 	NewMappings  int `json:"new_mappings"`
-	ReviewCount  int `json:"review_count"`  // SKUs seen with >1 distinct Loại VL
+	ReviewCount  int `json:"review_count"`  // SKUs whose rows disagree on the material set
 	MissingCount int `json:"missing_count"` // SKUs present but Loại VL empty
 	ErrorRows    int `json:"error_rows"`    // rows with Loại VL but no SKU
 

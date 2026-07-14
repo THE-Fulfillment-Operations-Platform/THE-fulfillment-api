@@ -30,12 +30,13 @@ func (h *Handlers) CreateBatch(c *gin.Context) {
 func (h *Handlers) ListBatches(c *gin.Context) {
 	p := pageFrom(c)
 	f := repositories.BatchFilter{
-		Page:       p,
-		MaterialID: uintQueryPtr(c, "material_id"),
-		Status:     c.Query("status"),
-		Priority:   c.Query("priority"),
-		DateFrom:   timeQueryPtr(c, "date_from"),
-		DateTo:     timeQueryPtr(c, "date_to"),
+		Page:          p,
+		MaterialID:    uintQueryPtr(c, "material_id"),
+		Status:        c.Query("status"),
+		Priority:      c.Query("priority"),
+		DateFrom:      timeQueryPtr(c, "date_from"),
+		DateTo:        timeQueryPtr(c, "date_to"),
+		ParentBatchID: uintQueryPtr(c, "parent_batch_id"),
 	}
 	rows, total, err := h.svc.Batch.List(f)
 	if err != nil {

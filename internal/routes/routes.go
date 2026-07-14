@@ -127,10 +127,14 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		stores.DELETE("/:id", middleware.RequireRoles(roleAdminOwner...), h.DeleteStore)
 	}
 
-	// Materials (ops/admin/owner write; internal read).
+	// Materials (ops/admin/owner write; internal read). Quota import is OWNER-only
+	// because it sets the production quota, an OWNER-only lever.
 	materials := authd.Group("/materials")
 	{
 		materials.GET("", middleware.RequireRoles(roleInternal...), h.ListMaterials)
+		materials.GET("/import/template.xlsx", middleware.RequireRoles(models.RoleOwner), h.DownloadMaterialTemplate)
+		materials.POST("/import/preview", middleware.RequireRoles(models.RoleOwner), h.MaterialImportPreview)
+		materials.POST("/import/commit", middleware.RequireRoles(models.RoleOwner), h.MaterialImportCommit)
 		materials.GET("/:id", middleware.RequireRoles(roleInternal...), h.GetMaterial)
 		materials.POST("", middleware.RequireRoles(roleOpsAdmin...), h.CreateMaterial)
 		materials.PUT("/:id", middleware.RequireRoles(roleOpsAdmin...), h.UpdateMaterial)
@@ -203,6 +207,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	design := authd.Group("/design-queue", middleware.RequireRoles(roleDesignOps...))
 	{
 		design.GET("", h.DesignQueue)
+		design.GET("/assets.zip", h.DownloadDesignAssetsZip)
 		design.GET("/material-buckets", h.MaterialBuckets)
 		design.GET("/material/:materialId/items", h.DesignReadyItemsForMaterial)
 	}

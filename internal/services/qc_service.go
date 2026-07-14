@@ -2,6 +2,7 @@ package services
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"gorm.io/gorm"
@@ -175,6 +176,74 @@ func (s *QCService) targetBatchItems(item *models.OrderItem, batchItemID *uint) 
 	return item.BatchItems, nil
 }
 
+// stagePhraseVN describes how far a material part has got, for QC-block messages.
+func stagePhraseVN(s models.InternalStatus, batched bool) string {
+	if !batched {
+		return "chưa vào sản xuất"
+	}
+	switch s {
+	case models.StatusPending:
+		return "chưa sản xuất"
+	case models.StatusPrinted:
+		return "mới in, chưa cắt"
+	default:
+		return string(s)
+	}
+}
+
+// assertProductComplete verifies the finished product is ready for its single QC
+// check: EVERY material the SKU requires must have a part that has reached CUT
+// ("Đã cắt"), the last fabrication stage. A material still unbatched, PENDING or
+// only PRINTED (in-progress, not cut) blocks QC — you QC the fully-finished
+// product as a whole, once, never a half-produced one. Falls back to the item's
+// own parts when the SKU's bill of materials is unknown (legacy items).
+func assertProductComplete(item *models.OrderItem) error {
+	// Highest fabrication stage reached per material.
+	best := map[uint]models.InternalStatus{}
+	for _, bi := range item.BatchItems {
+		if cur, ok := best[bi.MaterialID]; !ok || bi.Status.Rank() > cur.Rank() {
+			best[bi.MaterialID] = bi.Status
+		}
+	}
+	cutRank := models.StatusCut.Rank()
+	done := func(materialID uint) bool {
+		s, ok := best[materialID]
+		return ok && s.Rank() >= cutRank
+	}
+
+	if item.SKU != nil && len(item.SKU.Materials) > 0 {
+		var pending []string
+		for _, sm := range item.SKU.Materials {
+			if done(sm.MaterialID) {
+				continue
+			}
+			name := strings.TrimSpace(sm.Material.Name)
+			if name == "" {
+				name = fmt.Sprintf("NVL #%d", sm.MaterialID)
+			}
+			s, batched := best[sm.MaterialID]
+			pending = append(pending, name+" ("+stagePhraseVN(s, batched)+")")
+		}
+		if len(pending) > 0 {
+			return apperr.Unprocessable("Sản phẩm chưa cắt xong — còn NVL chưa đạt 'Đã cắt': " +
+				strings.Join(pending, ", ") + ". Cắt xong toàn bộ NVL rồi mới QC.")
+		}
+		return nil
+	}
+
+	// Unknown BOM: gate on the item's own parts — all must have reached CUT.
+	if len(item.BatchItems) == 0 {
+		return apperr.Unprocessable("Item chưa được đưa vào batch sản xuất nên chưa thể QC")
+	}
+	for _, bi := range item.BatchItems {
+		if bi.Status.Rank() < cutRank {
+			return apperr.Unprocessable("Sản phẩm chưa cắt xong (còn phần " +
+				stagePhraseVN(bi.Status, true) + ") — cắt xong hết rồi mới QC.")
+		}
+	}
+	return nil
+}
+
 // Pass records a QC PASS: the produced item matches the seller's mockup. The
 // targeted batch part(s) move to QC_PASSED and the item status is recomputed.
 func (s *QCService) Pass(actor Actor, in QCDecisionInput) (*models.OrderItem, error) {
@@ -188,7 +257,10 @@ func (s *QCService) Pass(actor Actor, in QCDecisionInput) (*models.OrderItem, er
 	if item.MockupURL == "" {
 		return nil, apperr.Unprocessable("Item chưa có link mockup của seller để đối chiếu khi QC")
 	}
-	targets, err := s.targetBatchItems(item, in.BatchItemID)
+	// QC is a single product-level gate: it checks the whole assembled product, so
+	// it always targets every production part of the item — never a single material
+	// part. This is what makes QC happen once per product, not once per NVL batch.
+	targets, err := s.targetBatchItems(item, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -203,6 +275,12 @@ func (s *QCService) Pass(actor Actor, in QCDecisionInput) (*models.OrderItem, er
 	}
 	if allPassed {
 		return nil, apperr.Unprocessable("Item này đã QC PASS rồi — không cần quét lại")
+	}
+	// The whole product must be finished before QC: every material the SKU needs
+	// must have a produced (non-pending) part. A combo whose material is still
+	// unbatched or unstarted is not QC-ready — you QC the finished product, once.
+	if err := assertProductComplete(item); err != nil {
+		return nil, err
 	}
 
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {

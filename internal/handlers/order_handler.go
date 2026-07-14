@@ -1,6 +1,9 @@
 package handlers
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/gin-gonic/gin"
 
 	"the-fulfillment/backend/internal/middleware"
@@ -111,6 +114,44 @@ func (h *Handlers) DesignQueue(c *gin.Context) {
 		return
 	}
 	response.List(c, rows, metaFor(f.Page, total))
+}
+
+// DownloadDesignAssetsZip streams the design + mockup files of the design queue
+// as a ZIP, one folder per internal code. An optional ?item_ids=1,2,3 restricts
+// the export to the ticked rows; omitting it bundles the whole queue.
+// GET /api/design-queue/assets.zip
+func (h *Handlers) DownloadDesignAssetsZip(c *gin.Context) {
+	ids := parseUintCSV(c.Query("item_ids"))
+	c.Header("Content-Disposition", `attachment; filename="design-assets.zip"`)
+	c.Header("Content-Type", "application/zip")
+	if err := h.svc.Order.StreamDesignAssetsZip(c.Request.Context(), c.Writer, ids); err != nil {
+		// Only surface a JSON error if nothing has been streamed yet; once the ZIP
+		// body has started we can't switch to an error envelope.
+		if !c.Writer.Written() {
+			response.Fail(c, err)
+		}
+		return
+	}
+}
+
+// parseUintCSV turns "1,2,3" into []uint, silently dropping blanks and non-numeric
+// tokens. Returns nil for an empty string so callers treat it as "no filter".
+func parseUintCSV(s string) []uint {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var out []uint
+	for _, tok := range strings.Split(s, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		if v, err := strconv.ParseUint(tok, 10, 64); err == nil {
+			out = append(out, uint(v))
+		}
+	}
+	return out
 }
 
 // UpdateItemDesign saves print/cut/mockup files and (optionally) sets design ready.
