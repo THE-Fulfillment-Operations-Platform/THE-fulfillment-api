@@ -296,6 +296,7 @@ paths:
         Bảng sản xuất chỉ đặt các chặng gia công (PENDING/PRINTED/CUT). QC_PASSED
         là cổng cấp sản phẩm, chỉ đặt 1 lần ở trạm QC (/api/qc/pass) khi mọi NVL
         đã sản xuất xong; batch tự lên QC_PASSED nhờ roll-up từ item đã QC.
+        Sản xuất chỉ tiến, không lùi: không hạ batch về chặng trước đó (422).
       requestBody:
         required: true
         content:

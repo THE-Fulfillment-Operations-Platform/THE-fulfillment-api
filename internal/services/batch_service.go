@@ -276,6 +276,18 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 	if err != nil {
 		return nil, err
 	}
+	// A QC-passed batch is finished; the board never edits it (undoing QC is a
+	// deliberate QC-station action, not a status click). Mirrors the FE lock.
+	if batch.Status == models.StatusQCPassed {
+		return nil, apperr.Unprocessable("Batch đã QC — không cập nhật trạng thái ở bảng sản xuất nữa.")
+	}
+	// Production moves forward: a batch never regresses to an earlier stage, which
+	// protects the QC gate (regressing a CUT batch would un-finish its items). The
+	// one exception is OWNER, who may step a batch back to fix a mistaken advance.
+	// Rework is remake + a note, not a status rollback.
+	if newStatus.Rank() < batch.Status.Rank() && actor.Role != models.RoleOwner {
+		return nil, apperr.Unprocessable("Sản xuất chỉ tiến, không lùi: batch đang ở '" + string(batch.Status) + "', không thể hạ về '" + string(newStatus) + "'. (Chỉ OWNER được sửa khi bấm nhầm.)")
+	}
 
 	affectedItems := map[uint]bool{}
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
@@ -288,6 +300,12 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 			bi := &items[i]
 			item, loadErr := txRepo.OrderItem.FindByID(bi.OrderItemID)
 			if loadErr != nil || itemCancelled(item.CancellationStatus) {
+				continue
+			}
+			// Never let a board change touch an already QC-passed part. In a mixed
+			// batch (one order QC-passed while another still in production) this stops
+			// a batch move — especially an OWNER regression — from silently un-QC'ing it.
+			if bi.Status == models.StatusQCPassed {
 				continue
 			}
 			if bi.Status == newStatus {

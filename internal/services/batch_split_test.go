@@ -155,6 +155,90 @@ func TestBatchCreate_UnlimitedQuota_Flat(t *testing.T) {
 	}
 }
 
+// TestUpdateStatus_NoRegression: the production board only moves forward. Advancing
+// PENDING→PRINTED→CUT is fine; regressing back is rejected (protects the QC gate).
+func TestUpdateStatus_NoRegression(t *testing.T) {
+	db := newSplitDB(t)
+	svc := newBatchService(db)
+	_, ids := seedSplit(t, db, 0, 2) // unlimited quota → one flat batch
+	actor := Actor{ID: 1, Role: models.RoleProduction}
+
+	batch, _, err := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Forward is allowed.
+	if _, err := svc.UpdateStatus(actor, batch.ID, UpdateStatusInput{Status: string(models.StatusPrinted)}); err != nil {
+		t.Fatalf("advance to PRINTED: %v", err)
+	}
+	if _, err := svc.UpdateStatus(actor, batch.ID, UpdateStatusInput{Status: string(models.StatusCut)}); err != nil {
+		t.Fatalf("advance to CUT: %v", err)
+	}
+
+	// Backward is rejected.
+	if _, err := svc.UpdateStatus(actor, batch.ID, UpdateStatusInput{Status: string(models.StatusPrinted)}); err == nil {
+		t.Fatalf("regressing CUT → PRINTED must be rejected")
+	}
+	if _, err := svc.UpdateStatus(actor, batch.ID, UpdateStatusInput{Status: string(models.StatusPending)}); err == nil {
+		t.Fatalf("regressing CUT → PENDING must be rejected")
+	}
+	got, _ := svc.repo.Batch.FindByID(batch.ID)
+	if got.Status != models.StatusCut {
+		t.Fatalf("batch should remain CUT after rejected regressions, got %s", got.Status)
+	}
+}
+
+// TestUpdateStatus_OwnerRegression: OWNER may step a batch back (fix a mistaken
+// advance), but an already QC-passed part is never dragged down, and a fully
+// QC-passed batch stays locked even for OWNER.
+func TestUpdateStatus_OwnerRegression(t *testing.T) {
+	db := newSplitDB(t)
+	svc := newBatchService(db)
+	owner := Actor{ID: 1, Role: models.RoleOwner}
+
+	mat := &models.Material{Code: "MICA", Name: "Mica"}
+	db.Create(mat)
+	order := &models.Order{
+		InternalCode: "O1", StoreOrderID: "S1", SellerID: 1,
+		ReviewStatus: models.ReviewApproved, SellerStatus: models.SellerStatusProduction,
+	}
+	db.Create(order)
+	// itemA already QC-passed, itemB still in production (CUT) → mixed batch.
+	itemA := &models.OrderItem{OrderID: order.ID, LineNo: 1, InternalCode: "O1_1", Quantity: 1, InternalStatus: models.StatusQCPassed}
+	itemB := &models.OrderItem{OrderID: order.ID, LineNo: 2, InternalCode: "O1_2", Quantity: 1, InternalStatus: models.StatusCut}
+	db.Create(itemA)
+	db.Create(itemB)
+	batch := &models.Batch{Code: "B1", MaterialID: mat.ID, Status: models.StatusCut}
+	db.Create(batch)
+	biA := &models.BatchItem{BatchID: batch.ID, OrderItemID: itemA.ID, MaterialID: mat.ID, Status: models.StatusQCPassed}
+	biB := &models.BatchItem{BatchID: batch.ID, OrderItemID: itemB.ID, MaterialID: mat.ID, Status: models.StatusCut}
+	db.Create(biA)
+	db.Create(biB)
+
+	// OWNER regresses CUT → PRINTED.
+	if _, err := svc.UpdateStatus(owner, batch.ID, UpdateStatusInput{Status: string(models.StatusPrinted)}); err != nil {
+		t.Fatalf("owner regression should be allowed: %v", err)
+	}
+	var gotA, gotB models.BatchItem
+	db.First(&gotA, biA.ID)
+	db.First(&gotB, biB.ID)
+	if gotA.Status != models.StatusQCPassed {
+		t.Fatalf("QC-passed part must not be dragged down, got %s", gotA.Status)
+	}
+	if gotB.Status != models.StatusPrinted {
+		t.Fatalf("in-production part should drop to PRINTED, got %s", gotB.Status)
+	}
+
+	// A fully QC-passed batch is locked even for OWNER.
+	qcBatch := &models.Batch{Code: "B2", MaterialID: mat.ID, Status: models.StatusQCPassed}
+	db.Create(qcBatch)
+	db.Create(&models.BatchItem{BatchID: qcBatch.ID, OrderItemID: itemA.ID, MaterialID: mat.ID, Status: models.StatusQCPassed})
+	if _, err := svc.UpdateStatus(owner, qcBatch.ID, UpdateStatusInput{Status: string(models.StatusPrinted)}); err == nil {
+		t.Fatalf("a QC-passed batch must stay locked even for OWNER")
+	}
+}
+
 // TestParentStatusRollup: a parent's status follows the least-advanced child, and
 // only reaches QC_PASSED when every child has. Children reach QC_PASSED via the QC
 // station (their items pass QC), never via the production board.
