@@ -107,3 +107,11 @@ func AbortForbidden(c *gin.Context, message string) {
 		Error:   &ErrorBody{Code: "FORBIDDEN", Message: message},
 	})
 }
+
+// AbortTooManyRequests is a helper for rate-limiting middleware.
+func AbortTooManyRequests(c *gin.Context, message string) {
+	c.AbortWithStatusJSON(http.StatusTooManyRequests, Envelope{
+		Success: false,
+		Error:   &ErrorBody{Code: "TOO_MANY_REQUESTS", Message: message},
+	})
+}

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -73,6 +74,29 @@ func (h *Handlers) ExportProductionTemplate(c *gin.Context) {
 	}
 	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
 	c.Data(http.StatusOK, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", data)
+}
+
+// DownloadBatchAssetsZip streams a batch asset bundle as a ZIP download.
+// GET /api/batches/:id/assets.zip
+func (h *Handlers) DownloadBatchAssetsZip(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	batch, err := h.svc.Batch.Get(id)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	filename := "batch-" + strings.ReplaceAll(batch.Code, "#", "") + "-assets.zip"
+	c.Header("Content-Disposition", "attachment; filename=\""+filename+"\"")
+	c.Header("Content-Type", "application/zip")
+	if err := h.svc.Batch.StreamBatchAssetsZip(c.Request.Context(), c.Writer, id); err != nil {
+		if !c.Writer.Written() {
+			response.Fail(c, err)
+		}
+		return
+	}
 }
 
 // UpdateBatchStatus moves a batch through Pending/Đã in/Đã cắt/Đã QC.

@@ -67,16 +67,22 @@ func CORS(allowedOrigins []string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		origin := c.GetHeader("Origin")
 		if origin != "" {
+			_, explicit := set[origin]
 			if allowAll {
 				c.Header("Access-Control-Allow-Origin", origin)
-			} else if _, ok := set[origin]; ok {
+			} else if explicit {
 				c.Header("Access-Control-Allow-Origin", origin)
+			}
+			// Only grant credentialed CORS to explicitly allow-listed origins.
+			// Reflecting an arbitrary origin AND allowing credentials is unsafe, so
+			// never combine "*" (reflect-any) with Allow-Credentials.
+			if explicit && !allowAll {
+				c.Header("Access-Control-Allow-Credentials", "true")
 			}
 			c.Header("Vary", "Origin")
 		}
 		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Origin,Content-Type,Accept,Authorization")
-		c.Header("Access-Control-Allow-Credentials", "true")
 		c.Header("Access-Control-Max-Age", "86400")
 
 		if strings.EqualFold(c.Request.Method, "OPTIONS") {

@@ -1,9 +1,16 @@
 package services
 
 import (
+	"archive/zip"
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"path"
 	"strings"
+	"time"
 
 	"github.com/xuri/excelize/v2"
 	"gorm.io/gorm"
@@ -79,7 +86,7 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 				continue
 			}
 			// Only approved orders may enter production.
-			if item.Order == nil || item.Order.ReviewStatus != models.ReviewApproved {
+			if item.Order == nil || item.Order.ReviewStatus != models.ReviewApproved || itemCancelled(item.CancellationStatus) {
 				skipped = append(skipped, itemID)
 				continue
 			}
@@ -171,6 +178,10 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 		}
 		for i := range items {
 			bi := &items[i]
+			item, loadErr := txRepo.OrderItem.FindByID(bi.OrderItemID)
+			if loadErr != nil || itemCancelled(item.CancellationStatus) {
+				continue
+			}
 			if bi.Status == newStatus {
 				continue
 			}
@@ -261,7 +272,7 @@ func ProductionTemplateGrid(batch *models.Batch) [][]string {
 
 	for _, bi := range batch.Items {
 		it := bi.OrderItem
-		if it == nil {
+		if it == nil || itemCancelled(it.CancellationStatus) {
 			continue
 		}
 		// Loại VL comes from the batch's material (batches are material-scoped).
@@ -379,4 +390,131 @@ func (s *BatchService) ProductionTemplateXLSX(batchID uint) ([]byte, string, err
 	}
 	filename := "production-" + strings.ReplaceAll(batch.Code, "#", "") + ".xlsx"
 	return buf.Bytes(), filename, nil
+}
+
+// StreamBatchAssetsZip downloads each batch item's design/mockup/print/cut asset URLs
+// and streams them into a ZIP archive for the client.
+func (s *BatchService) StreamBatchAssetsZip(ctx context.Context, w io.Writer, batchID uint) error {
+	batch, err := s.Get(batchID)
+	if err != nil {
+		return err
+	}
+
+	zw := zip.NewWriter(w)
+	defer func() { _ = zw.Close() }()
+
+	// SSRF-safe client: refuses to connect to non-public IPs (see safeurl.go).
+	// Asset URLs come from seller import data, so a plain client would be an SSRF sink.
+	client := newSafeAssetClient(30 * time.Second)
+	manifest := make([]string, 0)
+	usedNames := map[string]int{}
+
+	for _, bi := range batch.Items {
+		it := bi.OrderItem
+		if it == nil || itemCancelled(it.CancellationStatus) {
+			continue
+		}
+
+		assets := []struct {
+			url   string
+			type_ string
+		}{
+			{it.DesignURL, "design"},
+			{it.MockupURL, "mockup"},
+			{it.PrintFileURL, "print"},
+			{it.CutFileURL, "cut"},
+		}
+		code := sanitizeZipComponent(it.InternalCode)
+		if code == "" {
+			code = sanitizeZipComponent(batch.Code)
+		}
+
+		for _, asset := range assets {
+			if strings.TrimSpace(asset.url) == "" {
+				continue
+			}
+			entryName := zipEntryName(code, asset.type_, asset.url, usedNames)
+			if err := writeURLToZipEntry(ctx, client, zw, asset.url, entryName); err != nil {
+				return err
+			}
+			manifest = append(manifest, fmt.Sprintf("%s,%s,%s", code, asset.type_, asset.url))
+		}
+	}
+
+	if len(manifest) == 0 {
+		return apperr.Unprocessable("No assets available for batch ZIP download")
+	}
+
+	m, err := zw.Create("manifest.txt")
+	if err != nil {
+		return apperr.Internal("could not write ZIP manifest").Wrap(err)
+	}
+	if _, err := io.WriteString(m, strings.Join(manifest, "\n")); err != nil {
+		return apperr.Internal("could not write ZIP manifest").Wrap(err)
+	}
+
+	return zw.Close()
+}
+
+func writeURLToZipEntry(ctx context.Context, client *http.Client, zw *zip.Writer, rawURL, entryName string) error {
+	// Reject non-http(s) schemes and private/loopback hosts before dialing. The
+	// client's dial-time guard is the authoritative SSRF check (also covers
+	// redirects + rebinding); this gives an early, clear rejection.
+	u, err := validatePublicHTTPURL(rawURL)
+	if err != nil {
+		return apperr.Unprocessable("Asset URL not allowed: " + err.Error())
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return apperr.Internal("could not download asset").Wrap(err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return apperr.Internal("could not download asset").Wrap(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return apperr.Internal(fmt.Sprintf("asset request failed: %s -> %d", rawURL, resp.StatusCode))
+	}
+
+	entry, err := zw.Create(entryName)
+	if err != nil {
+		return apperr.Internal("could not write ZIP entry").Wrap(err)
+	}
+
+	// Cap per-asset size so a hostile/huge remote file can't exhaust resources.
+	if _, err = io.Copy(entry, io.LimitReader(resp.Body, maxAssetBytes)); err != nil {
+		return apperr.Internal("could not stream asset into ZIP").Wrap(err)
+	}
+	return nil
+}
+
+func zipEntryName(code, assetType, rawURL string, usedNames map[string]int) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		u = &url.URL{Path: rawURL}
+	}
+	ext := path.Ext(u.Path)
+	if ext == "" {
+		ext = ".bin"
+	}
+	name := fmt.Sprintf("%s-%s%s", code, assetType, ext)
+	if count, ok := usedNames[name]; ok {
+		count++
+		usedNames[name] = count
+		name = fmt.Sprintf("%s-%d%s", strings.TrimSuffix(name, ext), count, ext)
+	} else {
+		usedNames[name] = 1
+	}
+	return name
+}
+
+func sanitizeZipComponent(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.ReplaceAll(value, "#", "")
+	value = strings.ReplaceAll(value, "/", "-")
+	value = strings.ReplaceAll(value, " ", "_")
+	return value
 }

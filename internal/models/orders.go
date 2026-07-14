@@ -140,6 +140,16 @@ type OrderItem struct {
 	InternalStatus InternalStatus `json:"internal_status" gorm:"size:20;not null;index;default:'PENDING'"`
 	DesignStatus   DesignStatus   `json:"design_status" gorm:"size:20;not null;index;default:'PENDING'"`
 
+	// Cancellation is tracked per line item so cancelling one product does not
+	// incorrectly cancel every product grouped under the same order.
+	CancellationStatus         CancellationStatus `json:"cancellation_status" gorm:"size:20;not null;index;default:'NONE'"`
+	CancellationRequestedByID  *uint              `json:"cancellation_requested_by_id"`
+	CancellationRequestedAt    *time.Time         `json:"cancellation_requested_at"`
+	CancellationReason         string             `json:"cancellation_reason" gorm:"size:1000"`
+	CancellationResolvedByID   *uint              `json:"cancellation_resolved_by_id"`
+	CancellationResolvedAt     *time.Time         `json:"cancellation_resolved_at"`
+	CancellationResolutionNote string             `json:"cancellation_resolution_note" gorm:"size:1000"`
+
 	Assets     []ItemAsset `json:"assets,omitempty" gorm:"foreignKey:OrderItemID"`
 	BatchItems []BatchItem `json:"batch_items,omitempty" gorm:"foreignKey:OrderItemID"`
 }

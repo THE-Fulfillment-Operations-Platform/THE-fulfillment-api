@@ -29,6 +29,9 @@ func (s *OrderService) ListOrders(f repositories.OrderFilter) ([]models.Order, i
 	if err := annotateStoreOrderDupSlice(s.repo, rows); err != nil {
 		return rows, total, err
 	}
+	for i := range rows {
+		rows[i].Items = activeOrderItems(rows[i].Items)
+	}
 	return rows, total, nil
 }
 
@@ -41,6 +44,27 @@ func (s *OrderService) GetOrder(id uint) (*models.Order, error) {
 		return nil, apperr.Internal("lookup failed").Wrap(err)
 	}
 	return o, nil
+}
+
+// GetOperationalOrder is the internal work view. It deliberately hides
+// cancelled line items; seller and audit flows use GetOrder to retain history.
+func (s *OrderService) GetOperationalOrder(id uint) (*models.Order, error) {
+	o, err := s.GetOrder(id)
+	if err != nil {
+		return nil, err
+	}
+	o.Items = activeOrderItems(o.Items)
+	return o, nil
+}
+
+func activeOrderItems(items []models.OrderItem) []models.OrderItem {
+	out := make([]models.OrderItem, 0, len(items))
+	for _, item := range items {
+		if !itemCancelled(item.CancellationStatus) {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // ---------- Items ----------
@@ -110,6 +134,9 @@ func (s *OrderService) GetItem(id uint) (*models.OrderItem, error) {
 		}
 		return nil, apperr.Internal("lookup failed").Wrap(err)
 	}
+	if itemCancelled(it.CancellationStatus) {
+		return nil, apperr.NotFound("Item not found")
+	}
 	return it, nil
 }
 
@@ -146,6 +173,9 @@ func (s *OrderService) UpdateItemDesign(actor Actor, itemID uint, in UpdateDesig
 	item, err := s.GetItem(itemID)
 	if err != nil {
 		return nil, err
+	}
+	if itemCancelled(item.CancellationStatus) {
+		return nil, apperr.Conflict("Sản phẩm đã huỷ, không thể tiếp tục thiết kế")
 	}
 
 	now := time.Now()
@@ -346,9 +376,9 @@ func (s *OrderService) CreateOrderDirect(actor Actor, in DirectOrderInput) (*mod
 // SellerOrderView is the sanitized, high-level shape sellers may see. It never
 // exposes internal print/cut/QC detail.
 type SellerOrderView struct {
-	ID           uint                `json:"id"`
-	InternalCode string              `json:"internal_code"`
-	StoreOrderID string              `json:"store_order_id"`
+	ID           uint   `json:"id"`
+	InternalCode string `json:"internal_code"`
+	StoreOrderID string `json:"store_order_id"`
 	// StoreOrderDup: this store order id is shared by more than one order (repeated
 	// upload) — the seller UI flags it so they can spot an accidental re-send.
 	StoreOrderDup bool                `json:"store_order_dup"`
@@ -370,15 +400,23 @@ type SellerOrderView struct {
 
 // SellerItemView only exposes product-level facts, not the factory pipeline.
 type SellerItemView struct {
-	SKUCode     string `json:"sku_code"`
-	ProductName string `json:"product_name"`
-	VariantCode string `json:"variant_code"`
-	Quantity    int    `json:"quantity"`
-	MockupURL   string `json:"mockup_url"`
+	ID                 uint                      `json:"id"`
+	SKUCode            string                    `json:"sku_code"`
+	ProductName        string                    `json:"product_name"`
+	VariantCode        string                    `json:"variant_code"`
+	Quantity           int                       `json:"quantity"`
+	MockupURL          string                    `json:"mockup_url"`
+	CancellationStatus models.CancellationStatus `json:"cancellation_status"`
 }
 
 func toSellerView(o models.Order, withItems bool) SellerOrderView {
 	action := sellerCancelActionForOrder(&o)
+	activeItemCount := 0
+	for i := range o.Items {
+		if !itemCancelled(o.Items[i].CancellationStatus) {
+			activeItemCount++
+		}
+	}
 	v := SellerOrderView{
 		ID: o.ID, InternalCode: o.InternalCode, StoreOrderID: o.StoreOrderID,
 		StoreOrderDup: o.StoreOrderDup,
@@ -386,13 +424,14 @@ func toSellerView(o models.Order, withItems bool) SellerOrderView {
 		ReviewStatus: o.ReviewStatus, CancellationStatus: o.CancellationStatus, ReviewNote: o.ReviewNote,
 		CanCancel:              action == SellerActionCancel,
 		CanRequestCancellation: action == SellerActionRequest,
-		ItemCount:              len(o.Items), CreatedAt: o.CreatedAt,
+		ItemCount:              activeItemCount, CreatedAt: o.CreatedAt,
 	}
 	if withItems {
 		for _, it := range o.Items {
 			v.Items = append(v.Items, SellerItemView{
+				ID:      it.ID,
 				SKUCode: it.SKUCode, ProductName: it.ProductName, VariantCode: it.VariantCode,
-				Quantity: it.Quantity, MockupURL: it.MockupURL,
+				Quantity: it.Quantity, MockupURL: it.MockupURL, CancellationStatus: it.CancellationStatus,
 			})
 		}
 	}

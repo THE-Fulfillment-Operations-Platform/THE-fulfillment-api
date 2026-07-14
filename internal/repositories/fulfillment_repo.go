@@ -10,6 +10,11 @@ import (
 
 type PackageRepository struct{ db *gorm.DB }
 
+func activePackageItems(db *gorm.DB) *gorm.DB {
+	return db.Joins("JOIN order_items ON order_items.id = package_items.order_item_id").
+		Where("order_items.cancellation_status NOT IN ?", []models.CancellationStatus{models.CancellationSeller, models.CancellationApproved})
+}
+
 func (r *PackageRepository) Create(p *models.Package) error { return r.db.Create(p).Error }
 func (r *PackageRepository) Update(p *models.Package) error { return r.db.Save(p).Error }
 
@@ -24,7 +29,7 @@ func (r *PackageRepository) UpdateItem(it *models.PackageItem) error { return r.
 
 func (r *PackageRepository) FindByID(id uint) (*models.Package, error) {
 	var p models.Package
-	err := r.db.Preload("Items.OrderItem").Preload("Order").First(&p, id).Error
+	err := r.db.Preload("Items", activePackageItems).Preload("Items.OrderItem").Preload("Order").First(&p, id).Error
 	if err != nil {
 		return nil, err
 	}
@@ -33,7 +38,7 @@ func (r *PackageRepository) FindByID(id uint) (*models.Package, error) {
 
 func (r *PackageRepository) FindOpenByOrder(orderID uint) (*models.Package, error) {
 	var p models.Package
-	err := r.db.Preload("Items.OrderItem").
+	err := r.db.Preload("Items", activePackageItems).Preload("Items.OrderItem").
 		Where("order_id = ? AND status = ?", orderID, models.PackageOpen).First(&p).Error
 	if err != nil {
 		return nil, err
@@ -49,7 +54,7 @@ func (r *PackageRepository) List(p Page, orderID *uint) ([]models.Package, int64
 		q = q.Where("order_id = ?", *orderID)
 	}
 	q.Count(&total)
-	err := q.Preload("Items").Order("id desc").Limit(p.PageSize).Offset(p.Offset()).Find(&rows).Error
+	err := q.Preload("Items", activePackageItems).Order("id desc").Limit(p.PageSize).Offset(p.Offset()).Find(&rows).Error
 	return rows, total, err
 }
 

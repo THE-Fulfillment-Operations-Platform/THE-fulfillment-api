@@ -173,6 +173,15 @@ func (s *ReviewService) GetReviewOrder(id uint) (*ReviewOrderDetail, error) {
 		return nil, err
 	}
 	issues := s.reviewIssues(order)
+	// The review screen is an operational queue, not an audit history. Exclude
+	// cancelled line items so Ops only reviews products that can still proceed.
+	activeItems := make([]models.OrderItem, 0, len(order.Items))
+	for _, item := range order.Items {
+		if !itemCancelled(item.CancellationStatus) {
+			activeItems = append(activeItems, item)
+		}
+	}
+	order.Items = activeItems
 	return &ReviewOrderDetail{Order: order, Issues: issues}, nil
 }
 
@@ -191,6 +200,9 @@ func (s *ReviewService) reviewIssues(order *models.Order) []ReviewIssue {
 
 	// Item-level: SKU/material mapping, mockup, design, quantity.
 	for _, it := range order.Items {
+		if itemCancelled(it.CancellationStatus) {
+			continue
+		}
 		base := ReviewIssue{ItemID: it.ID, ItemCode: it.InternalCode, SKUCode: it.SKUCode}
 		if it.Quantity < 1 {
 			iss := base
@@ -375,7 +387,156 @@ func (s *ReviewService) SellerRequestCancellation(actor Actor, sellerID, orderID
 	return s.getOrder(order.ID)
 }
 
+func itemCancelled(status models.CancellationStatus) bool {
+	return status == models.CancellationSeller || status == models.CancellationApproved
+}
+
+// SellerCancelItem cancels exactly one line item while its parent order is still
+// in review. The parent order is cancelled only after its last active item goes.
+func (s *ReviewService) SellerCancelItem(actor Actor, sellerID, orderID, itemID uint, reason string) (*models.Order, error) {
+	order, err := s.getSellerOrder(sellerID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	if sellerCancelActionForOrder(order) != SellerActionCancel {
+		return nil, cancelActionError(sellerCancelActionForOrder(order))
+	}
+	item, err := s.repo.OrderItem.FindByID(itemID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperr.NotFound("Order item not found")
+		}
+		return nil, apperr.Internal("lookup item failed").Wrap(err)
+	}
+	if item.OrderID != orderID {
+		return nil, apperr.NotFound("Order item not found in this order")
+	}
+	if item.CancellationStatus == models.CancellationRequested || itemCancelled(item.CancellationStatus) {
+		return nil, apperr.Conflict("This order item already has a cancellation")
+	}
+	now := time.Now()
+	item.CancellationStatus = models.CancellationSeller
+	item.CancellationRequestedByID, item.CancellationResolvedByID = actor.IDPtr(), actor.IDPtr()
+	item.CancellationRequestedAt, item.CancellationResolvedAt = &now, &now
+	item.CancellationReason = strings.TrimSpace(reason)
+	if err := s.repo.OrderItem.Update(item); err != nil {
+		return nil, apperr.Internal("could not cancel order item").Wrap(err)
+	}
+
+	refreshed, err := s.getOrder(orderID)
+	if err != nil {
+		return nil, err
+	}
+	allCancelled := len(refreshed.Items) > 0
+	for i := range refreshed.Items {
+		if !itemCancelled(refreshed.Items[i].CancellationStatus) {
+			allCancelled = false
+			break
+		}
+	}
+	if allCancelled {
+		refreshed.ReviewStatus = models.ReviewCancelled
+		refreshed.CancellationStatus = models.CancellationSeller
+		refreshed.CancellationResolvedAt = &now
+		if err := s.repo.Order.Update(refreshed); err != nil {
+			return nil, apperr.Internal("could not close empty order").Wrap(err)
+		}
+	}
+	s.audit.Log(actor, "ORDER_ITEM_SELLER_CANCEL", "order_item", &item.ID, "Seller cancelled item "+item.InternalCode, nil)
+	return s.getOrder(orderID)
+}
+
+// SellerRequestItemCancellation requests removal of one item without changing
+// the parent order or its sibling items until Ops resolves the request.
+func (s *ReviewService) SellerRequestItemCancellation(actor Actor, sellerID, orderID, itemID uint, reason string) (*models.Order, error) {
+	order, err := s.getSellerOrder(sellerID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	if sellerCancelActionForOrder(order) != SellerActionRequest {
+		return nil, cancelActionError(sellerCancelActionForOrder(order))
+	}
+	item, err := s.repo.OrderItem.FindByID(itemID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperr.NotFound("Order item not found")
+		}
+		return nil, apperr.Internal("lookup item failed").Wrap(err)
+	}
+	if item.OrderID != orderID {
+		return nil, apperr.NotFound("Order item not found in this order")
+	}
+	if item.CancellationStatus == models.CancellationRequested || itemCancelled(item.CancellationStatus) {
+		return nil, apperr.Conflict("This order item already has a cancellation")
+	}
+	now := time.Now()
+	item.CancellationStatus = models.CancellationRequested
+	item.CancellationRequestedByID, item.CancellationRequestedAt = actor.IDPtr(), &now
+	item.CancellationReason = strings.TrimSpace(reason)
+	item.CancellationResolvedByID, item.CancellationResolvedAt, item.CancellationResolutionNote = nil, nil, ""
+	if err := s.repo.OrderItem.Update(item); err != nil {
+		return nil, apperr.Internal("could not request order item cancellation").Wrap(err)
+	}
+	_ = s.repo.Note.Create(&models.Note{Title: "Yêu cầu huỷ sản phẩm " + item.InternalCode, Body: "Seller yêu cầu huỷ sản phẩm. Lý do: " + item.CancellationReason, ReasonCode: "ITEM_CANCEL_REQUEST", Severity: models.SeverityHigh, Status: models.NoteOpen, IsRequiredAttention: true, EntityType: models.EntityOrderItem, EntityID: &item.ID, OwnerRole: models.RoleOps, CreatedByID: actor.IDPtr()})
+	s.audit.Log(actor, "ORDER_ITEM_CANCEL_REQUEST", "order_item", &item.ID, "Seller requested cancellation of "+item.InternalCode, nil)
+	return s.getOrder(orderID)
+}
+
 // ---------- Cancellation resolution (OPS / ADMIN) ----------
+
+func (s *ReviewService) ListItemCancellationRequests(p repositories.Page) ([]models.OrderItem, int64, error) {
+	return s.repo.OrderItem.ListCancellationRequests(p.Normalize())
+}
+
+func (s *ReviewService) ResolveItemCancellation(actor Actor, itemID uint, approve bool, note string) (*models.OrderItem, error) {
+	item, err := s.repo.OrderItem.FindByID(itemID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperr.NotFound("Order item not found")
+		}
+		return nil, apperr.Internal("lookup item failed").Wrap(err)
+	}
+	if item.CancellationStatus != models.CancellationRequested {
+		return nil, apperr.Conflict("No pending cancellation request for this order item")
+	}
+	now := time.Now()
+	if approve {
+		item.CancellationStatus = models.CancellationApproved
+	} else {
+		item.CancellationStatus = models.CancellationRejected
+	}
+	item.CancellationResolvedByID, item.CancellationResolvedAt = actor.IDPtr(), &now
+	item.CancellationResolutionNote = strings.TrimSpace(note)
+	if err := s.repo.OrderItem.Update(item); err != nil {
+		return nil, apperr.Internal("could not resolve order item cancellation").Wrap(err)
+	}
+	if approve {
+		order, loadErr := s.getOrder(item.OrderID)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		allCancelled := len(order.Items) > 0
+		for i := range order.Items {
+			if !itemCancelled(order.Items[i].CancellationStatus) {
+				allCancelled = false
+				break
+			}
+		}
+		if allCancelled {
+			order.ReviewStatus, order.CancellationStatus = models.ReviewCancelled, models.CancellationApproved
+			order.CancellationResolvedAt = &now
+			if err := s.repo.Order.Update(order); err != nil {
+				return nil, apperr.Internal("could not close empty order").Wrap(err)
+			}
+		}
+	}
+	action := "CANCEL_ITEM_REJECT"
+	if approve {
+		action = "CANCEL_ITEM_APPROVE"
+	}
+	s.audit.Log(actor, action, "order_item", &item.ID, "Resolved cancellation of "+item.InternalCode, nil)
+	return s.repo.OrderItem.FindByID(item.ID)
+}
 
 // ListCancellationRequests lists orders with a pending cancellation request.
 func (s *ReviewService) ListCancellationRequests(f repositories.OrderFilter) ([]models.Order, int64, error) {

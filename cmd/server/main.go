@@ -27,6 +27,12 @@ func main() {
 	cfg := config.Load()
 	log.Printf("%s starting (env=%s)", cfg.AppName, cfg.AppEnv)
 
+	// Refuse to boot on insecure production config (default JWT secret, demo
+	// accounts with the default password, …). Dev only gets warnings.
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("fatal: %v", err)
+	}
+
 	// Database + migrations.
 	db, err := database.Connect(cfg)
 	if err != nil {

@@ -281,6 +281,12 @@ paths:
   /api/batches/{id}:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
     get: { tags: [Batches], summary: Batch detail (item, SKU, mockup, file, status), responses: { '200': { description: OK } } }
+  /api/batches/{id}/assets.zip:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    get:
+      tags: [Batches]
+      summary: Download batch assets bundle as ZIP
+      responses: { '200': { description: ZIP file } }
   /api/batches/{id}/status:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
     patch:
@@ -372,6 +378,32 @@ paths:
                 weight_grams: { type: integer }
                 note: { type: string }
       responses: { '201': { description: Created } }
+  /api/handoffs/{id}/ship:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    post:
+      tags: [Handoffs]
+      summary: Đánh dấu handoff đã gửi (HANDED_OFF → SHIPPED)
+      description: >
+        Ghi nhận đơn vị vận chuyển + mã vận đơn cho một handoff đã bàn giao và
+        chuyển đơn sang seller status SHIPPED. Chỉ áp dụng cho handoff đang ở
+        trạng thái HANDED_OFF (409 nếu đã SHIPPED). Quyền: OWNER/ADMIN/OPS/PACKING/SHIPPING.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tracking_number]
+              properties:
+                carrier: { type: string, description: "Đơn vị vận chuyển; bỏ trống thì giữ giá trị cũ" }
+                tracking_number: { type: string, description: "Mã vận đơn (bắt buộc)" }
+                label_url: { type: string, description: "Link nhãn/label (tuỳ chọn)" }
+      responses:
+        '200': { description: OK }
+        '400': { description: Thiếu tracking_number }
+        '404': { description: Không tìm thấy handoff }
+        '409': { description: Handoff đã ở trạng thái đã gửi }
+        '422': { description: Handoff chưa ở trạng thái HANDED_OFF }
   /api/notes:
     get:
       tags: [Notes]

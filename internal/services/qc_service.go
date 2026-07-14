@@ -39,6 +39,9 @@ func (s *QCService) resolveItem(ref ScanRef) (*models.OrderItem, error) {
 		}
 		return nil, apperr.Internal("Không tra cứu được dữ liệu").Wrap(err)
 	}
+	if itemCancelled(item.CancellationStatus) {
+		return nil, apperr.Conflict("Sản phẩm đã huỷ, không thể QC")
+	}
 	return item, nil
 }
 
@@ -49,6 +52,9 @@ func (s *QCService) findItemByID(id uint) (*models.OrderItem, error) {
 			return nil, apperr.NotFound("Không tìm thấy item")
 		}
 		return nil, apperr.Internal("Không tra cứu được dữ liệu").Wrap(err)
+	}
+	if itemCancelled(item.CancellationStatus) {
+		return nil, apperr.Conflict("Sản phẩm đã huỷ, không thể QC")
 	}
 	return item, nil
 }

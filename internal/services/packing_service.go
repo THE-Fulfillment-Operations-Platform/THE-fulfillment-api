@@ -44,6 +44,9 @@ func (s *PackingService) getOrCreateOpenPackage(tx *gorm.DB, order *models.Order
 
 	var items []models.PackageItem
 	for _, it := range order.Items {
+		if itemCancelled(it.CancellationStatus) {
+			continue
+		}
 		items = append(items, models.PackageItem{
 			PackageID: pkg.ID, OrderItemID: it.ID, ExpectedQty: it.Quantity, ScannedQty: 0,
 		})
@@ -111,6 +114,9 @@ func (s *PackingService) Scan(actor Actor, in PackingScanInput) (*PackingResult,
 	}
 	if item.InternalStatus != models.StatusQCPassed {
 		return nil, apperr.Unprocessable("Item is not QC-passed yet; cannot pack (BLOCK)")
+	}
+	if itemCancelled(item.CancellationStatus) {
+		return nil, apperr.Conflict("Sản phẩm đã huỷ, không thể đóng gói")
 	}
 	order, err := s.repo.Order.FindByID(item.OrderID)
 	if err != nil {
@@ -327,4 +333,80 @@ func (s *PackingService) CreateHandoff(actor Actor, in HandoffInput) (*models.Ha
 // ListHandoffs returns handoffs.
 func (s *PackingService) ListHandoffs(page repositories.Page) ([]models.Handoff, int64, error) {
 	return s.repo.Handoff.List(page.Normalize())
+}
+
+// MarkShippedInput records the carrier + tracking number for a dispatched
+// handoff. carrier is optional (falls back to the existing value); tracking is
+// required — it is the whole point of the dispatch step.
+type MarkShippedInput struct {
+	Carrier        string `json:"carrier"`
+	TrackingNumber string `json:"tracking_number"`
+	LabelURL       string `json:"label_url"`
+}
+
+// MarkShipped completes the final leg: a handed-off parcel becomes SHIPPED,
+// carrying the carrier + tracking number, and its order advances to seller
+// status SHIPPED. This is the counterpart of CreateHandoff — where CreateHandoff
+// stops at HANDED_OFF (the MVP had no dispatch step), MarkShipped closes the
+// order lifecycle so sellers see "Đã gửi đi" and can follow the tracking.
+func (s *PackingService) MarkShipped(actor Actor, handoffID uint, in MarkShippedInput) (*models.Handoff, error) {
+	in.Carrier = strings.TrimSpace(in.Carrier)
+	in.TrackingNumber = strings.TrimSpace(in.TrackingNumber)
+	in.LabelURL = strings.TrimSpace(in.LabelURL)
+	if in.TrackingNumber == "" {
+		return nil, apperr.BadRequest("Mã vận đơn (tracking_number) là bắt buộc")
+	}
+
+	handoff, err := s.repo.Handoff.FindByID(handoffID)
+	if err != nil {
+		return nil, apperr.NotFound("Handoff not found")
+	}
+	if handoff.Status == models.HandoffShipped {
+		return nil, apperr.Conflict("Handoff đã ở trạng thái đã gửi")
+	}
+	if handoff.Status != models.HandoffHandedOff {
+		return nil, apperr.Unprocessable("Chỉ đánh dấu gửi được cho handoff đã bàn giao")
+	}
+
+	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
+		txRepo := repositories.New(tx)
+
+		if in.Carrier != "" {
+			handoff.Carrier = in.Carrier
+		}
+		handoff.TrackingNumber = in.TrackingNumber
+		if in.LabelURL != "" {
+			handoff.LabelURL = in.LabelURL
+		}
+		handoff.Status = models.HandoffShipped
+		if err := txRepo.Handoff.Update(handoff); err != nil {
+			return err
+		}
+		_ = recordStatus(txRepo, models.EntityHandoff, handoff.ID,
+			string(models.HandoffHandedOff), string(models.HandoffShipped), actor, "marked shipped via "+handoff.Carrier)
+
+		// Advance the order to seller status SHIPPED (the visible end state).
+		if handoff.OrderID != nil {
+			order, oerr := txRepo.Order.FindByID(*handoff.OrderID)
+			if oerr == nil && order.SellerStatus != models.SellerStatusShipped {
+				old := string(order.SellerStatus)
+				order.SellerStatus = models.SellerStatusShipped
+				if err := txRepo.Order.Update(order); err != nil {
+					return err
+				}
+				_ = recordStatus(txRepo, models.EntityOrder, order.ID, old, string(models.SellerStatusShipped), actor, "shipped")
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		if ae, ok := apperr.As(err); ok {
+			return nil, ae
+		}
+		return nil, apperr.Internal("could not mark handoff shipped").Wrap(err)
+	}
+
+	s.audit.Log(actor, "HANDOFF_SHIP", "handoff", &handoff.ID,
+		fmt.Sprintf("Handoff %s shipped via %s (%s)", handoff.Code, handoff.Carrier, handoff.TrackingNumber), nil)
+	return handoff, nil
 }

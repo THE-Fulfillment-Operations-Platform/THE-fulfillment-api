@@ -33,8 +33,16 @@ func Run(db *gorm.DB, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	if err := seedUsers(db, cfg, seller.ID); err != nil {
-		return err
+	// Demo login accounts (owner@the.local … with a shared password) are a
+	// convenience for dev/testing. They are real, working credentials, so seeding
+	// them is gated: SEED_DEMO_USERS must be on, and in production config.Validate
+	// has already refused to boot if the password is still the default.
+	if cfg.SeedDemoUsers {
+		if err := seedUsers(db, cfg, seller.ID); err != nil {
+			return err
+		}
+	} else {
+		log.Println("seed: demo users skipped (SEED_DEMO_USERS=false)")
 	}
 	// Demo orders are opt-in: after a data reset the orders table is empty, so the
 	// old "seed once when no orders exist" guard would re-create them on the next
@@ -192,7 +200,8 @@ func seedUsers(db *gorm.DB, cfg *config.Config, sellerID uint) error {
 			return fmt.Errorf("seed users: %w", err)
 		}
 	}
-	log.Printf("seed: demo users ready (password: %s)", cfg.DemoPassword)
+	// Do not log the demo password — it would leak a valid credential into logs.
+	log.Println("seed: demo users ready")
 	return nil
 }
 

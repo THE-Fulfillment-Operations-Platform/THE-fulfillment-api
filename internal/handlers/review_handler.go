@@ -147,7 +147,85 @@ func (h *Handlers) SellerRequestCancellation(c *gin.Context) {
 	response.OK(c, o)
 }
 
+func (h *Handlers) SellerCancelOrderItem(c *gin.Context) {
+	sellerID, ok := sellerIDFrom(c)
+	if !ok {
+		return
+	}
+	orderID, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	itemID, ok := uintParam(c, "item_id")
+	if !ok {
+		return
+	}
+	o, err := h.svc.Review.SellerCancelItem(actor(c), sellerID, orderID, itemID, bindNote(c).Reason)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, o)
+}
+
+func (h *Handlers) SellerRequestItemCancellation(c *gin.Context) {
+	sellerID, ok := sellerIDFrom(c)
+	if !ok {
+		return
+	}
+	orderID, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	itemID, ok := uintParam(c, "item_id")
+	if !ok {
+		return
+	}
+	o, err := h.svc.Review.SellerRequestItemCancellation(actor(c), sellerID, orderID, itemID, bindNote(c).Reason)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, o)
+}
+
 // ---------- Cancellation requests (OPS / ADMIN) ----------
+
+func (h *Handlers) ListItemCancellationRequests(c *gin.Context) {
+	p := pageFrom(c)
+	rows, total, err := h.svc.Review.ListItemCancellationRequests(p)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.List(c, rows, metaFor(p, total))
+}
+
+func (h *Handlers) ApproveItemCancellation(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	it, err := h.svc.Review.ResolveItemCancellation(actor(c), id, true, bindNote(c).Note)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, it)
+}
+
+func (h *Handlers) RejectItemCancellation(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	it, err := h.svc.Review.ResolveItemCancellation(actor(c), id, false, bindNote(c).Note)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, it)
+}
 
 // ListCancellationRequests lists orders with a pending cancellation request.
 // GET /api/cancellation-requests

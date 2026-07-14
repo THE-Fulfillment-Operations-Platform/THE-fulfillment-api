@@ -219,9 +219,23 @@ func (r *OrderItemRepository) FindByCode(code string) (*models.OrderItem, error)
 	return &it, nil
 }
 
+func (r *OrderItemRepository) ListCancellationRequests(p Page) ([]models.OrderItem, int64, error) {
+	var rows []models.OrderItem
+	var total int64
+	q := r.db.Model(&models.OrderItem{}).Where("order_items.cancellation_status = ?", models.CancellationRequested)
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	err := q.Preload("Order.Seller").Order("order_items.cancellation_requested_at asc").Limit(p.PageSize).Offset(p.Offset()).Find(&rows).Error
+	return rows, total, err
+}
+
 func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 	q := r.db.Model(&models.OrderItem{}).
-		Joins("JOIN orders ON orders.id = order_items.order_id AND orders.deleted_at IS NULL")
+		Joins("JOIN orders ON orders.id = order_items.order_id AND orders.deleted_at IS NULL").
+		// This is the operational item list used by Orders/Items, design, batch,
+		// QC and packing. Cancelled lines are historical records, never work.
+		Where("order_items.cancellation_status NOT IN ?", []models.CancellationStatus{models.CancellationSeller, models.CancellationApproved})
 	if f.SellerID != nil {
 		q = q.Where("orders.seller_id = ?", *f.SellerID)
 	}
@@ -243,7 +257,8 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 		})
 	}
 	if f.ReviewApproved {
-		q = q.Where("orders.review_status = ?", string(models.ReviewApproved))
+		q = q.Where("orders.review_status = ?", string(models.ReviewApproved)).
+			Where("order_items.cancellation_status NOT IN ?", []models.CancellationStatus{models.CancellationSeller, models.CancellationApproved})
 	}
 	if f.BatchID != nil {
 		q = q.Where("order_items.id IN (?)",
@@ -291,6 +306,7 @@ func (r *OrderItemRepository) designReadyUnbatchedSubquery() *gorm.DB {
 		Joins("JOIN materials m ON m.id = sm.material_id").
 		Where("oi.deleted_at IS NULL").
 		Where("o.review_status = ?", models.ReviewApproved).
+		Where("oi.cancellation_status NOT IN ?", []models.CancellationStatus{models.CancellationSeller, models.CancellationApproved}).
 		Where("oi.design_status = ?", models.DesignReady).
 		Where("NOT EXISTS (?)",
 			r.db.Table("batch_items bi").

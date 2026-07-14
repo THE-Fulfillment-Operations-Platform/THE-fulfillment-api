@@ -21,6 +21,11 @@ type BatchFilter struct {
 
 type BatchRepository struct{ db *gorm.DB }
 
+func activeBatchItems(db *gorm.DB) *gorm.DB {
+	return db.Joins("JOIN order_items ON order_items.id = batch_items.order_item_id").
+		Where("order_items.cancellation_status NOT IN ?", []models.CancellationStatus{models.CancellationSeller, models.CancellationApproved})
+}
+
 func (r *BatchRepository) Create(b *models.Batch) error { return r.db.Create(b).Error }
 func (r *BatchRepository) Update(b *models.Batch) error { return r.db.Save(b).Error }
 
@@ -36,6 +41,7 @@ func (r *BatchRepository) FindByID(id uint) (*models.Batch, error) {
 	err := r.db.
 		Preload("Material").
 		Preload("CreatedBy").
+		Preload("Items", activeBatchItems).
 		Preload("Items.OrderItem.Order").
 		Preload("Items.Material").
 		First(&b, id).Error
@@ -80,7 +86,7 @@ func (r *BatchRepository) List(f BatchFilter) ([]models.Batch, int64, error) {
 	err := r.baseQuery(f).
 		Preload("Material").
 		Preload("CreatedBy").
-		Preload("Items").
+		Preload("Items", activeBatchItems).
 		Order("id desc").
 		Limit(f.PageSize).Offset(f.Offset()).Find(&rows).Error
 	return rows, total, err

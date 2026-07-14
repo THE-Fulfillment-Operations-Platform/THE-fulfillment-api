@@ -3,7 +3,9 @@
 package routes
 
 import (
+	"log"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -54,6 +56,13 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	}
 
 	r := gin.New()
+	// Control which proxies are trusted for client-IP derivation. By default gin
+	// trusts ALL proxies, so a spoofed X-Forwarded-For would set ClientIP() and
+	// let an attacker bypass per-IP rate limiting. Trust only configured proxies
+	// (empty ⇒ none ⇒ ClientIP() = real TCP peer).
+	if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		log.Printf("routes: SetTrustedProxies failed: %v", err)
+	}
 	r.Use(middleware.Recovery())
 	r.Use(middleware.RequestLogger())
 	r.Use(middleware.CORS(cfg.CORSAllowedOrigins))
@@ -67,8 +76,9 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 
 	api := r.Group("/api")
 
-	// Public auth.
-	api.POST("/auth/login", h.Login)
+	// Public auth. Rate-limited per IP to blunt brute-force / credential stuffing
+	// (10 attempts/minute); successful logins are well under that.
+	api.POST("/auth/login", middleware.RateLimit(10, time.Minute), h.Login)
 
 	// Authenticated routes.
 	authd := api.Group("")
@@ -178,6 +188,9 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		cancellations.GET("", h.ListCancellationRequests)
 		cancellations.POST("/:id/approve", h.ApproveCancellation)
 		cancellations.POST("/:id/reject", h.RejectCancellation)
+		cancellations.GET("/items", h.ListItemCancellationRequests)
+		cancellations.POST("/items/:id/approve", h.ApproveItemCancellation)
+		cancellations.POST("/items/:id/reject", h.RejectItemCancellation)
 	}
 
 	// Items + design queue.
@@ -200,6 +213,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		batches.GET("", middleware.RequireRoles(roleInternal...), h.ListBatches)
 		batches.GET("/:id", middleware.RequireRoles(roleInternal...), h.GetBatch)
 		batches.GET("/:id/production-template.xlsx", middleware.RequireRoles(roleInternal...), h.ExportProductionTemplate)
+		batches.GET("/:id/assets.zip", middleware.RequireRoles(roleInternal...), h.DownloadBatchAssetsZip)
 		batches.POST("", middleware.RequireRoles(roleDesignOps...), h.CreateBatch)
 		batches.PATCH("/:id/status", middleware.RequireRoles(roleProdOps...), h.UpdateBatchStatus)
 	}
@@ -225,6 +239,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	{
 		handoffs.POST("", middleware.RequireRoles(roleShipOps...), h.CreateHandoff)
 		handoffs.GET("", middleware.RequireRoles(roleInternal...), h.ListHandoffs)
+		handoffs.POST("/:id/ship", middleware.RequireRoles(roleShipOps...), h.MarkHandoffShipped)
 	}
 
 	// Notes / required attention (all internal roles).
@@ -248,6 +263,8 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		seller.POST("/orders/import/commit", h.SellerCommitImport)
 		seller.POST("/orders/:id/cancel", h.SellerCancelOrder)
 		seller.POST("/orders/:id/cancellation-request", h.SellerRequestCancellation)
+		seller.POST("/orders/:id/items/:item_id/cancel", h.SellerCancelOrderItem)
+		seller.POST("/orders/:id/items/:item_id/cancellation-request", h.SellerRequestItemCancellation)
 	}
 
 	return r

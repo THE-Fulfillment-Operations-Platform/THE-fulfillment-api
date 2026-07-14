@@ -36,7 +36,7 @@ func (h *Handlers) GetOrder(c *gin.Context) {
 	if !ok {
 		return
 	}
-	o, err := h.svc.Order.GetOrder(id)
+	o, err := h.svc.Order.GetOperationalOrder(id)
 	if err != nil {
 		response.Fail(c, err)
 		return

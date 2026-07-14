@@ -60,3 +60,22 @@ func (h *Handlers) ListHandoffs(c *gin.Context) {
 	}
 	response.List(c, rows, metaFor(p, total))
 }
+
+// MarkHandoffShipped records carrier + tracking and moves a handed-off parcel to
+// SHIPPED. POST /api/handoffs/:id/ship
+func (h *Handlers) MarkHandoffShipped(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	var in services.MarkShippedInput
+	if !bindJSON(c, &in) {
+		return
+	}
+	handoff, err := h.svc.Packing.MarkShipped(actor(c), id, in)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, handoff)
+}
