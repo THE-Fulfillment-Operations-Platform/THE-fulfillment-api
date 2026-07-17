@@ -315,7 +315,7 @@ func (s *QCService) Pass(actor Actor, in QCDecisionInput) (*models.OrderItem, er
 		return nil, apperr.Internal("Không ghi được kết quả QC PASS").Wrap(err)
 	}
 
-	updated, _ := recomputeOrderItemStatus(s.repo, item.ID, actor)
+	_ = recomputeOrderItemStatus(s.repo, item.ID, actor)
 	// Roll the change up to each affected batch: a batch follows its items, so a
 	// batch whose items are all QC_PASSED becomes QC_PASSED too. A combo item's
 	// parts can live in different (per-material) batches, so recompute each.
@@ -327,9 +327,6 @@ func (s *QCService) Pass(actor Actor, in QCDecisionInput) (*models.OrderItem, er
 		}
 	}
 	s.audit.Log(actor, "QC_PASS", "order_item", &item.ID, "QC pass for item "+item.InternalCode, nil)
-	if updated != nil {
-		return s.findItemByID(item.ID)
-	}
 	return s.findItemByID(item.ID)
 }
 

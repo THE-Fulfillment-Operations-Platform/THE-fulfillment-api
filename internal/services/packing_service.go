@@ -24,7 +24,10 @@ type PackingService struct {
 }
 
 // getOrCreateOpenPackage returns the order's open package, creating one (with an
-// expected line per order item) on first use.
+// expected line per order item) on first use. A partial unique index
+// (uniq_packages_open_order) guarantees at most one OPEN package per order; if
+// two stations race on the first scan, the loser's INSERT fails and it retries
+// the lookup, landing on the winner's package instead of creating a duplicate.
 func (s *PackingService) getOrCreateOpenPackage(tx *gorm.DB, order *models.Order, actor Actor) (*models.Package, error) {
 	txRepo := repositories.New(tx)
 	if pkg, err := txRepo.Package.FindOpenByOrder(order.ID); err == nil {
@@ -35,6 +38,10 @@ func (s *PackingService) getOrCreateOpenPackage(tx *gorm.DB, order *models.Order
 
 	pkg := &models.Package{OrderID: order.ID, Status: models.PackageOpen}
 	if err := txRepo.Package.Create(pkg); err != nil {
+		// Unique-index collision: another station created the open package first.
+		if existing, ferr := txRepo.Package.FindOpenByOrder(order.ID); ferr == nil {
+			return existing, nil
+		}
 		return nil, err
 	}
 	pkg.Code = fmt.Sprintf("PKG-%06d", pkg.ID)
@@ -143,15 +150,18 @@ func (s *PackingService) Scan(actor Actor, in PackingScanInput) (*PackingResult,
 		if line == nil {
 			return apperr.BadRequest("Item is not part of this package")
 		}
-		if line.ScannedQty >= line.ExpectedQty {
-			return apperr.Conflict("Item already fully scanned (over-scan blocked)")
-		}
-		line.ScannedQty++
-		if err := txRepo.Package.UpdateItem(line); err != nil {
+		// Atomic, guarded increment: two stations scanning the same line at once
+		// can never double-count a slot or push scanned past expected — the losing
+		// UPDATE simply matches zero rows and is rejected as an over-scan.
+		bumped, err := txRepo.Package.IncrementScanned(line.ID)
+		if err != nil {
 			return err
 		}
+		if !bumped {
+			return apperr.Conflict("Item already fully scanned (over-scan blocked)")
+		}
 
-		// Recompute fully-packed.
+		// Recompute fully-packed from the fresh counts.
 		full := true
 		fresh, err := txRepo.Package.FindByID(pkg.ID)
 		if err != nil {
@@ -164,12 +174,18 @@ func (s *PackingService) Scan(actor Actor, in PackingScanInput) (*PackingResult,
 			}
 		}
 		if full && order.SellerStatus == models.SellerStatusProduction {
-			old := string(order.SellerStatus)
-			order.SellerStatus = models.SellerStatusPacked
-			if err := txRepo.Order.Update(order); err != nil {
+			// Guarded transition (WHERE seller_status = PRODUCTION): concurrent
+			// completions record the PACKED move exactly once, and the update can't
+			// overwrite a status another flow advanced in the meantime.
+			changed, err := txRepo.Order.UpdateSellerStatusIf(order.ID, models.SellerStatusProduction, models.SellerStatusPacked)
+			if err != nil {
 				return err
 			}
-			_ = recordStatus(txRepo, models.EntityOrder, order.ID, old, string(models.SellerStatusPacked), actor, "all items packed")
+			if changed {
+				order.SellerStatus = models.SellerStatusPacked
+				_ = recordStatus(txRepo, models.EntityOrder, order.ID,
+					string(models.SellerStatusProduction), string(models.SellerStatusPacked), actor, "all items packed")
+			}
 		}
 
 		result = buildPackingResult(fresh, order, full)

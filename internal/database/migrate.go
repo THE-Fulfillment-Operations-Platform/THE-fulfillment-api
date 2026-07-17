@@ -2,6 +2,7 @@ package database
 
 import (
 	"fmt"
+	"log"
 
 	"gorm.io/gorm"
 
@@ -49,6 +50,66 @@ func AutoMigrate(db *gorm.DB) error {
 	}
 	if err := dropLegacySellerStoreOrderIndex(db); err != nil {
 		return err
+	}
+	if err := ensurePerformanceIndexes(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ensurePerformanceIndexes creates the composite/partial indexes the hot list
+// and lookup queries need at 100k–1M rows. GORM struct tags can only express
+// single-column and full-table indexes, so these live here as idempotent raw
+// SQL (Postgres-only; sqlite tests don't need them — the datasets are tiny).
+//
+// Every operational query in this codebase filters soft-deletes
+// (deleted_at IS NULL), so the partial variants keep the indexes small and are
+// always applicable.
+func ensurePerformanceIndexes(db *gorm.DB) error {
+	if db.Dialector.Name() != "postgres" {
+		return nil
+	}
+	stmts := []string{
+		// Seller-scoped order lists (seller portal + ops filters) paginate with
+		// ORDER BY id DESC — this walks the index directly instead of sorting.
+		`CREATE INDEX IF NOT EXISTS idx_orders_seller_page ON orders (seller_id, id DESC) WHERE deleted_at IS NULL`,
+		// Duplicate StoreOrderID detection + FindBySellerAndStoreOrder both hit
+		// (seller_id, store_order_id); the GROUP BY becomes an index-only scan.
+		`CREATE INDEX IF NOT EXISTS idx_orders_seller_store_order ON orders (seller_id, store_order_id) WHERE deleted_at IS NULL`,
+		// Review queue: review_status IN (...) ORDER BY id DESC LIMIT n.
+		`CREATE INDEX IF NOT EXISTS idx_orders_review_page ON orders (review_status, id DESC) WHERE deleted_at IS NULL`,
+		// Ops order list filtered by seller_status, newest first.
+		`CREATE INDEX IF NOT EXISTS idx_orders_seller_status_page ON orders (seller_status, id DESC) WHERE deleted_at IS NULL`,
+		// Item list filtered by internal_status (design/QC/packing views).
+		`CREATE INDEX IF NOT EXISTS idx_order_items_status_page ON order_items (internal_status, id DESC) WHERE deleted_at IS NULL`,
+		// Item cancellation-request queue: status filter + ORDER BY requested_at.
+		`CREATE INDEX IF NOT EXISTS idx_order_items_cancel_queue ON order_items (cancellation_requested_at) WHERE cancellation_status = 'REQUESTED' AND deleted_at IS NULL`,
+		// The single-column seller_id index is fully covered by the two composite
+		// indexes above; drop it to save write amplification. (The struct tag that
+		// created it is removed alongside this migration.)
+		`DROP INDEX IF EXISTS idx_orders_seller_id`,
+		// Concurrency guard: at most ONE open package per order, so two packing
+		// stations scanning the same order's first item can't each create a package.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uniq_packages_open_order ON packages (order_id) WHERE status = 'OPEN' AND deleted_at IS NULL`,
+	}
+	for _, stmt := range stmts {
+		if err := db.Exec(stmt).Error; err != nil {
+			return fmt.Errorf("database: performance index (%s): %w", stmt, err)
+		}
+	}
+
+	// Trigram index for the orders search box (store_order_id ILIKE '%kw%').
+	// Without it every search is a sequential scan. pg_trgm ships with Postgres
+	// but CREATE EXTENSION needs sufficient privileges — degrade gracefully so a
+	// managed database without it still boots (search just stays unindexed).
+	if err := db.Exec(`CREATE EXTENSION IF NOT EXISTS pg_trgm`).Error; err != nil {
+		log.Printf("database: pg_trgm unavailable (%v) — store_order_id search stays unindexed", err)
+		return nil
+	}
+	if err := db.Exec(
+		`CREATE INDEX IF NOT EXISTS idx_orders_store_order_trgm ON orders USING gin (store_order_id gin_trgm_ops)`,
+	).Error; err != nil {
+		return fmt.Errorf("database: trigram index: %w", err)
 	}
 	return nil
 }
@@ -101,11 +162,16 @@ func ensureLiveCodeUniqueIndexes(db *gorm.DB) error {
 		if partial {
 			continue
 		}
-		stmt := fmt.Sprintf(
-			`DROP INDEX IF EXISTS %[1]s; CREATE UNIQUE INDEX %[1]s ON %[2]s (code) WHERE deleted_at IS NULL;`,
-			index, table,
-		)
-		if err := db.Exec(stmt).Error; err != nil {
+		// Run DROP and CREATE as SEPARATE Exec calls. The GORM connection uses
+		// PrepareStmt (extended protocol), which rejects multiple commands in one
+		// prepared statement (SQLSTATE 42601). Two single-statement Execs reach the
+		// same end state and work on a fresh database (e.g. first boot on Supabase).
+		if err := db.Exec(fmt.Sprintf(`DROP INDEX IF EXISTS %s;`, index)).Error; err != nil {
+			return fmt.Errorf("database: drop index %s: %w", index, err)
+		}
+		if err := db.Exec(fmt.Sprintf(
+			`CREATE UNIQUE INDEX %s ON %s (code) WHERE deleted_at IS NULL;`, index, table,
+		)).Error; err != nil {
 			return fmt.Errorf("database: partial unique index %s: %w", index, err)
 		}
 	}

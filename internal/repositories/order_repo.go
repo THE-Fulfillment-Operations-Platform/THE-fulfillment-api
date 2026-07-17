@@ -86,6 +86,39 @@ func (r *OrderRepository) FindBySellerAndStoreOrder(sellerID uint, storeOrderID 
 	return &o, nil
 }
 
+// ExistingStoreOrderIDs returns which of the given store order ids already have
+// at least one (non-deleted) order for the seller. One query for the whole
+// import file, replacing a per-row FindBySellerAndStoreOrder probe.
+func (r *OrderRepository) ExistingStoreOrderIDs(sellerID uint, storeOrderIDs []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	if len(storeOrderIDs) == 0 {
+		return out, nil
+	}
+	var ids []string
+	err := r.db.Model(&models.Order{}).
+		Distinct("store_order_id").
+		Where("seller_id = ? AND store_order_id IN ?", sellerID, storeOrderIDs).
+		Pluck("store_order_id", &ids).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		out[id] = true
+	}
+	return out, nil
+}
+
+// UpdateSellerStatusIf atomically advances an order's seller status, but only
+// when it still holds the expected current value. The WHERE guard makes the
+// transition race-safe: two concurrent workers can't both apply it, and a
+// concurrent full-row Save can't be silently overwritten.
+func (r *OrderRepository) UpdateSellerStatusIf(orderID uint, from, to models.SellerStatus) (bool, error) {
+	res := r.db.Model(&models.Order{}).
+		Where("id = ? AND seller_status = ?", orderID, from).
+		Update("seller_status", to)
+	return res.RowsAffected > 0, res.Error
+}
+
 // StoreOrderDupKey builds the lookup key used by DuplicateStoreOrderIDs.
 func StoreOrderDupKey(sellerID uint, storeOrderID string) string {
 	return fmt.Sprintf("%d|%s", sellerID, storeOrderID)
@@ -220,6 +253,84 @@ func (r *OrderItemRepository) FindByCode(code string) (*models.OrderItem, error)
 	return &it, nil
 }
 
+// FindForBatching bulk-loads items with exactly the associations batch creation
+// checks (order review status, SKU material set) — one query set for the whole
+// selection instead of a fully-preloaded FindByID per item.
+func (r *OrderItemRepository) FindForBatching(ids []uint) (map[uint]*models.OrderItem, error) {
+	out := map[uint]*models.OrderItem{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	var rows []models.OrderItem
+	err := r.db.
+		Preload("Order").
+		Preload("SKU.Materials").
+		Where("id IN ?", ids).Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		out[rows[i].ID] = &rows[i]
+	}
+	return out, nil
+}
+
+// CancellationStatusByIDs returns just the cancellation status per item — the
+// only fact the batch board cascade needs about an item.
+func (r *OrderItemRepository) CancellationStatusByIDs(ids []uint) (map[uint]models.CancellationStatus, error) {
+	out := map[uint]models.CancellationStatus{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	type row struct {
+		ID                 uint
+		CancellationStatus models.CancellationStatus
+	}
+	var rows []row
+	err := r.db.Model(&models.OrderItem{}).
+		Select("id, cancellation_status").
+		Where("id IN ?", ids).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.ID] = r.CancellationStatus
+	}
+	return out, nil
+}
+
+// InternalStatusByIDs returns the current internal status per item, for the
+// status roll-up recompute (no associations needed).
+func (r *OrderItemRepository) InternalStatusByIDs(ids []uint) (map[uint]models.InternalStatus, error) {
+	out := map[uint]models.InternalStatus{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	type row struct {
+		ID             uint
+		InternalStatus models.InternalStatus
+	}
+	var rows []row
+	err := r.db.Model(&models.OrderItem{}).
+		Select("id, internal_status").
+		Where("id IN ?", ids).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.ID] = r.InternalStatus
+	}
+	return out, nil
+}
+
+// UpdateInternalStatus writes only the derived internal_status column (plus
+// updated_at). Deliberately not a full Save so a roll-up can never clobber
+// concurrent edits to other fields.
+func (r *OrderItemRepository) UpdateInternalStatus(id uint, status models.InternalStatus) error {
+	return r.db.Model(&models.OrderItem{}).Where("id = ?", id).
+		Update("internal_status", status).Error
+}
+
 func (r *OrderItemRepository) ListCancellationRequests(p Page) ([]models.OrderItem, int64, error) {
 	var rows []models.OrderItem
 	var total int64
@@ -343,29 +454,34 @@ func (r *OrderItemRepository) MaterialBuckets() ([]MaterialBucket, error) {
 }
 
 // DesignReadyItemsForMaterial lists design-ready items that still need a batch for
-// the given material (used to populate the create-batch item table).
+// the given material (used to populate the create-batch item table). Count and
+// page both run in SQL so the working set never has to fit in memory.
 func (r *OrderItemRepository) DesignReadyItemsForMaterial(materialID uint, p Page) ([]models.OrderItem, int64, error) {
 	sub := r.designReadyUnbatchedSubquery().Where("sm.material_id = ?", materialID)
-	var ids []uint
-	if err := r.db.Table("(?) AS sub", sub).Select("sub.order_item_id").Scan(&ids).Error; err != nil {
+
+	var total int64
+	if err := r.db.Table("(?) AS sub", sub).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-	total := int64(len(ids))
 	if total == 0 {
 		return []models.OrderItem{}, 0, nil
 	}
-	// manual pagination over the id slice
-	start := p.Offset()
-	if start > len(ids) {
-		start = len(ids)
+
+	var pageIDs []uint
+	err := r.db.Table("(?) AS sub", sub).
+		Select("sub.order_item_id").
+		Order("sub.order_item_id asc").
+		Limit(p.PageSize).Offset(p.Offset()).
+		Scan(&pageIDs).Error
+	if err != nil {
+		return nil, 0, err
 	}
-	end := start + p.PageSize
-	if end > len(ids) {
-		end = len(ids)
+	if len(pageIDs) == 0 {
+		return []models.OrderItem{}, total, nil
 	}
-	pageIDs := ids[start:end]
+
 	var rows []models.OrderItem
-	err := r.db.Preload("Order.Seller").Preload("SKU.Materials.Material").
+	err = r.db.Preload("Order.Seller").Preload("SKU.Materials.Material").
 		Where("id IN ?", pageIDs).Order("id asc").Find(&rows).Error
 	return rows, total, err
 }

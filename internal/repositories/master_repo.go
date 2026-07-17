@@ -231,6 +231,68 @@ func (r *SKURepository) List(p Page) ([]models.SKU, int64, error) {
 	return rows, total, err
 }
 
+// SKUInfo is the minimal SKU fact set the import validator and review checks
+// need: does the code exist, what's its id, and how many materials are mapped.
+type SKUInfo struct {
+	ID            uint
+	MaterialCount int64
+}
+
+// InfoByCodes returns SKUInfo for every existing code in one query (LEFT JOIN
+// on the mapping table), replacing a FindByCode + CountMaterials pair per row.
+// Codes are expected pre-normalized. Missing codes are simply absent.
+func (r *SKURepository) InfoByCodes(codes []string) (map[string]SKUInfo, error) {
+	out := map[string]SKUInfo{}
+	if len(codes) == 0 {
+		return out, nil
+	}
+	type row struct {
+		ID            uint
+		Code          string
+		MaterialCount int64
+	}
+	var rows []row
+	err := r.db.Model(&models.SKU{}).
+		Select("skus.id, skus.code, COUNT(sku_materials.id) AS material_count").
+		Joins("LEFT JOIN sku_materials ON sku_materials.sku_id = skus.id AND sku_materials.deleted_at IS NULL").
+		Where("skus.code IN ?", codes).
+		Group("skus.id, skus.code").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.Code] = SKUInfo{ID: r.ID, MaterialCount: r.MaterialCount}
+	}
+	return out, nil
+}
+
+// MaterialCounts returns the mapped-material count per SKU id in one query,
+// replacing a COUNT per item on the review screen.
+func (r *SKURepository) MaterialCounts(skuIDs []uint) (map[uint]int64, error) {
+	out := map[uint]int64{}
+	if len(skuIDs) == 0 {
+		return out, nil
+	}
+	type row struct {
+		SKUID uint `gorm:"column:sku_id"`
+		N     int64
+	}
+	var rows []row
+	err := r.db.Model(&models.SKUMaterial{}).
+		Select("sku_id, COUNT(*) AS n").
+		Where("sku_id IN ?", skuIDs).
+		Group("sku_id").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.SKUID] = r.N
+	}
+	return out, nil
+}
+
 // CountMaterials returns how many materials a SKU is mapped to. Used by the
 // order-import validator to distinguish "SKU exists but has no material" from a
 // fully set-up SKU.

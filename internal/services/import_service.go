@@ -253,9 +253,27 @@ func rowsFromRecords(kind string, records [][]string) ([]ImportRow, error) {
 	return rows, nil
 }
 
+// skuInfoForRows bulk-loads SKUInfo (id + mapped-material count) for every
+// distinct SKU code in the file — one query instead of a FindByCode +
+// CountMaterials probe per row.
+func (s *ImportService) skuInfoForRows(rows []ImportRow) (map[string]repositories.SKUInfo, error) {
+	seen := map[string]bool{}
+	codes := make([]string, 0, len(rows))
+	for _, row := range rows {
+		code := models.NormalizeCode(row.SKU)
+		if code == "" || seen[code] {
+			continue
+		}
+		seen[code] = true
+		codes = append(codes, code)
+	}
+	return s.repo.SKU.InfoByCodes(codes)
+}
+
 // validateRow checks a single row and returns a blocking error (or nil). The
 // rowNumber is 1-based across data rows (matching the wireframe error table).
-func (s *ImportService) validateRow(rowNumber int, sellerID uint, row ImportRow) *models.ImportError {
+// skus is the pre-fetched SKUInfo map for the whole file (see skuInfoForRows).
+func (s *ImportService) validateRow(rowNumber int, row ImportRow, skus map[string]repositories.SKUInfo) *models.ImportError {
 	mkErr := func(field, code, msg, suggestion string) *models.ImportError {
 		return &models.ImportError{
 			RowNumber: rowNumber, StoreOrderID: row.StoreOrderID, SKU: row.SKU,
@@ -275,12 +293,12 @@ func (s *ImportService) validateRow(rowNumber int, sellerID uint, row ImportRow)
 	// A SKU is only "mapped" once it exists AND is linked to at least one material —
 	// materials are the axis production batches around, so an order can only proceed
 	// when the system knows the SKU's material(s).
-	sku, err := s.repo.SKU.FindByCode(models.NormalizeCode(row.SKU))
-	if err != nil {
+	info, ok := skus[models.NormalizeCode(row.SKU)]
+	if !ok {
 		return mkErr("SKU", "SKU_UNMAPPED", "SKU chưa được setup nguyên vật liệu (chưa có trong master data)",
 			"Vào Master Data → Import Excel vận hành cũ hoặc tạo SKU và gán nguyên vật liệu")
 	}
-	if n, err := s.repo.SKU.CountMaterials(sku.ID); err == nil && n == 0 {
+	if info.MaterialCount == 0 {
 		return mkErr("SKU", "SKU_NO_MATERIAL", "SKU đã có nhưng chưa gán nguyên vật liệu (Loại VL)",
 			"Vào Master Data → Mapping để gán nguyên vật liệu cho SKU này")
 	}
@@ -325,13 +343,31 @@ func (s *ImportService) Preview(actor Actor, sellerID uint, source, filename str
 		return nil, apperr.BadRequest("no rows to import")
 	}
 
+	// Prefetch the whole file's lookups in two queries: SKU info per distinct
+	// code, and which StoreOrderIDs already exist for this seller. The per-row
+	// loop below then never touches the database.
+	skus, err := s.skuInfoForRows(rows)
+	if err != nil {
+		return nil, apperr.Internal("could not look up SKUs").Wrap(err)
+	}
+	storeOrderIDs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if id := strings.TrimSpace(row.StoreOrderID); id != "" {
+			storeOrderIDs = append(storeOrderIDs, id)
+		}
+	}
+	existingStoreOrders, err := s.repo.Order.ExistingStoreOrderIDs(sellerID, storeOrderIDs)
+	if err != nil {
+		return nil, apperr.Internal("could not check existing store orders").Wrap(err)
+	}
+
 	var validRows []ImportRow
 	var importErrors []models.ImportError
 	var warnings []models.ImportError
 	orderSet := map[string]bool{}
 
 	for i, row := range rows {
-		if e := s.validateRow(i+1, sellerID, row); e != nil {
+		if e := s.validateRow(i+1, row, skus); e != nil {
 			importErrors = append(importErrors, *e)
 			continue
 		}
@@ -342,7 +378,7 @@ func (s *ImportService) Preview(actor Actor, sellerID uint, source, filename str
 		// order with its own internal code — a store order id is a repeatable label
 		// — but flag the row so staff can confirm with the customer it isn't an
 		// accidental re-send.
-		if _, err := s.repo.Order.FindBySellerAndStoreOrder(sellerID, strings.TrimSpace(row.StoreOrderID)); err == nil {
+		if existingStoreOrders[strings.TrimSpace(row.StoreOrderID)] {
 			warnings = append(warnings, models.ImportError{
 				RowNumber: i + 1, StoreOrderID: row.StoreOrderID, SKU: row.SKU,
 				Field: "StoreOrderID", ErrorCode: "ORD_DUPLICATE",
@@ -431,6 +467,13 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 		g.items = append(g.items, row)
 	}
 
+	// One SKU lookup for the whole file (the preview already validated rows, but
+	// master data may have changed since — the map reflects commit-time truth).
+	skus, err := s.skuInfoForRows(rows)
+	if err != nil {
+		return nil, apperr.Internal("could not look up SKUs").Wrap(err)
+	}
+
 	created := 0
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
 		txRepo := repositories.New(tx)
@@ -479,19 +522,23 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 				return err
 			}
 
+			// Build the order's items up front (the internal code only needs the
+			// order id + position) and insert them in one statement; assets and
+			// required-attention notes follow as two more bulk inserts.
 			total := len(g.items)
+			items := make([]models.OrderItem, 0, total)
 			for lineNo, row := range g.items {
 				skuCode := models.NormalizeCode(row.SKU)
-				sku, _ := txRepo.SKU.FindByCode(skuCode)
 				var skuID *uint
-				if sku != nil {
-					skuID = &sku.ID
+				if info, ok := skus[skuCode]; ok {
+					id := info.ID
+					skuID = &id
 				}
 				designStatus := models.DesignPending
 				if strings.TrimSpace(row.Mockup) == "" {
 					designStatus = models.DesignMissing
 				}
-				item := &models.OrderItem{
+				items = append(items, models.OrderItem{
 					OrderID:        order.ID,
 					LineNo:         lineNo + 1,
 					InternalCode:   itemInternalCode(order.ID, lineNo+1, total),
@@ -506,20 +553,23 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 					EngraveText:    row.EngraveText,
 					InternalStatus: models.StatusPending,
 					DesignStatus:   designStatus,
-				}
-				if err := tx.Create(item).Error; err != nil {
-					return err
-				}
-				if row.Mockup != "" {
-					if err := tx.Create(&models.ItemAsset{
-						OrderItemID: item.ID, AssetType: "MOCKUP", URL: row.Mockup, Version: 1,
+				})
+			}
+			if err := tx.Create(&items).Error; err != nil {
+				return err
+			}
+			var assets []models.ItemAsset
+			var notes []models.Note
+			for i := range items {
+				item := &items[i]
+				if item.MockupURL != "" {
+					assets = append(assets, models.ItemAsset{
+						OrderItemID: item.ID, AssetType: "MOCKUP", URL: item.MockupURL, Version: 1,
 						UploadedByID: actor.IDPtr(),
-					}).Error; err != nil {
-						return err
-					}
+					})
 				} else {
 					// Missing mockup is a blocking-for-QC issue → required attention.
-					if err := tx.Create(&models.Note{
+					notes = append(notes, models.Note{
 						Title:               "Thiếu Mockup URL",
 						Body:                "Item " + item.InternalCode + " chưa có mockup để QC đối chiếu.",
 						ReasonCode:          "ART_MISSING",
@@ -530,9 +580,17 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 						EntityID:            &item.ID,
 						OwnerRole:           models.RoleDesigner,
 						CreatedByID:         actor.IDPtr(),
-					}).Error; err != nil {
-						return err
-					}
+					})
+				}
+			}
+			if len(assets) > 0 {
+				if err := tx.Create(&assets).Error; err != nil {
+					return err
+				}
+			}
+			if len(notes) > 0 {
+				if err := tx.Create(&notes).Error; err != nil {
+					return err
 				}
 			}
 			created++

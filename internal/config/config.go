@@ -38,6 +38,14 @@ type Config struct {
 	DBSSLMode  string
 	DBTimeZone string
 
+	// Connection pool. Defaults are sized for a small VPS (2 vCPU / 4 GB RAM)
+	// sharing the box with PostgreSQL: enough concurrency for an internal ops
+	// tool, small enough that Postgres never sees a connection storm.
+	DBMaxOpenConns    int
+	DBMaxIdleConns    int
+	DBConnMaxLifetime time.Duration
+	DBConnMaxIdleTime time.Duration
+
 	// Auth
 	JWTSecret    string
 	JWTExpiresIn time.Duration
@@ -87,6 +95,11 @@ func Load() *Config {
 		DBSSLMode:  getEnv("DB_SSLMODE", "disable"),
 		DBTimeZone: getEnv("DB_TIMEZONE", "Asia/Ho_Chi_Minh"),
 
+		DBMaxOpenConns:    getEnvAsInt("DB_MAX_OPEN_CONNS", 15),
+		DBMaxIdleConns:    getEnvAsInt("DB_MAX_IDLE_CONNS", 5),
+		DBConnMaxLifetime: time.Duration(getEnvAsInt("DB_CONN_MAX_LIFETIME_MINUTES", 30)) * time.Minute,
+		DBConnMaxIdleTime: time.Duration(getEnvAsInt("DB_CONN_MAX_IDLE_MINUTES", 5)) * time.Minute,
+
 		JWTSecret:    getEnv("JWT_SECRET", "change-me-in-production"),
 		JWTExpiresIn: time.Duration(getEnvAsInt("JWT_EXPIRES_HOURS", 72)) * time.Hour,
 
@@ -114,6 +127,25 @@ func Load() *Config {
 	if cfg.PurgeInterval <= 0 {
 		log.Printf("config: PURGE_INTERVAL_HOURS invalid (must be > 0); using 24h")
 		cfg.PurgeInterval = 24 * time.Hour
+	}
+
+	// Guard the pool: zero/negative values would mean "unlimited open conns" or a
+	// dead pool, either of which can knock over a small Postgres.
+	if cfg.DBMaxOpenConns <= 0 {
+		log.Printf("config: DB_MAX_OPEN_CONNS=%d invalid; using 15", cfg.DBMaxOpenConns)
+		cfg.DBMaxOpenConns = 15
+	}
+	if cfg.DBMaxIdleConns <= 0 || cfg.DBMaxIdleConns > cfg.DBMaxOpenConns {
+		cfg.DBMaxIdleConns = cfg.DBMaxOpenConns / 3
+		if cfg.DBMaxIdleConns < 1 {
+			cfg.DBMaxIdleConns = 1
+		}
+	}
+	if cfg.DBConnMaxLifetime <= 0 {
+		cfg.DBConnMaxLifetime = 30 * time.Minute
+	}
+	if cfg.DBConnMaxIdleTime <= 0 {
+		cfg.DBConnMaxIdleTime = 5 * time.Minute
 	}
 
 	return cfg

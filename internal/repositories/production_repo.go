@@ -59,6 +59,27 @@ func (r *BatchRepository) FindByID(id uint) (*models.Batch, error) {
 	return &b, nil
 }
 
+// FindLite loads a batch WITHOUT any association preloads — for status roll-ups
+// and guards that only need the batch row itself.
+func (r *BatchRepository) FindLite(id uint) (*models.Batch, error) {
+	var b models.Batch
+	if err := r.db.First(&b, id).Error; err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+// UpdateStatusColumn writes only the batch's status (plus updated_at), so a
+// roll-up can't clobber concurrent edits to other batch fields.
+func (r *BatchRepository) UpdateStatusColumn(id uint, status models.InternalStatus) error {
+	return r.db.Model(&models.Batch{}).Where("id = ?", id).Update("status", status).Error
+}
+
+// UpdateBatchItemStatus writes only a batch item's status (plus updated_at).
+func (r *BatchRepository) UpdateBatchItemStatus(id uint, status models.InternalStatus) error {
+	return r.db.Model(&models.BatchItem{}).Where("id = ?", id).Update("status", status).Error
+}
+
 // ChildBatchesFor returns the child batches of a parent (id + status are enough
 // for the parent status roll-up). Ordered by sequence for stable display.
 func (r *BatchRepository) ChildBatchesFor(parentID uint) ([]models.Batch, error) {
@@ -141,6 +162,31 @@ func (r *BatchRepository) BatchItemsForBatch(batchID uint) ([]models.BatchItem, 
 	return items, err
 }
 
+// BatchItemStatusesForOrderItems returns, per order item, the statuses of all
+// its batch parts — the only inputs the item status roll-up needs. One query
+// for any number of items.
+func (r *BatchRepository) BatchItemStatusesForOrderItems(orderItemIDs []uint) (map[uint][]models.InternalStatus, error) {
+	out := map[uint][]models.InternalStatus{}
+	if len(orderItemIDs) == 0 {
+		return out, nil
+	}
+	type row struct {
+		OrderItemID uint
+		Status      models.InternalStatus
+	}
+	var rows []row
+	err := r.db.Model(&models.BatchItem{}).
+		Select("order_item_id, status").
+		Where("order_item_id IN ?", orderItemIDs).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.OrderItemID] = append(out[r.OrderItemID], r.Status)
+	}
+	return out, nil
+}
+
 // ExistingMaterialKeys returns the set of order_item_id|material_id pairs already
 // scheduled, so the batch creator can skip duplicates instead of failing the unique index.
 func (r *BatchRepository) ExistingActiveItemMaterial(orderItemIDs []uint) (map[uint]map[uint]bool, error) {
@@ -166,6 +212,15 @@ func (r *BatchRepository) ExistingActiveItemMaterial(orderItemIDs []uint) (map[u
 type StatusHistoryRepository struct{ db *gorm.DB }
 
 func (r *StatusHistoryRepository) Create(h *models.StatusHistory) error { return r.db.Create(h).Error }
+
+// CreateBulk inserts many history rows in one statement — used by cascades that
+// previously wrote one INSERT per affected batch item.
+func (r *StatusHistoryRepository) CreateBulk(rows []models.StatusHistory) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	return r.db.Create(&rows).Error
+}
 
 func (r *StatusHistoryRepository) ListForEntity(entityType models.EntityType, entityID uint) ([]models.StatusHistory, error) {
 	var rows []models.StatusHistory

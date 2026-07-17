@@ -72,12 +72,20 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
 		txRepo := repositories.New(tx)
 
+		// Bulk-load every selected item (order + SKU materials) in one query set —
+		// the per-item checks below then run entirely in memory instead of issuing
+		// a fully-preloaded FindByID per item.
+		itemsByID, err := txRepo.OrderItem.FindForBatching(in.OrderItemIDs)
+		if err != nil {
+			return err
+		}
+
 		// Resolve eligible items in the caller's order (so the quota split groups them
 		// in that same order); everything ineligible is reported back as skipped.
 		var eligible []*models.OrderItem
 		for _, itemID := range in.OrderItemIDs {
-			item, err := txRepo.OrderItem.FindByID(itemID)
-			if err != nil {
+			item, ok := itemsByID[itemID]
+			if !ok {
 				skipped = append(skipped, itemID)
 				continue
 			}
@@ -122,10 +130,15 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 			if err := txRepo.Batch.CreateItems(batchItems); err != nil {
 				return err
 			}
+			history := make([]models.StatusHistory, 0, len(batchItems))
 			for _, bi := range batchItems {
-				_ = recordStatus(txRepo, models.EntityBatchItem, bi.ID, "", string(models.StatusPending), actor, "added to batch "+batch.Code)
+				history = append(history, models.StatusHistory{
+					EntityType: models.EntityBatchItem, EntityID: bi.ID,
+					ToStatus: string(models.StatusPending), ChangedByID: actor.IDPtr(),
+					Note: "added to batch " + batch.Code,
+				})
 			}
-			return nil
+			return txRepo.Status.CreateBulk(history)
 		}
 
 		// Within quota (or unlimited): one flat batch — identical to legacy behaviour.
@@ -187,9 +200,7 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 	}
 
 	// Recompute affected items' internal status outside the create transaction.
-	for _, itemID := range in.OrderItemIDs {
-		_, _ = recomputeOrderItemStatus(s.repo, itemID, actor)
-	}
+	_ = recomputeOrderItemStatuses(s.repo, in.OrderItemIDs, actor)
 
 	full, _ := s.repo.Batch.FindByID(rootBatch.ID)
 	s.audit.Log(actor, "BATCH_CREATE", "batch", &rootBatch.ID,
@@ -296,10 +307,22 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 		if err != nil {
 			return err
 		}
+		// One lightweight query for every item's cancellation status — the only
+		// order-item fact the cascade needs (previously a fully-preloaded FindByID
+		// per batch item, inside the transaction).
+		itemIDs := make([]uint, 0, len(items))
+		for i := range items {
+			itemIDs = append(itemIDs, items[i].OrderItemID)
+		}
+		cancellation, err := txRepo.OrderItem.CancellationStatusByIDs(itemIDs)
+		if err != nil {
+			return err
+		}
+		var history []models.StatusHistory
 		for i := range items {
 			bi := &items[i]
-			item, loadErr := txRepo.OrderItem.FindByID(bi.OrderItemID)
-			if loadErr != nil || itemCancelled(item.CancellationStatus) {
+			st, ok := cancellation[bi.OrderItemID]
+			if !ok || itemCancelled(st) {
 				continue
 			}
 			// Never let a board change touch an already QC-passed part. In a mixed
@@ -313,27 +336,37 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 			}
 			old := string(bi.Status)
 			bi.Status = newStatus
-			if err := txRepo.Batch.UpdateBatchItem(bi); err != nil {
+			if err := txRepo.Batch.UpdateBatchItemStatus(bi.ID, newStatus); err != nil {
 				return err
 			}
-			_ = recordStatus(txRepo, models.EntityBatchItem, bi.ID, old, string(newStatus), actor, in.Note)
+			history = append(history, models.StatusHistory{
+				EntityType: models.EntityBatchItem, EntityID: bi.ID,
+				FromStatus: old, ToStatus: string(newStatus),
+				ChangedByID: actor.IDPtr(), Note: in.Note,
+			})
 			affectedItems[bi.OrderItemID] = true
 		}
 		oldBatch := string(batch.Status)
 		batch.Status = newStatus
-		if err := txRepo.Batch.Update(batch); err != nil {
+		if err := txRepo.Batch.UpdateStatusColumn(batch.ID, newStatus); err != nil {
 			return err
 		}
-		_ = recordStatus(txRepo, models.EntityBatch, batch.ID, oldBatch, string(newStatus), actor, in.Note)
-		return nil
+		history = append(history, models.StatusHistory{
+			EntityType: models.EntityBatch, EntityID: batch.ID,
+			FromStatus: oldBatch, ToStatus: string(newStatus),
+			ChangedByID: actor.IDPtr(), Note: in.Note,
+		})
+		return txRepo.Status.CreateBulk(history)
 	})
 	if err != nil {
 		return nil, apperr.Internal("could not update batch status").Wrap(err)
 	}
 
+	itemIDs := make([]uint, 0, len(affectedItems))
 	for itemID := range affectedItems {
-		_, _ = recomputeOrderItemStatus(s.repo, itemID, actor)
+		itemIDs = append(itemIDs, itemID)
 	}
+	_ = recomputeOrderItemStatuses(s.repo, itemIDs, actor)
 
 	// If this is a child batch, roll the change up into its parent's status.
 	if batch.ParentBatchID != nil {

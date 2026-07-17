@@ -45,8 +45,11 @@ type Order struct {
 	Base
 	InternalCode string `json:"internal_code" gorm:"uniqueIndex;size:48;not null"`
 	StoreOrderID string `json:"store_order_id" gorm:"size:120;index;not null"`
-	SellerID     uint   `json:"seller_id" gorm:"index;not null"`
-	Seller       Seller `json:"seller,omitempty" gorm:"foreignKey:SellerID"`
+	// SellerID is covered by the composite indexes idx_orders_seller_page and
+	// idx_orders_seller_store_order (see ensurePerformanceIndexes) — no separate
+	// single-column index needed.
+	SellerID uint   `json:"seller_id" gorm:"not null"`
+	Seller   Seller `json:"seller,omitempty" gorm:"foreignKey:SellerID"`
 	StoreID      *uint  `json:"store_id" gorm:"index"`
 	StoreName    string `json:"store_name" gorm:"size:160"`
 

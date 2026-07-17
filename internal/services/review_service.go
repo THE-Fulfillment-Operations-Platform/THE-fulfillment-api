@@ -198,6 +198,21 @@ func (s *ReviewService) reviewIssues(order *models.Order) []ReviewIssue {
 		})
 	}
 
+	// One query for every item's mapped-material count (instead of a COUNT per
+	// item) — the loop below is then database-free.
+	skuIDs := make([]uint, 0, len(order.Items))
+	for _, it := range order.Items {
+		if it.SKUID != nil && !itemCancelled(it.CancellationStatus) {
+			skuIDs = append(skuIDs, *it.SKUID)
+		}
+	}
+	materialCounts, err := s.repo.SKU.MaterialCounts(skuIDs)
+	if err != nil {
+		// Degrade the same way the old per-item probe did on error: skip the
+		// material-mapping check rather than fail the whole review screen.
+		materialCounts = nil
+	}
+
 	// Item-level: SKU/material mapping, mockup, design, quantity.
 	for _, it := range order.Items {
 		if itemCancelled(it.CancellationStatus) {
@@ -215,7 +230,7 @@ func (s *ReviewService) reviewIssues(order *models.Order) []ReviewIssue {
 			iss.Field, iss.Severity, iss.Code = "sku", "BLOCKER", "SKU_UNMAPPED"
 			iss.Message = "SKU chưa có trong master data (chưa được setup nguyên vật liệu)."
 			issues = append(issues, iss)
-		} else if n, err := s.repo.SKU.CountMaterials(*it.SKUID); err == nil && n == 0 {
+		} else if materialCounts != nil && materialCounts[*it.SKUID] == 0 {
 			iss := base
 			iss.Field, iss.Severity, iss.Code = "material", "BLOCKER", "SKU_NO_MATERIAL"
 			iss.Message = "SKU chưa được gán nguyên vật liệu (Loại VL)."

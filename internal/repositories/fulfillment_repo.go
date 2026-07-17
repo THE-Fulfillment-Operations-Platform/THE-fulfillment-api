@@ -27,6 +27,18 @@ func (r *PackageRepository) CreateItems(items []models.PackageItem) error {
 
 func (r *PackageRepository) UpdateItem(it *models.PackageItem) error { return r.db.Save(it).Error }
 
+// IncrementScanned atomically bumps a package line's scanned count, guarded by
+// the expected quantity. The single UPDATE (instead of read-modify-write) means
+// two stations scanning the same line concurrently can never both count the
+// same slot: the second scan either takes the next slot or is rejected as an
+// over-scan (returns false).
+func (r *PackageRepository) IncrementScanned(packageItemID uint) (bool, error) {
+	res := r.db.Model(&models.PackageItem{}).
+		Where("id = ? AND scanned_qty < expected_qty", packageItemID).
+		Update("scanned_qty", gorm.Expr("scanned_qty + 1"))
+	return res.RowsAffected > 0, res.Error
+}
+
 func (r *PackageRepository) FindByID(id uint) (*models.Package, error) {
 	var p models.Package
 	err := r.db.Preload("Items", activePackageItems).Preload("Items.OrderItem").Preload("Order").First(&p, id).Error
