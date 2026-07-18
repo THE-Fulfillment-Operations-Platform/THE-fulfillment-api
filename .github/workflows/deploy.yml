@@ -33,7 +33,32 @@ jobs:
             -e "ssh -i ~/.ssh/deploy_key" \
             ./ root@${{ secrets.VPS_HOST }}:/root/FFM/THE-fulfillment-api/
 
-      - name: Build lại & khởi động trên VPS
+      - name: Deploy zero-downtime (build → rollout → caddy)
         run: |
-          ssh -i ~/.ssh/deploy_key root@${{ secrets.VPS_HOST }} \
-            'cd /root/FFM/THE-fulfillment-web && docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.server.yml up -d --build'
+          ssh -i ~/.ssh/deploy_key root@${{ secrets.VPS_HOST }} '
+            set -e
+            exec 9>/tmp/ffm-deploy.lock
+            flock -w 300 9 || { echo "deploy khác đang chạy — bỏ qua lần này"; exit 1; }
+            cd /root/FFM/THE-fulfillment-web
+            test -f ~/.docker/cli-plugins/docker-rollout || {
+              mkdir -p ~/.docker/cli-plugins
+              curl -fsSL https://raw.githubusercontent.com/Wowu/docker-rollout/master/docker-rollout -o ~/.docker/cli-plugins/docker-rollout
+              chmod +x ~/.docker/cli-plugins/docker-rollout
+            }
+            DC="docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.server.yml"
+            RO="docker rollout -f docker-compose.yml -f docker-compose.server.yml --env-file .env.docker"
+            $DC build
+            $RO backend
+            $RO frontend
+            $DC up -d caddy
+          '
+
+      - name: Kiểm tra /health sau deploy
+        run: |
+          ssh -i ~/.ssh/deploy_key root@${{ secrets.VPS_HOST }} '
+            for i in $(seq 1 10); do
+              [ "$(curl -s -o /dev/null -w "%{http_code}" http://localhost/health)" = "200" ] && echo "health OK" && exit 0
+              sleep 2
+            done
+            echo "health FAIL"; exit 1
+          '
