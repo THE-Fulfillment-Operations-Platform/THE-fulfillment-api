@@ -3,28 +3,58 @@ package services
 import (
 	"archive/zip"
 	"context"
-	"fmt"
 	"io"
-	"net/url"
-	"path"
-	"strings"
 	"time"
 
 	"the-fulfillment/backend/internal/apperr"
 	"the-fulfillment/backend/internal/repositories"
 )
 
-// StreamDesignAssetsZip streams the design + mockup files of design-queue items
-// into a ZIP, one folder per internal code (e.g. 100003_1/design.png,
-// 100003_1/mockup.jpg). ids restricts the export to the given item ids; a nil or
-// empty slice covers the whole approved design queue. Only design + mockup are
-// included — designers don't need the print/cut production files here.
-func (s *OrderService) StreamDesignAssetsZip(ctx context.Context, w io.Writer, ids []uint) error {
-	items, err := s.repo.OrderItem.ListAll(repositories.ItemFilter{
-		NeedsDesign:    true,
-		ReviewApproved: true,
-		IDs:            ids,
-	})
+// DesignZipResult reports which design files could not be downloaded so the
+// caller can surface a partial-success message ("N file lỗi") instead of failing
+// the whole archive.
+type DesignZipResult struct {
+	Written int      `json:"written"`
+	Failed  []string `json:"failed"`
+}
+
+// DesignAssetsFolder returns the single in-ZIP folder that groups a design
+// download so a designer can tell one pull from another. When a batch filter is
+// active the folder is "Batch_<code>"; otherwise it is "Design_<YYYY-MM-DD>" of
+// the download day. The folder is what keeps pulls apart: STT counts position
+// within one archive, so EVERY download starts again at 001 and two pulls
+// extracted into the same place would otherwise overwrite each other. now is
+// passed in so the handler's ZIP filename and the folder inside always agree on
+// the same instant.
+func DesignAssetsFolder(batch string, now time.Time) string {
+	if b := sanitizeZipComponent(batch); b != "" {
+		return "Batch_" + b
+	}
+	return "Design_" + now.Format("2006-01-02")
+}
+
+// StreamDesignAssetsZip streams ONLY the original design files (front + back) of
+// design-queue items into a ZIP — never the mockup and never the production
+// print/cut files. Every file goes into a single folder (see DesignAssetsFolder)
+// and is named "STT_SKU_QUANTITY[_SIDE].EXT" (see designFileName). ids restricts
+// the export to the given item ids; a nil/empty slice covers the whole approved
+// design queue (optionally narrowed to a batch). A single file that fails to
+// download is skipped (not fatal) so one broken URL doesn't abandon the rest of
+// the archive. It fails only when no design file could be written.
+func (s *OrderService) StreamDesignAssetsZip(ctx context.Context, w io.Writer, ids []uint, batch, folder string) error {
+	f := repositories.ItemFilter{ReviewApproved: true, IDs: ids}
+	// With no explicit selection, cover the design queue (items still needing
+	// design), optionally narrowed to the batch the designer is filtering on. With
+	// an explicit selection, download exactly those items' designs regardless of
+	// design status (a designer may re-pull a finished item) — the batch here only
+	// names the folder, it does not further filter the ticked rows.
+	if len(ids) == 0 {
+		f.NeedsDesign = true
+		if batch != "" {
+			f.BatchCode = batch
+		}
+	}
+	items, err := s.repo.OrderItem.ListAll(f)
 	if err != nil {
 		return err
 	}
@@ -32,65 +62,30 @@ func (s *OrderService) StreamDesignAssetsZip(ctx context.Context, w io.Writer, i
 	zw := zip.NewWriter(w)
 	defer func() { _ = zw.Close() }()
 
-	// SSRF-safe client: refuses to connect to non-public IPs (see safeurl.go).
-	// Asset URLs come from seller import data, so a plain client would be an SSRF sink.
 	client := newSafeAssetClient(30 * time.Second)
-	written := 0
 	usedNames := map[string]int{}
+	written := 0
 
+	var seq designSeq
 	for i := range items {
 		it := &items[i]
-		assets := []struct {
-			url   string
-			type_ string
-		}{
-			{it.DesignURL, "design"},
-			{it.MockupURL, "mockup"},
-		}
-		code := sanitizeZipComponent(it.InternalCode)
-		if code == "" {
-			code = fmt.Sprintf("item-%d", it.ID)
-		}
-
-		for _, asset := range assets {
-			if strings.TrimSpace(asset.url) == "" {
+		wroteForItem := false
+		for _, a := range designAssetsForItem(it) {
+			entryName := designFileName(folder, seq.next(), it.SKUCode, it.Quantity, a.side, a.url, usedNames)
+			if err := writeURLToZipEntry(ctx, client, zw, a.url, entryName); err != nil {
+				// Skip a single broken/blocked asset rather than aborting the whole ZIP.
 				continue
 			}
-			entryName := zipFolderEntryName(code, asset.type_, asset.url, usedNames)
-			if err := writeURLToZipEntry(ctx, client, zw, asset.url, entryName); err != nil {
-				return err
-			}
 			written++
+			wroteForItem = true
+		}
+		if wroteForItem {
+			seq.commit()
 		}
 	}
 
 	if written == 0 {
-		return apperr.Unprocessable("Không có file design/mockup nào để tải")
+		return apperr.Unprocessable("Không có file design nào để tải (kiểm tra link design của các đơn đã chọn)")
 	}
-
 	return zw.Close()
-}
-
-// zipFolderEntryName builds a foldered entry path "<code>/<type><ext>" so each
-// internal code becomes its own directory when the archive is extracted. Unlike
-// the flat batch naming, this groups a designer's files per order. Collisions on
-// the same code+type get a numeric suffix inside the same folder.
-func zipFolderEntryName(code, assetType, rawURL string, usedNames map[string]int) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		u = &url.URL{Path: rawURL}
-	}
-	ext := path.Ext(u.Path)
-	if ext == "" {
-		ext = ".bin"
-	}
-	name := fmt.Sprintf("%s/%s%s", code, assetType, ext)
-	if count, ok := usedNames[name]; ok {
-		count++
-		usedNames[name] = count
-		name = fmt.Sprintf("%s/%s-%d%s", code, assetType, count, ext)
-	} else {
-		usedNames[name] = 1
-	}
-	return name
 }

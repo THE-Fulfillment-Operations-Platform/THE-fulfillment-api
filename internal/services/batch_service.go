@@ -283,9 +283,15 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 	if newStatus == models.StatusQCPassed {
 		return nil, apperr.Unprocessable("Không đặt 'Đã QC' ở bảng sản xuất. QC được thực hiện 1 lần ở trạm QC khi cả sản phẩm (mọi NVL) đã sản xuất xong.")
 	}
-	batch, err := s.Get(batchID)
+	// The guards below need the batch row and (for fabrication stages) which links
+	// exist — not the full detail payload with every association preloaded, which
+	// cost a handful of round trips to the remote DB before being thrown away.
+	batch, err := s.repo.Batch.FindLite(batchID)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperr.NotFound("Batch not found")
+		}
+		return nil, apperr.Internal("lookup failed").Wrap(err)
 	}
 	// A QC-passed batch is finished; the board never edits it (undoing QC is a
 	// deliberate QC-station action, not a status click). Mirrors the FE lock.
@@ -299,32 +305,53 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 	if newStatus.Rank() < batch.Status.Rank() && actor.Role != models.RoleOwner {
 		return nil, apperr.Unprocessable("Sản xuất chỉ tiến, không lùi: batch đang ở '" + string(batch.Status) + "', không thể hạ về '" + string(newStatus) + "'. (Chỉ OWNER được sửa khi bấm nhầm.)")
 	}
+	// Entering fabrication requires the batch's shared production files. The print
+	// and cut files are ganged once per batch, so nobody can have printed or cut
+	// without them on record — and marking a stage done without them would strand
+	// the batch in the design queue, which only clears once both links exist.
+	// Parent batches are skipped: they hold no items and carry no links (their
+	// status is rolled up from their children, each of which is guarded here).
+	if !batch.IsParent && (newStatus == models.StatusPrinted || newStatus == models.StatusCut) {
+		kinds, err := s.repo.Batch.LinkKindsForBatch(batch.ID)
+		if err != nil {
+			return nil, apperr.Internal("could not read batch links").Wrap(err)
+		}
+		var hasPrint, hasCut bool
+		for _, k := range kinds {
+			switch k {
+			case models.BatchLinkPrint:
+				hasPrint = true
+			case models.BatchLinkCut:
+				hasCut = true
+			}
+		}
+		if !hasPrint || !hasCut {
+			var missing []string
+			if !hasPrint {
+				missing = append(missing, "link in")
+			}
+			if !hasCut {
+				missing = append(missing, "link cắt")
+			}
+			return nil, apperr.Unprocessable("Batch chưa có " + strings.Join(missing, " và ") +
+				". Thêm link sản xuất dùng chung trước khi chuyển sang '" + string(newStatus) + "'.")
+		}
+	}
 
 	affectedItems := map[uint]bool{}
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
 		txRepo := repositories.New(tx)
-		items, err := txRepo.Batch.BatchItemsForBatch(batch.ID)
-		if err != nil {
-			return err
-		}
-		// One lightweight query for every item's cancellation status — the only
-		// order-item fact the cascade needs (previously a fully-preloaded FindByID
-		// per batch item, inside the transaction).
-		itemIDs := make([]uint, 0, len(items))
-		for i := range items {
-			itemIDs = append(itemIDs, items[i].OrderItemID)
-		}
-		cancellation, err := txRepo.OrderItem.CancellationStatusByIDs(itemIDs)
+		// Cancelled parts are filtered out by the query itself — the cascade never
+		// touches them, so there is no reason to fetch them and their cancellation
+		// status in a second statement.
+		items, err := txRepo.Batch.ActiveBatchItemsForBatch(batch.ID)
 		if err != nil {
 			return err
 		}
 		var history []models.StatusHistory
+		moved := make([]uint, 0, len(items))
 		for i := range items {
 			bi := &items[i]
-			st, ok := cancellation[bi.OrderItemID]
-			if !ok || itemCancelled(st) {
-				continue
-			}
 			// Never let a board change touch an already QC-passed part. In a mixed
 			// batch (one order QC-passed while another still in production) this stops
 			// a batch move — especially an OWNER regression — from silently un-QC'ing it.
@@ -336,15 +363,18 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 			}
 			old := string(bi.Status)
 			bi.Status = newStatus
-			if err := txRepo.Batch.UpdateBatchItemStatus(bi.ID, newStatus); err != nil {
-				return err
-			}
+			moved = append(moved, bi.ID)
 			history = append(history, models.StatusHistory{
 				EntityType: models.EntityBatchItem, EntityID: bi.ID,
 				FromStatus: old, ToStatus: string(newStatus),
 				ChangedByID: actor.IDPtr(), Note: in.Note,
 			})
 			affectedItems[bi.OrderItemID] = true
+		}
+		// Every moved part lands on the same status, so it is one UPDATE regardless
+		// of batch size (this used to be one statement per item).
+		if err := txRepo.Batch.UpdateBatchItemStatuses(moved, newStatus); err != nil {
+			return err
 		}
 		oldBatch := string(batch.Status)
 		batch.Status = newStatus
@@ -376,6 +406,102 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 	s.audit.Log(actor, "BATCH_STATUS_UPDATE", "batch", &batch.ID,
 		fmt.Sprintf("Batch %s -> %s", batch.Code, newStatus), nil)
 	return s.Get(batch.ID)
+}
+
+// ---------- Batch links (print / cut) ----------
+
+// SetBatchLinkInput sets (or replaces) a batch's print or cut link.
+type SetBatchLinkInput struct {
+	Kind string `json:"kind" binding:"required"` // PRINT | CUT
+	URL  string `json:"url" binding:"required"`
+}
+
+// SetBatchLink attaches a print or cut link to a whole batch. The link is entered
+// once per batch (shared by every design in it) rather than repeated per item.
+// Re-adding the same kind updates the existing row (never creating a duplicate,
+// enforced by the partial unique index), recording who changed it and when. The
+// URL must be a valid http(s) link; an empty string is rejected.
+//
+// The link is also stamped onto every item in the batch (print_file_url for PRINT,
+// cut_file_url for CUT). A designer gangs many personalised designs onto a single
+// sheet, so the resulting print/cut file belongs to the batch, not to any one item
+// — this is what saves entering it once per order.
+func (s *BatchService) SetBatchLink(actor Actor, batchID uint, in SetBatchLinkInput) (*models.BatchLink, error) {
+	kind := models.BatchLinkKind(strings.ToUpper(strings.TrimSpace(in.Kind)))
+	if !kind.Valid() {
+		return nil, apperr.BadRequest("kind phải là PRINT hoặc CUT")
+	}
+	rawURL := strings.TrimSpace(in.URL)
+	if rawURL == "" {
+		return nil, apperr.BadRequest("URL không được để trống")
+	}
+	if !isValidHTTPURL(rawURL) {
+		return nil, apperr.BadRequest("URL không hợp lệ (phải là http hoặc https)")
+	}
+	batch, err := s.Get(batchID)
+	if err != nil {
+		return nil, err
+	}
+	if batch.IsParent {
+		return nil, apperr.Unprocessable("Batch mẹ không chứa item sản xuất. Hãy cập nhật link trên từng batch con.")
+	}
+
+	now := time.Now()
+	// The per-item column this kind fans out to. Fixed literals, never user input.
+	column := "print_file_url"
+	if kind == models.BatchLinkCut {
+		column = "cut_file_url"
+	}
+
+	var link *models.BatchLink
+	action := "BATCH_LINK_ADD"
+	// Saving the link and stamping it onto the items is one unit of work: a batch
+	// whose link says one thing while its items say another is worse than neither.
+	if err := s.repo.DB.Transaction(func(tx *gorm.DB) error {
+		txRepo := repositories.New(tx)
+
+		existing, err := txRepo.Batch.FindLink(batchID, kind)
+		if err != nil {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.Internal("could not look up batch link").Wrap(err)
+			}
+			link = &models.BatchLink{BatchID: batchID, Kind: kind, URL: rawURL, UpdatedByID: actor.IDPtr(), LinkUpdatedAt: now}
+			if err := txRepo.Batch.CreateLink(link); err != nil {
+				return apperr.Internal("could not add batch link").Wrap(err)
+			}
+		} else {
+			action = "BATCH_LINK_UPDATE"
+			existing.URL = rawURL
+			existing.UpdatedByID = actor.IDPtr()
+			existing.LinkUpdatedAt = now
+			if err := txRepo.Batch.UpdateLink(existing); err != nil {
+				return apperr.Internal("could not update batch link").Wrap(err)
+			}
+			link = existing
+		}
+
+		// Fan the shared file out onto every item in the batch: the production
+		// export, QR labels and QC all read the per-item column, so this is what
+		// makes "same batch → same print/cut file" true for them. Replacing a link
+		// re-stamps every item, so the batch never ends up half-updated.
+		if _, err := txRepo.OrderItem.SetProductionFileForBatch(batchID, column, rawURL); err != nil {
+			return apperr.Internal("could not apply batch link to items").Wrap(err)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	s.audit.Log(actor, action, "batch", &batchID,
+		fmt.Sprintf("Set %s link on batch %d", kind, batchID),
+		models.JSONMap{"kind": string(kind), "url": rawURL})
+
+	links, _ := s.repo.Batch.LinksForBatch(batchID)
+	for i := range links {
+		if links[i].ID == link.ID {
+			return &links[i], nil
+		}
+	}
+	return link, nil
 }
 
 func skuHasMaterial(sku *models.SKU, materialID uint) bool {
@@ -433,6 +559,7 @@ func ProductionTemplateGrid(batch *models.Batch) [][]string {
 	date := batch.CreatedAt.Format("2006-01-02")
 	grid := make([][]string, 0, len(batch.Items)+1)
 	grid = append(grid, productionTemplateHeaders)
+	batchPrintURL, batchCutURL := batchProductionLinks(batch)
 
 	for _, bi := range batch.Items {
 		it := bi.OrderItem
@@ -453,6 +580,13 @@ func ProductionTemplateGrid(batch *models.Batch) [][]string {
 			orderID = it.Order.StoreOrderID
 			customer = it.Order.ShippingName
 		}
+		printURL, cutURL := batchPrintURL, batchCutURL
+		if printURL == "" {
+			printURL = it.PrintFileURL
+		}
+		if cutURL == "" {
+			cutURL = it.CutFileURL
+		}
 		grid = append(grid, []string{
 			it.InternalCode,               // Mã nội bộ
 			batch.Code,                    // SỐ Batch
@@ -469,11 +603,25 @@ func ProductionTemplateGrid(batch *models.Batch) [][]string {
 			it.InternalCode,               // Mã nội bộ (legacy 2nd copy)
 			customer,                      // Tên khách
 			it.ProductionFileName,         // Tên File
-			it.PrintFileURL,               // Link in
-			it.CutFileURL,                 // Link cắt
+			printURL,                      // Link in (batch link overrides legacy item link)
+			cutURL,                        // Link cắt (batch link overrides legacy item link)
 		})
 	}
 	return grid
+}
+
+// batchProductionLinks returns the canonical shared links for a batch. Legacy
+// item-level links remain as a fallback for batches created before BatchLink.
+func batchProductionLinks(batch *models.Batch) (printURL, cutURL string) {
+	for _, link := range batch.Links {
+		switch link.Kind {
+		case models.BatchLinkPrint:
+			printURL = link.URL
+		case models.BatchLinkCut:
+			cutURL = link.URL
+		}
+	}
+	return strings.TrimSpace(printURL), strings.TrimSpace(cutURL)
 }
 
 // productionColumnWidths sets sensible Excel column widths (in characters) for the
@@ -556,9 +704,22 @@ func (s *BatchService) ProductionTemplateXLSX(batchID uint) ([]byte, string, err
 	return buf.Bytes(), filename, nil
 }
 
-// StreamBatchAssetsZip downloads each batch item's design/mockup/print/cut asset URLs
-// and streams them into a ZIP archive for the client.
-func (s *BatchService) StreamBatchAssetsZip(ctx context.Context, w io.Writer, batchID uint) error {
+// BatchZipName returns the download filename for a batch asset ZIP, e.g.
+// "Batch_101000.zip", derived from the batch code (# stripped).
+func BatchZipName(batch *models.Batch) string {
+	return "Batch_" + sanitizeZipComponent(batch.Code) + ".zip"
+}
+
+// StreamBatchAssetsZip streams a batch's asset URLs into a ZIP archive.
+//
+// When designOnly is true it bundles ONLY the original design files (front + back)
+// into a single "Batch_<code>" folder, each named "STT_SKU_QUANTITY[_SIDE].EXT"
+// (see designFileName) — no mockup, no print/cut — matching the "download design"
+// requirement. When false it keeps
+// the full production bundle (design, mockup, print, cut) with the legacy flat
+// naming plus a manifest, so the existing "Download ZIP" on the batch board is
+// unchanged. A single broken/blocked asset URL is skipped (recorded), not fatal.
+func (s *BatchService) StreamBatchAssetsZip(ctx context.Context, w io.Writer, batchID uint, designOnly bool) error {
 	batch, err := s.Get(batchID)
 	if err != nil {
 		return err
@@ -572,6 +733,12 @@ func (s *BatchService) StreamBatchAssetsZip(ctx context.Context, w io.Writer, ba
 	client := newSafeAssetClient(30 * time.Second)
 	manifest := make([]string, 0)
 	usedNames := map[string]int{}
+	written := 0
+	batchPrintURL, batchCutURL := batchProductionLinks(batch)
+	// Design-only downloads gather every file into one "Batch_<code>" folder so the
+	// designer can tell one batch's pull from another; matches BatchZipName's .zip.
+	designFolder := "Batch_" + sanitizeZipComponent(batch.Code)
+	var designStt designSeq
 
 	for _, bi := range batch.Items {
 		it := bi.OrderItem
@@ -579,42 +746,71 @@ func (s *BatchService) StreamBatchAssetsZip(ctx context.Context, w io.Writer, ba
 			continue
 		}
 
+		if designOnly {
+			wroteForItem := false
+			for _, a := range designAssetsForItem(it) {
+				entryName := designFileName(designFolder, designStt.next(), it.SKUCode, it.Quantity, a.side, a.url, usedNames)
+				if err := writeURLToZipEntry(ctx, client, zw, a.url, entryName); err != nil {
+					continue // skip one broken design file, keep the rest
+				}
+				written++
+				wroteForItem = true
+			}
+			if wroteForItem {
+				designStt.commit()
+			}
+			continue
+		}
+
+		printURL, cutURL := batchPrintURL, batchCutURL
+		if printURL == "" {
+			printURL = it.PrintFileURL
+		}
+		if cutURL == "" {
+			cutURL = it.CutFileURL
+		}
 		assets := []struct {
 			url   string
 			type_ string
 		}{
 			{it.DesignURL, "design"},
+			{it.BackDesignURL, "design-back"},
 			{it.MockupURL, "mockup"},
-			{it.PrintFileURL, "print"},
-			{it.CutFileURL, "cut"},
+			{printURL, "print"},
+			{cutURL, "cut"},
 		}
 		code := sanitizeZipComponent(it.InternalCode)
 		if code == "" {
 			code = sanitizeZipComponent(batch.Code)
 		}
-
 		for _, asset := range assets {
 			if strings.TrimSpace(asset.url) == "" {
 				continue
 			}
 			entryName := zipEntryName(code, asset.type_, asset.url, usedNames)
 			if err := writeURLToZipEntry(ctx, client, zw, asset.url, entryName); err != nil {
-				return err
+				continue
 			}
 			manifest = append(manifest, fmt.Sprintf("%s,%s,%s", code, asset.type_, asset.url))
+			written++
 		}
 	}
 
-	if len(manifest) == 0 {
+	if written == 0 {
+		if designOnly {
+			return apperr.Unprocessable("Không có file design nào để tải cho batch này")
+		}
 		return apperr.Unprocessable("No assets available for batch ZIP download")
 	}
 
-	m, err := zw.Create("manifest.txt")
-	if err != nil {
-		return apperr.Internal("could not write ZIP manifest").Wrap(err)
-	}
-	if _, err := io.WriteString(m, strings.Join(manifest, "\n")); err != nil {
-		return apperr.Internal("could not write ZIP manifest").Wrap(err)
+	if !designOnly {
+		m, err := zw.Create("manifest.txt")
+		if err != nil {
+			return apperr.Internal("could not write ZIP manifest").Wrap(err)
+		}
+		if _, err := io.WriteString(m, strings.Join(manifest, "\n")); err != nil {
+			return apperr.Internal("could not write ZIP manifest").Wrap(err)
+		}
 	}
 
 	return zw.Close()

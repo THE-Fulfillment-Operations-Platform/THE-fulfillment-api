@@ -2,6 +2,7 @@ package repositories
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -62,6 +63,37 @@ type OrderRepository struct{ db *gorm.DB }
 func (r *OrderRepository) Create(o *models.Order) error { return r.db.Create(o).Error }
 func (r *OrderRepository) Update(o *models.Order) error { return r.db.Save(o).Error }
 
+// SoftDelete soft-deletes an order (sets deleted_at). GORM's default scope hides
+// it from every subsequent query; linked rows are preserved.
+func (r *OrderRepository) SoftDelete(id uint) error {
+	return r.db.Delete(&models.Order{}, id).Error
+}
+
+// UpdateTracking writes only the tracking columns (plus updated_at) so it can't
+// clobber concurrent edits to unrelated order fields.
+func (r *OrderRepository) UpdateTracking(id uint, fields map[string]interface{}) error {
+	return r.db.Model(&models.Order{}).Where("id = ?", id).Updates(fields).Error
+}
+
+// NextDailySeq atomically allocates the next per-day order sequence
+// ("STT trong ngày") for the given business calendar day (YYYY-MM-DD). It upserts
+// the daily_counters row and returns the new sequence in a single statement, so
+// any number of concurrent order creations each receive a distinct, monotonically
+// increasing number without a separate lock round-trip. MUST be called on the
+// transaction handle (repositories.New(tx).Order) so the allocation commits with
+// the order. Works on both Postgres and the sqlite test engine (both support
+// INSERT ... ON CONFLICT DO UPDATE ... RETURNING).
+func (r *OrderRepository) NextDailySeq(scopeDate string, now time.Time) (int, error) {
+	var seq int
+	err := r.db.Raw(
+		`INSERT INTO daily_counters (scope_date, seq, updated_at) VALUES (?, 1, ?)
+		 ON CONFLICT (scope_date) DO UPDATE SET seq = daily_counters.seq + 1, updated_at = ?
+		 RETURNING seq`,
+		scopeDate, now, now,
+	).Scan(&seq).Error
+	return seq, err
+}
+
 func (r *OrderRepository) FindByID(id uint) (*models.Order, error) {
 	var o models.Order
 	err := r.db.
@@ -75,6 +107,42 @@ func (r *OrderRepository) FindByID(id uint) (*models.Order, error) {
 		return nil, err
 	}
 	return &o, nil
+}
+
+// FindByIDsForReview loads several orders with only their line items preloaded
+// (no Seller / SKU / batch-item preloads). The bulk review path needs just the
+// order + item columns its validation reads, so it skips the heavy per-order
+// FindByID preload chain: one query for the orders, one for their items — instead
+// of ~6 queries per order.
+func (r *OrderRepository) FindByIDsForReview(ids []uint) ([]models.Order, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var orders []models.Order
+	err := r.db.
+		Preload("Items", func(db *gorm.DB) *gorm.DB { return db.Order("order_items.line_no asc") }).
+		Where("id IN ?", ids).
+		Find(&orders).Error
+	return orders, err
+}
+
+// BulkSetReviewApproved flips several orders to APPROVED in a single UPDATE,
+// stamping the reviewer, note and timestamp. The review_status guard makes it
+// safe under concurrency: only orders still pending review / needing correction
+// are changed, so a race that already decided an order can't be clobbered.
+func (r *OrderRepository) BulkSetReviewApproved(ids []uint, reviewerID *uint, note string, at time.Time) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return r.db.Model(&models.Order{}).
+		Where("id IN ? AND review_status IN ?", ids,
+			[]string{string(models.ReviewPending), string(models.ReviewNeedsFix)}).
+		Updates(map[string]interface{}{
+			"review_status":  models.ReviewApproved,
+			"reviewed_by_id": reviewerID,
+			"reviewed_at":    at,
+			"review_note":    note,
+		}).Error
 }
 
 func (r *OrderRepository) FindBySellerAndStoreOrder(sellerID uint, storeOrderID string) (*models.Order, error) {
@@ -209,15 +277,60 @@ type ItemFilter struct {
 	Page
 	SellerID       *uint
 	StoreID        *uint
+	StoreOrderID   string // partial, case-insensitive match on the parent order's store order id
 	SKUCode        string
+	InternalCode   string // partial, case-insensitive match on the item's internal (QR) code
 	InternalStatus string
 	DesignStatus   string
+	ReviewStatus   string // exact match on the parent order's review_status
 	BatchID        *uint
+	BatchCode      string // partial, case-insensitive batch code (e.g. #101001)
+	MaterialID     *uint  // items whose SKU includes this material (design queue "gom theo NVL")
 	IDs            []uint // restrict to specific item ids (e.g. selected rows for a ZIP export)
 	NeedsDesign    bool   // design queue: design not ready
 	ReviewApproved bool   // only items whose order review_status = APPROVED
 	DateFrom       *time.Time
 	DateTo         *time.Time
+	// Server-side sort. SortBy is whitelisted (see itemOrderClause); anything else
+	// falls back to the stable default (newest first). SortDir is asc|desc.
+	SortBy  string
+	SortDir string
+}
+
+// itemOrderClause maps a whitelisted sort key + direction to a safe SQL ORDER BY.
+// Every branch appends a deterministic tiebreaker so pagination stays stable when
+// the primary key has duplicates (e.g. many items share a SKU). Unknown keys fall
+// back to newest-first — this is the only place item sort SQL is built, so a
+// client-supplied value can never inject into the query.
+func itemOrderClause(sortBy, sortDir string) string {
+	dir := "DESC"
+	if strings.EqualFold(sortDir, "asc") {
+		dir = "ASC"
+	}
+	switch strings.ToLower(strings.TrimSpace(sortBy)) {
+	case "sku", "sku_code":
+		return "order_items.sku_code " + dir + ", order_items.id DESC"
+	case "quantity", "qty":
+		return "order_items.quantity " + dir + ", order_items.id DESC"
+	case "created_at", "date":
+		return "order_items.created_at " + dir + ", order_items.id DESC"
+	case "stt", "daily_seq":
+		return "orders.order_date " + dir + ", orders.daily_seq " + dir + ", order_items.id DESC"
+	case "internal_code":
+		return "order_items.internal_code " + dir + ", order_items.id DESC"
+	case "batch", "batch_code":
+		// An item can belong to several material batches. MIN(code) gives it one
+		// stable grouping key; unbatched items are placed after batched items in
+		// both directions so the production groups remain the first thing shown.
+		batchKey := `(SELECT MIN(b.code)
+			FROM batch_items bi
+			JOIN batches b ON b.id = bi.batch_id AND b.deleted_at IS NULL
+			WHERE bi.order_item_id = order_items.id AND bi.deleted_at IS NULL)`
+		return "CASE WHEN " + batchKey + " IS NULL THEN 1 ELSE 0 END ASC, " +
+			batchKey + " " + dir + ", order_items.id DESC"
+	default:
+		return "order_items.id DESC"
+	}
 }
 
 type OrderItemRepository struct{ db *gorm.DB }
@@ -275,30 +388,6 @@ func (r *OrderItemRepository) FindForBatching(ids []uint) (map[uint]*models.Orde
 	return out, nil
 }
 
-// CancellationStatusByIDs returns just the cancellation status per item — the
-// only fact the batch board cascade needs about an item.
-func (r *OrderItemRepository) CancellationStatusByIDs(ids []uint) (map[uint]models.CancellationStatus, error) {
-	out := map[uint]models.CancellationStatus{}
-	if len(ids) == 0 {
-		return out, nil
-	}
-	type row struct {
-		ID                 uint
-		CancellationStatus models.CancellationStatus
-	}
-	var rows []row
-	err := r.db.Model(&models.OrderItem{}).
-		Select("id, cancellation_status").
-		Where("id IN ?", ids).Scan(&rows).Error
-	if err != nil {
-		return nil, err
-	}
-	for _, r := range rows {
-		out[r.ID] = r.CancellationStatus
-	}
-	return out, nil
-}
-
 // InternalStatusByIDs returns the current internal status per item, for the
 // status roll-up recompute (no associations needed).
 func (r *OrderItemRepository) InternalStatusByIDs(ids []uint) (map[uint]models.InternalStatus, error) {
@@ -331,6 +420,18 @@ func (r *OrderItemRepository) UpdateInternalStatus(id uint, status models.Intern
 		Update("internal_status", status).Error
 }
 
+// UpdateInternalStatuses sets the same derived status on many items in one
+// statement. The roll-up groups items by their new status and calls this once
+// per distinct status (at most four) instead of once per item — the database is
+// remote, so statements, not rows, are what cost time.
+func (r *OrderItemRepository) UpdateInternalStatuses(ids []uint, status models.InternalStatus) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return r.db.Model(&models.OrderItem{}).Where("id IN ?", ids).
+		Update("internal_status", status).Error
+}
+
 func (r *OrderItemRepository) ListCancellationRequests(p Page) ([]models.OrderItem, int64, error) {
 	var rows []models.OrderItem
 	var total int64
@@ -354,8 +455,14 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 	if f.StoreID != nil {
 		q = q.Where("orders.store_id = ?", *f.StoreID)
 	}
+	if f.StoreOrderID != "" {
+		q = q.Where("orders.store_order_id ILIKE ?", "%"+f.StoreOrderID+"%")
+	}
 	if f.SKUCode != "" {
 		q = q.Where("order_items.sku_code = ?", f.SKUCode)
+	}
+	if f.InternalCode != "" {
+		q = q.Where("order_items.internal_code ILIKE ?", "%"+f.InternalCode+"%")
 	}
 	if f.InternalStatus != "" {
 		q = q.Where("order_items.internal_status = ?", f.InternalStatus)
@@ -363,10 +470,32 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 	if f.DesignStatus != "" {
 		q = q.Where("order_items.design_status = ?", f.DesignStatus)
 	}
+	if f.ReviewStatus != "" {
+		q = q.Where("orders.review_status = ?", f.ReviewStatus)
+	}
 	if f.NeedsDesign {
-		q = q.Where("order_items.design_status IN ?", []string{
-			string(models.DesignPending), string(models.DesignInProgress), string(models.DesignMissing),
-		})
+		// Design work is outstanding in two cases: the item itself is unfinished, or
+		// it already sits in a batch that is still missing a production file. Files
+		// are ganged per batch (many designs on one sheet) and attached to the batch,
+		// so reaching READY does not mean an item is done — its batch still owes both
+		// a print file AND a cut file (every product here needs both). Keeping those
+		// rows in the queue is what lets a designer filter by batch/material and clear
+		// them a batch at a time; they drop off on their own the moment the batch has
+		// both links. Grouped so the OR cannot leak into the surrounding AND chain.
+		awaitingBatchFiles := r.db.Model(&models.BatchItem{}).
+			Select("batch_items.order_item_id").
+			Joins("JOIN batches ON batches.id = batch_items.batch_id AND batches.deleted_at IS NULL").
+			Joins("LEFT JOIN batch_links bl_print ON bl_print.batch_id = batches.id AND bl_print.kind = ? AND bl_print.deleted_at IS NULL",
+				models.BatchLinkPrint).
+			Joins("LEFT JOIN batch_links bl_cut ON bl_cut.batch_id = batches.id AND bl_cut.kind = ? AND bl_cut.deleted_at IS NULL",
+				models.BatchLinkCut).
+			Where("bl_print.id IS NULL OR bl_cut.id IS NULL")
+
+		q = q.Where(
+			r.db.Where("order_items.design_status IN ?", []string{
+				string(models.DesignPending), string(models.DesignInProgress), string(models.DesignMissing),
+			}).Or("order_items.id IN (?)", awaitingBatchFiles),
+		)
 	}
 	if f.ReviewApproved {
 		q = q.Where("orders.review_status = ?", string(models.ReviewApproved)).
@@ -375,6 +504,23 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 	if f.BatchID != nil {
 		q = q.Where("order_items.id IN (?)",
 			r.db.Model(&models.BatchItem{}).Select("order_item_id").Where("batch_id = ?", *f.BatchID))
+	}
+	if f.BatchCode != "" {
+		q = q.Where("order_items.id IN (?)",
+			r.db.Model(&models.BatchItem{}).
+				Select("batch_items.order_item_id").
+				Joins("JOIN batches ON batches.id = batch_items.batch_id AND batches.deleted_at IS NULL").
+				Where("batches.code ILIKE ?", "%"+f.BatchCode+"%"))
+	}
+	if f.MaterialID != nil {
+		// "Gom theo NVL": keep items whose SKU is mapped to this material, so the
+		// designer sees every order that could go onto one material's sheet before
+		// creating a batch. Matched via the SKU→material mapping, not the batch, so
+		// it works for items not yet batched.
+		q = q.Where("order_items.sku_id IN (?)",
+			r.db.Table("sku_materials").
+				Select("sku_materials.sku_id").
+				Where("sku_materials.material_id = ? AND sku_materials.deleted_at IS NULL", *f.MaterialID))
 	}
 	if len(f.IDs) > 0 {
 		q = q.Where("order_items.id IN ?", f.IDs)
@@ -394,10 +540,10 @@ func (r *OrderItemRepository) List(f ItemFilter) ([]models.OrderItem, int64, err
 	r.baseQuery(f).Count(&total)
 	err := r.baseQuery(f).
 		Preload("Order.Seller").
-		Preload("SKU").
+		Preload("SKU.Materials.Material").
 		Preload("BatchItems.Batch").
 		Preload("BatchItems.Material").
-		Order("order_items.id desc").
+		Order(itemOrderClause(f.SortBy, f.SortDir)).
 		Limit(f.PageSize).Offset(f.Offset()).Find(&rows).Error
 	return rows, total, err
 }
@@ -415,6 +561,23 @@ func (r *OrderItemRepository) ListAll(f ItemFilter) ([]models.OrderItem, error) 
 	return rows, err
 }
 
+// SetProductionFileForBatch stamps one production-file column (print_file_url or
+// cut_file_url) onto every item scheduled into the given batch, in one statement.
+// It is how a batch-level print/cut link fans out to the per-item columns that the
+// production export and QC screens read, so "same batch → same print/cut file"
+// holds without the link ever being re-entered per item. Cancelled lines are left
+// alone — they are never produced. `column` is caller-supplied and must stay a
+// fixed literal, never user input.
+func (r *OrderItemRepository) SetProductionFileForBatch(batchID uint, column, url string) (int64, error) {
+	res := r.db.Model(&models.OrderItem{}).
+		Where("id IN (?)",
+			r.db.Model(&models.BatchItem{}).Select("order_item_id").Where("batch_id = ?", batchID)).
+		Where("cancellation_status NOT IN ?",
+			[]models.CancellationStatus{models.CancellationSeller, models.CancellationApproved}).
+		Update(column, url)
+	return res.RowsAffected, res.Error
+}
+
 // MaterialBucket groups design-ready, not-yet-batched item parts by material so
 // the "material buckets" panel on the create-batch screen can be built.
 type MaterialBucket struct {
@@ -428,7 +591,7 @@ type MaterialBucket struct {
 // design-ready items whose (item, material) is not yet scheduled into any batch.
 func (r *OrderItemRepository) designReadyUnbatchedSubquery() *gorm.DB {
 	return r.db.Table("order_items oi").
-		Select("oi.id AS order_item_id, sm.material_id AS material_id, m.code AS material_code, m.name AS material_name").
+		Select("oi.id AS order_item_id, oi.sku_code AS sku_code, sm.material_id AS material_id, m.code AS material_code, m.name AS material_name").
 		Joins("JOIN orders o ON o.id = oi.order_id AND o.deleted_at IS NULL").
 		Joins("JOIN sku_materials sm ON sm.sku_id = oi.sku_id").
 		Joins("JOIN materials m ON m.id = sm.material_id").
@@ -443,6 +606,25 @@ func (r *OrderItemRepository) designReadyUnbatchedSubquery() *gorm.DB {
 }
 
 // MaterialBuckets returns the count of design-ready, unbatched item parts per material.
+// DesignQueueMaterials lists only the materials that actually have work sitting in
+// the design queue, with how many items each covers. The NVL filter is built from
+// this rather than the full catalog, which is mostly materials with nothing in the
+// queue — picking one of those just returned an empty table. Callers pass the
+// queue's own filter with MaterialID cleared, so the facet reflects the other active
+// filters (e.g. batch) but never narrows by itself.
+func (r *OrderItemRepository) DesignQueueMaterials(f ItemFilter) ([]MaterialBucket, error) {
+	var rows []MaterialBucket
+	err := r.baseQuery(f).
+		Joins("JOIN sku_materials sm ON sm.sku_id = order_items.sku_id AND sm.deleted_at IS NULL").
+		Joins("JOIN materials m ON m.id = sm.material_id AND m.deleted_at IS NULL").
+		Select("m.id AS material_id, m.code AS material_code, m.name AS material_name, " +
+			"COUNT(DISTINCT order_items.id) AS item_count").
+		Group("m.id, m.code, m.name").
+		Order("m.code ASC").
+		Scan(&rows).Error
+	return rows, err
+}
+
 func (r *OrderItemRepository) MaterialBuckets() ([]MaterialBucket, error) {
 	var rows []MaterialBucket
 	err := r.db.Table("(?) AS sub", r.designReadyUnbatchedSubquery()).
@@ -455,8 +637,11 @@ func (r *OrderItemRepository) MaterialBuckets() ([]MaterialBucket, error) {
 
 // DesignReadyItemsForMaterial lists design-ready items that still need a batch for
 // the given material (used to populate the create-batch item table). Count and
-// page both run in SQL so the working set never has to fit in memory.
-func (r *OrderItemRepository) DesignReadyItemsForMaterial(materialID uint, p Page) ([]models.OrderItem, int64, error) {
+// page both run in SQL so the working set never has to fit in memory. sortBy/sortDir
+// (whitelisted) let the create-batch table sort by SKU before selecting; the same
+// order is applied to the page selection and the final hydrate so it is stable
+// across pagination.
+func (r *OrderItemRepository) DesignReadyItemsForMaterial(materialID uint, p Page, sortBy, sortDir string) ([]models.OrderItem, int64, error) {
 	sub := r.designReadyUnbatchedSubquery().Where("sm.material_id = ?", materialID)
 
 	var total int64
@@ -467,10 +652,21 @@ func (r *OrderItemRepository) DesignReadyItemsForMaterial(materialID uint, p Pag
 		return []models.OrderItem{}, 0, nil
 	}
 
+	dir := "ASC"
+	if strings.EqualFold(sortDir, "desc") {
+		dir = "DESC"
+	}
+	subOrder := "sub.order_item_id ASC"
+	finalOrder := "id ASC"
+	if strings.EqualFold(strings.TrimSpace(sortBy), "sku") || strings.EqualFold(strings.TrimSpace(sortBy), "sku_code") {
+		subOrder = "sub.sku_code " + dir + ", sub.order_item_id ASC"
+		finalOrder = "sku_code " + dir + ", id ASC"
+	}
+
 	var pageIDs []uint
 	err := r.db.Table("(?) AS sub", sub).
 		Select("sub.order_item_id").
-		Order("sub.order_item_id asc").
+		Order(subOrder).
 		Limit(p.PageSize).Offset(p.Offset()).
 		Scan(&pageIDs).Error
 	if err != nil {
@@ -482,6 +678,6 @@ func (r *OrderItemRepository) DesignReadyItemsForMaterial(materialID uint, p Pag
 
 	var rows []models.OrderItem
 	err = r.db.Preload("Order.Seller").Preload("SKU.Materials.Material").
-		Where("id IN ?", pageIDs).Order("id asc").Find(&rows).Error
+		Where("id IN ?", pageIDs).Order(finalOrder).Find(&rows).Error
 	return rows, total, err
 }

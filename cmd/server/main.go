@@ -10,6 +10,10 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	// Embed the IANA timezone database so business-timezone lookups
+	// (DB_TIMEZONE, e.g. Asia/Ho_Chi_Minh — used for "STT trong ngày") always
+	// resolve, even on a minimal container image without system zoneinfo.
+	_ "time/tzdata"
 
 	"the-fulfillment/backend/internal/auth"
 	"the-fulfillment/backend/internal/config"

@@ -68,12 +68,19 @@ type QCScanResult struct {
 	StoreOrderID   string                `json:"store_order_id"`
 	SKUCode        string                `json:"sku_code"`
 	ProductName    string                `json:"product_name"`
+	VariantCode    string                `json:"variant_code"`
 	Quantity       int                   `json:"quantity"`
 	MaterialName   string                `json:"material_name"`  // Loại VL
 	QCDescription  string                `json:"qc_description"` // Mô tả SP để QC
-	ImageCode      string                `json:"image_code"`     // Mã ảnh
+	// SKUDescription is the catalog product description for the SKU — richer, more
+	// stable product spec text for QC to check against (falls back to nothing when
+	// the SKU has none). SKUProductName is the catalog product name.
+	SKUDescription string                `json:"sku_description"`
+	SKUProductName string                `json:"sku_product_name"`
+	ImageCode      string                `json:"image_code"` // Mã ảnh
 	EngraveText    string                `json:"engrave_text"`
-	DesignURL      string                `json:"design_url"` // Link ảnh / design
+	DesignURL      string                `json:"design_url"` // Link ảnh / design (front/single)
+	BackDesignURL  string                `json:"back_design_url"`
 	MockupURL      string                `json:"mockup_url"`
 	PrintFileURL   string                `json:"print_file_url"`
 	CutFileURL     string                `json:"cut_file_url"`
@@ -97,15 +104,20 @@ func (s *QCService) Scan(actor Actor, ref ScanRef) (*QCScanResult, error) {
 	}
 	res := &QCScanResult{
 		ItemID: item.ID, ItemCode: item.InternalCode, SKUCode: item.SKUCode,
-		ProductName: item.ProductName, Quantity: item.Quantity,
+		ProductName: item.ProductName, VariantCode: item.VariantCode, Quantity: item.Quantity,
 		QCDescription: item.QCDescription, ImageCode: item.ImageCode,
-		EngraveText: item.EngraveText, DesignURL: item.DesignURL, MockupURL: item.MockupURL,
+		EngraveText: item.EngraveText, DesignURL: item.DesignURL, BackDesignURL: item.BackDesignURL,
+		MockupURL: item.MockupURL,
 		PrintFileURL: item.PrintFileURL, CutFileURL: item.CutFileURL,
 		InternalStatus: item.InternalStatus,
 	}
 	if item.Order != nil {
 		res.OrderCode = item.Order.InternalCode
 		res.StoreOrderID = item.Order.StoreOrderID
+	}
+	if item.SKU != nil {
+		res.SKUDescription = item.SKU.Description
+		res.SKUProductName = item.SKU.ProductName
 	}
 	// Loại VL: the material(s) this item is produced in. Prefer the batch parts
 	// (the concrete production material); fall back to the SKU's mapped materials.

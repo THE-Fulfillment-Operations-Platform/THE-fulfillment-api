@@ -82,6 +82,25 @@ type Order struct {
 	ImportJobID  *uint        `json:"import_job_id" gorm:"index"`
 	CreatedByID  *uint        `json:"created_by_id"`
 
+	// OrderDate + DailySeq implement "STT trong ngày" (per-day order number). Both
+	// are assigned atomically at creation via the daily_counters allocator, in the
+	// business timezone (DB_TIMEZONE), so the number is stable across pagination and
+	// sorting and never derived from a front-end loop index. OrderDate is the
+	// business calendar day (YYYY-MM-DD); DailySeq starts at 1 each day. They are the
+	// single source of truth reused by Batch, Design Queue and design file names.
+	OrderDate string `json:"order_date" gorm:"size:10;index"`
+	DailySeq  int    `json:"daily_seq" gorm:"not null;default:0;index"`
+
+	// Tracking (YC8). Populated manually via PATCH /orders/:id/tracking or synced
+	// from a handoff when it ships. TrackingStatus uses the TrackingStatus enum so
+	// the UI can render a consistent badge. A tracking provider integration (e.g.
+	// 17TRACK) can later refresh these fields via the same columns.
+	TrackingNumber   string         `json:"tracking_number" gorm:"size:120;index"`
+	TrackingStatus   TrackingStatus `json:"tracking_status" gorm:"size:20;not null;default:'NONE'"`
+	TrackingCarrier  string         `json:"tracking_carrier" gorm:"size:60"`
+	TrackingURL      string         `json:"tracking_url" gorm:"size:500"`
+	TrackingUpdatedAt *time.Time    `json:"tracking_updated_at"`
+
 	// Review (intake) state. New orders are PENDING_REVIEW and only enter the
 	// design/production flow once APPROVED. The DB default is APPROVED so orders
 	// created before this feature (and any legacy rows) remain visible to the
@@ -127,11 +146,17 @@ type OrderItem struct {
 	VariantCode string `json:"variant_code" gorm:"size:80"`
 	Quantity    int    `json:"quantity" gorm:"not null;default:1"`
 
-	DesignURL    string `json:"design_url" gorm:"size:500"`
-	PrintFileURL string `json:"print_file_url" gorm:"size:500"`
-	CutFileURL   string `json:"cut_file_url" gorm:"size:500"`
-	MockupURL    string `json:"mockup_url" gorm:"size:500"` // seller-provided QC reference
-	EngraveText  string `json:"engrave_text" gorm:"size:500"`
+	// DesignURL is the primary/front design (also the "SINGLE" side for one-sided
+	// products). BackDesignURL holds the second side for two-sided products; it is
+	// optional and only set when a product actually has a back design. Keeping
+	// DesignURL as the front/single side preserves backward compatibility with every
+	// existing single-design item and flow.
+	DesignURL     string `json:"design_url" gorm:"size:500"`
+	BackDesignURL string `json:"back_design_url" gorm:"size:500"`
+	PrintFileURL  string `json:"print_file_url" gorm:"size:500"`
+	CutFileURL    string `json:"cut_file_url" gorm:"size:500"`
+	MockupURL     string `json:"mockup_url" gorm:"size:500"` // seller-provided QC reference
+	EngraveText   string `json:"engrave_text" gorm:"size:500"`
 
 	// Production-ready fields Ops/Design normalize before an item is produced.
 	// They map 1:1 onto the legacy production template columns exported per batch.
@@ -164,13 +189,17 @@ func (OrderItem) TableName() string { return "order_items" }
 // the full history.
 type ItemAsset struct {
 	Base
-	OrderItemID  uint      `json:"order_item_id" gorm:"index;not null"`
-	AssetType    string    `json:"asset_type" gorm:"size:20;not null"` // DESIGN | PRINT_FILE | CUT_FILE | MOCKUP | RAW
-	URL          string    `json:"url" gorm:"size:500;not null"`
-	Version      int       `json:"version" gorm:"not null;default:1"`
-	UploadedByID *uint     `json:"uploaded_by_id"`
-	Note         string    `json:"note" gorm:"size:255"`
-	UploadedAt   time.Time `json:"uploaded_at"`
+	OrderItemID uint   `json:"order_item_id" gorm:"index;not null"`
+	AssetType   string `json:"asset_type" gorm:"size:20;not null"` // DESIGN | PRINT_FILE | CUT_FILE | MOCKUP | RAW
+	// Side is which physical side this asset belongs to (SINGLE | FRONT | BACK).
+	// Defaults to SINGLE so existing one-sided assets stay correct. Lets the design
+	// history distinguish a front vs back file without adding new asset types.
+	Side         DesignSide `json:"side" gorm:"size:10;not null;default:'SINGLE'"`
+	URL          string     `json:"url" gorm:"size:500;not null"`
+	Version      int        `json:"version" gorm:"not null;default:1"`
+	UploadedByID *uint      `json:"uploaded_by_id"`
+	Note         string     `json:"note" gorm:"size:255"`
+	UploadedAt   time.Time  `json:"uploaded_at"`
 }
 
 func (ItemAsset) TableName() string { return "item_assets" }

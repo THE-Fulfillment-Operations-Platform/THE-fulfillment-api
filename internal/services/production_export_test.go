@@ -200,3 +200,30 @@ func TestProductionTemplateGrid(t *testing.T) {
 		}
 	}
 }
+
+func TestProductionTemplateGrid_BatchLinksOverrideEveryItem(t *testing.T) {
+	itemA := models.OrderItem{InternalCode: "A", PrintFileURL: "https://legacy/a-print", CutFileURL: "https://legacy/a-cut"}
+	itemB := models.OrderItem{InternalCode: "B", PrintFileURL: "https://legacy/b-print", CutFileURL: "https://legacy/b-cut"}
+	batch := &models.Batch{
+		Code: "#101002",
+		Links: []models.BatchLink{
+			{Kind: models.BatchLinkPrint, URL: "https://shared/print"},
+			{Kind: models.BatchLinkCut, URL: "https://shared/cut"},
+		},
+		Items: []models.BatchItem{{OrderItem: &itemA}, {OrderItem: &itemB}},
+	}
+	batch.CreatedAt = time.Date(2026, 7, 6, 10, 0, 0, 0, time.UTC)
+
+	grid := ProductionTemplateGrid(batch)
+	if len(grid) != 3 {
+		t.Fatalf("want header + 2 data rows, got %d rows", len(grid))
+	}
+	for row := 1; row <= 2; row++ {
+		if grid[row][15] != "https://shared/print" {
+			t.Errorf("row %d print link = %q, want shared link", row, grid[row][15])
+		}
+		if grid[row][16] != "https://shared/cut" {
+			t.Errorf("row %d cut link = %q, want shared link", row, grid[row][16])
+		}
+	}
+}

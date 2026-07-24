@@ -25,6 +25,8 @@ func newImportDB(t *testing.T) *gorm.DB {
 		&models.Seller{}, &models.Store{}, &models.Material{}, &models.SKU{}, &models.SKUMaterial{},
 		&models.ImportJob{}, &models.ImportError{},
 		&models.Order{}, &models.OrderItem{}, &models.ItemAsset{}, &models.Note{},
+		&models.DailyCounter{},
+		&models.Batch{}, &models.BatchItem{}, &models.BatchLink{}, &models.StatusHistory{},
 		&models.AuditLog{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)

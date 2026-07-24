@@ -89,15 +89,41 @@ func (h *Handlers) DownloadBatchAssetsZip(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
+	// assets=design → design-only bundle (front/back, no mockup/print/cut) named
+	// per the STT_SKU_QUANTITY rule, in a Batch_<code>.zip. Anything else keeps the
+	// full production bundle (backward compatible with the existing board button).
+	designOnly := c.Query("assets") == "design"
 	filename := "batch-" + strings.ReplaceAll(batch.Code, "#", "") + "-assets.zip"
+	if designOnly {
+		filename = services.BatchZipName(batch)
+	}
 	c.Header("Content-Disposition", "attachment; filename=\""+filename+"\"")
 	c.Header("Content-Type", "application/zip")
-	if err := h.svc.Batch.StreamBatchAssetsZip(c.Request.Context(), c.Writer, id); err != nil {
+	if err := h.svc.Batch.StreamBatchAssetsZip(c.Request.Context(), c.Writer, id, designOnly); err != nil {
 		if !c.Writer.Written() {
 			response.Fail(c, err)
 		}
 		return
 	}
+}
+
+// SetBatchLink attaches/updates a batch's print or cut link (shared by every
+// design in the batch). PATCH /api/batches/:id/links
+func (h *Handlers) SetBatchLink(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	var in services.SetBatchLinkInput
+	if !bindJSON(c, &in) {
+		return
+	}
+	link, err := h.svc.Batch.SetBatchLink(actor(c), id, in)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, link)
 }
 
 // UpdateBatchStatus moves a batch through Pending/Đã in/Đã cắt/Đã QC.

@@ -6,6 +6,7 @@ import (
 	"the-fulfillment/backend/internal/middleware"
 	"the-fulfillment/backend/internal/repositories"
 	"the-fulfillment/backend/internal/response"
+	"the-fulfillment/backend/internal/services"
 )
 
 // noteBody is the shared body for review/cancellation actions that carry a note.
@@ -67,6 +68,22 @@ func (h *Handlers) ApproveReviewOrder(c *gin.Context) {
 		return
 	}
 	response.OK(c, o)
+}
+
+// BulkApproveReviewOrders approves several orders at once, skipping any that are
+// no longer reviewable or still have a blocking issue and reporting why.
+// POST /api/review/orders/bulk-approve
+func (h *Handlers) BulkApproveReviewOrders(c *gin.Context) {
+	var in services.BulkApproveInput
+	if !bindJSON(c, &in) {
+		return
+	}
+	res, err := h.svc.Review.BulkApprove(actor(c), in)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, res)
 }
 
 // RejectReviewOrder rejects an order. POST /api/review/orders/:id/reject

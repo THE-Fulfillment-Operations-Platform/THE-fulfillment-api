@@ -127,6 +127,9 @@ func recomputeOrderItemStatuses(repo *repositories.Repositories, itemIDs []uint,
 		return err
 	}
 	var history []models.StatusHistory
+	// Items are grouped by the status they land on, so the writes below are one
+	// statement per distinct status (at most four) instead of one per item.
+	moved := map[models.InternalStatus][]uint{}
 	for _, id := range itemIDs {
 		cur, ok := current[id]
 		if !ok {
@@ -136,14 +139,17 @@ func recomputeOrderItemStatuses(repo *repositories.Repositories, itemIDs []uint,
 		if newStatus == cur {
 			continue
 		}
-		if err := repo.OrderItem.UpdateInternalStatus(id, newStatus); err != nil {
-			return err
-		}
+		moved[newStatus] = append(moved[newStatus], id)
 		history = append(history, models.StatusHistory{
 			EntityType: models.EntityOrderItem, EntityID: id,
 			FromStatus: string(cur), ToStatus: string(newStatus),
 			ChangedByID: actor.IDPtr(), Note: "derived from batch parts",
 		})
+	}
+	for status, ids := range moved {
+		if err := repo.OrderItem.UpdateInternalStatuses(ids, status); err != nil {
+			return err
+		}
 	}
 	return repo.Status.CreateBulk(history)
 }

@@ -25,9 +25,13 @@ type BatchFilter struct {
 
 type BatchRepository struct{ db *gorm.DB }
 
+// activeBatchItems drops the parts whose order item was cancelled. It filters
+// through the OrderItem association join (rather than a hand-written JOIN) so a
+// caller can pull the order item's columns in the same statement — the join is
+// already there, and joining order_items twice would be a wasted scan.
 func activeBatchItems(db *gorm.DB) *gorm.DB {
-	return db.Joins("JOIN order_items ON order_items.id = batch_items.order_item_id").
-		Where("order_items.cancellation_status NOT IN ?", []models.CancellationStatus{models.CancellationSeller, models.CancellationApproved})
+	return db.Joins("OrderItem").
+		Where(`"OrderItem".cancellation_status NOT IN ?`, []models.CancellationStatus{models.CancellationSeller, models.CancellationApproved})
 }
 
 func (r *BatchRepository) Create(b *models.Batch) error { return r.db.Create(b).Error }
@@ -40,16 +44,25 @@ func (r *BatchRepository) CreateItems(items []models.BatchItem) error {
 	return r.db.Create(&items).Error
 }
 
+// FindByID loads the full batch-detail payload. The database is remote, so the
+// cost here is the NUMBER of statements, not their individual runtime: every
+// belongs-to association is folded into its parent's query with Joins instead of
+// costing an extra round trip, leaving three statements (batch, links, items)
+// for a flat batch — down from up to eleven.
 func (r *BatchRepository) FindByID(id uint) (*models.Batch, error) {
 	var b models.Batch
 	err := r.db.
-		Preload("Material").
-		Preload("CreatedBy").
-		Preload("Items", activeBatchItems).
-		Preload("Items.OrderItem.Order").
-		Preload("Items.Material").
+		// belongs-to associations ride along in the batch's own SELECT…
+		Joins("Material").
+		Joins("CreatedBy").
+		// …and in each has-many's SELECT, instead of one round trip apiece.
+		Preload("Links", func(db *gorm.DB) *gorm.DB { return db.Joins("UpdatedBy").Order("kind asc") }).
+		Preload("Items", func(db *gorm.DB) *gorm.DB {
+			return activeBatchItems(db).Joins("OrderItem.Order").Joins("Material")
+		}).
 		// A parent batch preloads its children (with each child's active items so the
-		// detail view can show per-child item counts). Children/flat batches have none.
+		// detail view can show per-child item counts). Children/flat batches have none,
+		// and GORM skips the nested preload once the child list comes back empty.
 		Preload("ChildBatches", func(db *gorm.DB) *gorm.DB { return db.Order("sequence asc") }).
 		Preload("ChildBatches.Items", activeBatchItems).
 		First(&b, id).Error
@@ -78,6 +91,33 @@ func (r *BatchRepository) UpdateStatusColumn(id uint, status models.InternalStat
 // UpdateBatchItemStatus writes only a batch item's status (plus updated_at).
 func (r *BatchRepository) UpdateBatchItemStatus(id uint, status models.InternalStatus) error {
 	return r.db.Model(&models.BatchItem{}).Where("id = ?", id).Update("status", status).Error
+}
+
+// UpdateBatchItemStatuses moves many parts to the same status in one statement.
+// The batch cascade used to call UpdateBatchItemStatus in a loop, so a 40-item
+// batch paid 40 network round trips to the (remote) database.
+func (r *BatchRepository) UpdateBatchItemStatuses(ids []uint, status models.InternalStatus) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return r.db.Model(&models.BatchItem{}).Where("id IN ?", ids).Update("status", status).Error
+}
+
+// ActiveBatchItemsForBatch returns the batch's parts minus those whose order item
+// was cancelled — the exact set a status cascade may touch. The cancellation
+// filter rides on the join, so callers no longer need a second lookup.
+func (r *BatchRepository) ActiveBatchItemsForBatch(batchID uint) ([]models.BatchItem, error) {
+	var items []models.BatchItem
+	err := activeBatchItems(r.db).Where("batch_items.batch_id = ?", batchID).Find(&items).Error
+	return items, err
+}
+
+// LinkKindsForBatch returns which production links a batch has (PRINT / CUT).
+// The guard on entering fabrication only needs their presence, not the rows.
+func (r *BatchRepository) LinkKindsForBatch(batchID uint) ([]models.BatchLinkKind, error) {
+	var kinds []models.BatchLinkKind
+	err := r.db.Model(&models.BatchLink{}).Where("batch_id = ?", batchID).Pluck("kind", &kinds).Error
+	return kinds, err
 }
 
 // ChildBatchesFor returns the child batches of a parent (id + status are enough
@@ -130,10 +170,32 @@ func (r *BatchRepository) List(f BatchFilter) ([]models.Batch, int64, error) {
 	err := r.baseQuery(f).
 		Preload("Material").
 		Preload("CreatedBy").
+		Preload("Links").
 		Preload("Items", activeBatchItems).
 		Order("id desc").
 		Limit(f.PageSize).Offset(f.Offset()).Find(&rows).Error
 	return rows, total, err
+}
+
+// ---------- Batch links (print / cut) ----------
+
+// FindLink returns the live link of a given kind for a batch, or gorm.ErrRecordNotFound.
+func (r *BatchRepository) FindLink(batchID uint, kind models.BatchLinkKind) (*models.BatchLink, error) {
+	var l models.BatchLink
+	if err := r.db.Where("batch_id = ? AND kind = ?", batchID, kind).First(&l).Error; err != nil {
+		return nil, err
+	}
+	return &l, nil
+}
+
+func (r *BatchRepository) CreateLink(l *models.BatchLink) error { return r.db.Create(l).Error }
+func (r *BatchRepository) UpdateLink(l *models.BatchLink) error { return r.db.Save(l).Error }
+
+// LinksForBatch lists a batch's links (print/cut), with the updater preloaded.
+func (r *BatchRepository) LinksForBatch(batchID uint) ([]models.BatchLink, error) {
+	var rows []models.BatchLink
+	err := r.db.Preload("UpdatedBy").Where("batch_id = ?", batchID).Order("kind asc").Find(&rows).Error
+	return rows, err
 }
 
 // ---------- Batch items ----------

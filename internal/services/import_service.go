@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/xuri/excelize/v2"
 	"golang.org/x/text/unicode/norm"
@@ -54,7 +55,9 @@ type ImportRow struct {
 	VariantCode      string  `json:"VariantCode"`
 	SKU              string  `json:"SKU"`
 	ImageCode        string  `json:"ImageCode"` // "Mã ảnh"
-	Design           string  `json:"Design"`
+	Design           string  `json:"Design"`      // legacy single/front design column (kept compatible)
+	FrontDesign      string  `json:"FrontDesign"` // front design link (new)
+	BackDesign       string  `json:"BackDesign"`  // back design link (optional, two-sided products)
 	Mockup           string  `json:"Mockup"`
 	EngraveText      string  `json:"EngraveText"`
 	ShippingName     string  `json:"ShippingName"`
@@ -99,6 +102,15 @@ func (r *ImportRow) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// FrontDesignValue is the front/single design for a row: the new "Front Design"
+// column if present, otherwise the legacy "Design" column (kept compatible).
+func (r ImportRow) FrontDesignValue() string {
+	if v := strings.TrimSpace(r.FrontDesign); v != "" {
+		return v
+	}
+	return strings.TrimSpace(r.Design)
+}
+
 // PreviewResult is returned to the client after validation.
 type PreviewResult struct {
 	ImportJobID uint                   `json:"import_job_id"`
@@ -139,8 +151,17 @@ var headerToField = map[string]func(*ImportRow, string){
 	"maanh":            func(r *ImportRow, v string) { r.ImageCode = v },
 	"imagecode":        func(r *ImportRow, v string) { r.ImageCode = v },
 	"design":           func(r *ImportRow, v string) { r.Design = v },
-	"mockup":           func(r *ImportRow, v string) { r.Mockup = v },
-	"mockupurl":        func(r *ImportRow, v string) { r.Mockup = v },
+	// Front/Back design aliases. "Front Design (Link)" and "Back Design (Link)" are
+	// the new template columns; the legacy single "Design" column keeps working as
+	// the front/single side, so old templates import unchanged.
+	"frontdesign":     func(r *ImportRow, v string) { r.FrontDesign = v },
+	"frontdesignlink": func(r *ImportRow, v string) { r.FrontDesign = v },
+	"designfront":     func(r *ImportRow, v string) { r.FrontDesign = v },
+	"backdesign":      func(r *ImportRow, v string) { r.BackDesign = v },
+	"backdesignlink":  func(r *ImportRow, v string) { r.BackDesign = v },
+	"designback":      func(r *ImportRow, v string) { r.BackDesign = v },
+	"mockup":          func(r *ImportRow, v string) { r.Mockup = v },
+	"mockupurl":       func(r *ImportRow, v string) { r.Mockup = v },
 	"engravetext":      func(r *ImportRow, v string) { r.EngraveText = v },
 	"shippingname":     func(r *ImportRow, v string) { r.ShippingName = v },
 	"shippingaddress1": func(r *ImportRow, v string) { r.ShippingAddress1 = v },
@@ -160,23 +181,24 @@ var headerToField = map[string]func(*ImportRow, string){
 // fill them in. Keep this in sync with the front-end IMPORT_COLUMNS list.
 var orderImportTemplateHeaders = []string{
 	"StoreOrderID", "Account", "StoreName", "ShippingMethod", "Quantity",
-	"ProductName", "VariantCode", "SKU", "Mã ảnh", "Design", "Mockup",
+	"ProductName", "VariantCode", "SKU", "Mã ảnh", "Front Design", "Back Design", "Mockup",
 	"EngraveText", "ShippingName", "ShippingAddress1", "ShippingAddress2",
 	"ShippingCity", "ShippingZip", "ShippingProvince", "ShippingCountry",
 	"ShippingPhone", "ShippingEmail", "IOSS", "Note",
 }
 
-// orderImportTemplateSample mirrors the two example rows the front-end used to
-// ship in its client-side CSV, so the .xlsx download gives the same guidance.
+// orderImportTemplateSample gives two example rows: a one-sided product (front
+// only, back blank) and a two-sided product (front + back), so sellers see how the
+// Back Design column is used.
 var orderImportTemplateSample = [][]string{
-	{"Etsy-9001", "acc-001", "Etsy-Demo", "Standard", "1", "Personalized Wood Sign", "VAR-1", "WOOD-01", "IMG-9001", "design-a", "https://mockups.example.com/etsy-9001-1.png", "Hello", "John Doe", "12 Main St", "", "Austin", "73301", "TX", "US", "+1900000000", "john@example.com", "", "First order"},
-	{"Etsy-9001", "acc-001", "Etsy-Demo", "Standard", "2", "Mica Plate", "VAR-2", "MICA-02", "IMG-9002", "design-b", "https://mockups.example.com/etsy-9001-2.png", "", "John Doe", "12 Main St", "", "Austin", "73301", "TX", "US", "+1900000000", "john@example.com", "", ""},
+	{"Etsy-9001", "acc-001", "Etsy-Demo", "Standard", "1", "Personalized Wood Sign", "VAR-1", "WOOD-01", "IMG-9001", "https://designs.example.com/9001-front.png", "", "https://mockups.example.com/etsy-9001-1.png", "Hello", "John Doe", "12 Main St", "", "Austin", "73301", "TX", "US", "+1900000000", "john@example.com", "", "First order"},
+	{"Etsy-9001", "acc-001", "Etsy-Demo", "Standard", "2", "Mica Plate", "VAR-2", "MICA-02", "IMG-9002", "https://designs.example.com/9002-front.png", "https://designs.example.com/9002-back.png", "https://mockups.example.com/etsy-9001-2.png", "", "John Doe", "12 Main St", "", "Austin", "73301", "TX", "US", "+1900000000", "john@example.com", "", ""},
 }
 
 // orderImportTemplateWidths sets per-column Excel widths (in characters): wide for
-// the mockup URL / addresses / email, compact for quantity / zip.
+// the design/mockup URLs / addresses / email, compact for quantity / zip.
 var orderImportTemplateWidths = []float64{
-	14, 12, 14, 14, 9, 24, 12, 14, 12, 12, 40, 16, 16, 22, 16, 14, 10, 12, 12, 16, 24, 10, 20,
+	14, 12, 14, 14, 9, 24, 12, 14, 12, 40, 40, 40, 16, 16, 22, 16, 14, 10, 12, 12, 16, 24, 10, 20,
 }
 
 // OrderImportTemplateXLSX renders the order-import template as a real .xlsx
@@ -316,12 +338,24 @@ func (s *ImportService) validateRow(rowNumber int, row ImportRow, skus map[strin
 				"Request seller gửi lại link mockup")
 		}
 	}
-	// Design: only blocking if it is provided *as a URL* but malformed. A bare
-	// design reference code (e.g. "design-a") is allowed — Design may be a code,
-	// not a link, so we only validate values that clearly attempt to be a URL.
-	if d := strings.TrimSpace(row.Design); looksLikeURL(d) && !isValidHTTPURL(d) {
-		return mkErr("Design", "DESIGN_INVALID", "Design URL is not a valid http(s) URL",
-			"Sửa lại link design hoặc để trống nếu chưa có")
+	// Design (front/single): only blocking if provided *as a URL* but malformed. A
+	// bare design reference code (e.g. "design-a") is allowed — Design may be a code,
+	// not a link — so we only validate values that clearly attempt to be a URL.
+	if d := row.FrontDesignValue(); looksLikeURL(d) && !isValidHTTPURL(d) {
+		return mkErr("Front Design", "DESIGN_INVALID", "Front Design URL is not a valid http(s) URL",
+			"Sửa lại link design mặt trước hoặc để trống nếu chưa có")
+	}
+	// Back design is optional (only two-sided products). Same rule: validate only if
+	// it looks like a URL. It must not be identical to the front design.
+	if b := strings.TrimSpace(row.BackDesign); b != "" {
+		if looksLikeURL(b) && !isValidHTTPURL(b) {
+			return mkErr("Back Design", "BACK_DESIGN_INVALID", "Back Design URL is not a valid http(s) URL",
+				"Sửa lại link design mặt sau hoặc để trống nếu sản phẩm chỉ có 1 mặt")
+		}
+		if b == row.FrontDesignValue() {
+			return mkErr("Back Design", "DESIGN_SIDE_DUP", "Link design mặt trước và mặt sau đang giống nhau",
+				"Kiểm tra lại — mỗi mặt phải là file design riêng, hoặc để trống mặt sau")
+		}
 	}
 	// StoreOrderID uniqueness is intentionally NOT enforced here: a store order id
 	// is a repeatable reference label (many items per order, and the same id may
@@ -511,8 +545,17 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 			order.CancellationStatus = models.CancellationNone
 			order.CancellationRequestedByID = nil
 			order.CancellationRequestedAt = nil
+			order.TrackingStatus = models.TrackingNone
 			order.ImportJobID = &job.ID
 			order.CreatedByID = actor.IDPtr()
+			// Assign the per-day sequence ("STT trong ngày") atomically before insert.
+			now := time.Now()
+			order.OrderDate = AppDateString(now)
+			seq, seqErr := txRepo.Order.NextDailySeq(order.OrderDate, now)
+			if seqErr != nil {
+				return seqErr
+			}
+			order.DailySeq = seq
 			if err := txRepo.Order.Create(order); err != nil {
 				return err
 			}
@@ -548,7 +591,8 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 					VariantCode:    row.VariantCode,
 					Quantity:       maxInt(int(row.Quantity), 1),
 					ImageCode:      row.ImageCode,
-					DesignURL:      row.Design,
+					DesignURL:      row.FrontDesignValue(),
+					BackDesignURL:  strings.TrimSpace(row.BackDesign),
 					MockupURL:      row.Mockup,
 					EngraveText:    row.EngraveText,
 					InternalStatus: models.StatusPending,
@@ -562,6 +606,24 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 			var notes []models.Note
 			for i := range items {
 				item := &items[i]
+				// Record design assets with their side so the versioned history keeps
+				// front/back distinct. A one-sided item records a SINGLE design.
+				if item.DesignURL != "" {
+					side := models.DesignSideSingle
+					if item.BackDesignURL != "" {
+						side = models.DesignSideFront
+					}
+					assets = append(assets, models.ItemAsset{
+						OrderItemID: item.ID, AssetType: "DESIGN", Side: side, URL: item.DesignURL, Version: 1,
+						UploadedByID: actor.IDPtr(),
+					})
+				}
+				if item.BackDesignURL != "" {
+					assets = append(assets, models.ItemAsset{
+						OrderItemID: item.ID, AssetType: "DESIGN", Side: models.DesignSideBack, URL: item.BackDesignURL, Version: 1,
+						UploadedByID: actor.IDPtr(),
+					})
+				}
 				if item.MockupURL != "" {
 					assets = append(assets, models.ItemAsset{
 						OrderItemID: item.ID, AssetType: "MOCKUP", URL: item.MockupURL, Version: 1,

@@ -160,6 +160,12 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		orders.GET("/import/template.xlsx", middleware.RequireRoles(roleOpsAdmin...), h.DownloadOrderImportTemplate)
 		orders.POST("/import", middleware.RequireRoles(roleOpsAdmin...), h.ImportOrders)
 		orders.POST("/import/commit", middleware.RequireRoles(roleOpsAdmin...), h.CommitImport)
+		// Edit / cancel / delete — authorization is also re-checked in the service.
+		orders.PUT("/:id", middleware.RequireRoles(roleOpsAdmin...), h.UpdateOrder)
+		orders.POST("/:id/cancel", middleware.RequireRoles(roleOpsAdmin...), h.CancelOrder)
+		orders.DELETE("/:id", middleware.RequireRoles(roleAdminOwner...), h.DeleteOrder)
+		// Tracking: ops + the packing/shipping stations may set it.
+		orders.PATCH("/:id/tracking", middleware.RequireRoles(roleShipOps...), h.UpdateOrderTracking)
 	}
 	authd.GET("/import-jobs", middleware.RequireRoles(roleOpsAdmin...), h.ListImportJobs)
 	authd.GET("/import-jobs/:id", middleware.RequireRoles(roleOpsAdmin...), h.GetImportJob)
@@ -180,6 +186,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	review := authd.Group("/review/orders", middleware.RequireRoles(roleDesignOps...))
 	{
 		review.GET("", h.ListReviewOrders)
+		review.POST("/bulk-approve", h.BulkApproveReviewOrders)
 		review.GET("/:id", h.GetReviewOrder)
 		review.POST("/:id/approve", h.ApproveReviewOrder)
 		review.POST("/:id/reject", h.RejectReviewOrder)
@@ -207,6 +214,8 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	design := authd.Group("/design-queue", middleware.RequireRoles(roleDesignOps...))
 	{
 		design.GET("", h.DesignQueue)
+		design.POST("/set-ready", h.BulkSetDesignReady)
+		design.GET("/materials", h.DesignQueueMaterials)
 		design.GET("/assets.zip", h.DownloadDesignAssetsZip)
 		design.GET("/material-buckets", h.MaterialBuckets)
 		design.GET("/material/:materialId/items", h.DesignReadyItemsForMaterial)
@@ -220,6 +229,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		batches.GET("/:id/production-template.xlsx", middleware.RequireRoles(roleInternal...), h.ExportProductionTemplate)
 		batches.GET("/:id/assets.zip", middleware.RequireRoles(roleInternal...), h.DownloadBatchAssetsZip)
 		batches.POST("", middleware.RequireRoles(roleDesignOps...), h.CreateBatch)
+		batches.PATCH("/:id/links", middleware.RequireRoles(roleDesignOps...), h.SetBatchLink)
 		batches.PATCH("/:id/status", middleware.RequireRoles(roleProdOps...), h.UpdateBatchStatus)
 	}
 
@@ -262,6 +272,8 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	{
 		seller.GET("/orders", h.SellerOrders)
 		seller.GET("/orders/:id", h.SellerOrderDetail)
+		// Seller may edit their own order while it is still in review.
+		seller.PUT("/orders/:id", h.SellerUpdateOrder)
 		// Seller self-upload: seller_id is forced to the authenticated seller.
 		seller.GET("/orders/import/template.xlsx", h.DownloadOrderImportTemplate)
 		seller.POST("/orders/import", h.SellerImportOrders)

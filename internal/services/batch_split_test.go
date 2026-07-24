@@ -21,7 +21,7 @@ func newSplitDB(t *testing.T) *gorm.DB {
 	if err := db.AutoMigrate(
 		&models.User{}, &models.Material{}, &models.SKU{}, &models.SKUMaterial{},
 		&models.Order{}, &models.OrderItem{}, &models.ItemAsset{},
-		&models.Batch{}, &models.BatchItem{}, &models.StatusHistory{}, &models.AuditLog{},
+		&models.Batch{}, &models.BatchItem{}, &models.BatchLink{}, &models.StatusHistory{}, &models.AuditLog{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -167,6 +167,9 @@ func TestUpdateStatus_NoRegression(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
+	// Entering fabrication needs the batch's shared print/cut files; this test is
+	// about the forward-only rule, so give it both and let the guard pass.
+	seedBatchLinks(t, db, batch.ID)
 
 	// Forward is allowed.
 	if _, err := svc.UpdateStatus(actor, batch.ID, UpdateStatusInput{Status: string(models.StatusPrinted)}); err != nil {
@@ -215,6 +218,8 @@ func TestUpdateStatus_OwnerRegression(t *testing.T) {
 	biB := &models.BatchItem{BatchID: batch.ID, OrderItemID: itemB.ID, MaterialID: mat.ID, Status: models.StatusCut}
 	db.Create(biA)
 	db.Create(biB)
+	// This test is about the OWNER regression rule, not the link guard.
+	seedBatchLinks(t, db, batch.ID)
 
 	// OWNER regresses CUT → PRINTED.
 	if _, err := svc.UpdateStatus(owner, batch.ID, UpdateStatusInput{Status: string(models.StatusPrinted)}); err != nil {

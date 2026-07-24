@@ -2,6 +2,7 @@ package services
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -154,11 +155,12 @@ func (s *OrderService) DesignQueue(f repositories.ItemFilter) ([]models.OrderIte
 // Any field left nil is unchanged. Ops/Design use this from the Pending Review
 // detail to normalize a seller item into production-ready data before approval.
 type UpdateDesignInput struct {
-	PrintFileURL *string `json:"print_file_url"`
-	CutFileURL   *string `json:"cut_file_url"`
-	MockupURL    *string `json:"mockup_url"`
-	DesignURL    *string `json:"design_url"`
-	SetReady     *bool   `json:"set_ready"`
+	PrintFileURL  *string `json:"print_file_url"`
+	CutFileURL    *string `json:"cut_file_url"`
+	MockupURL     *string `json:"mockup_url"`
+	DesignURL     *string `json:"design_url"`
+	BackDesignURL *string `json:"back_design_url"`
+	SetReady      *bool   `json:"set_ready"`
 
 	// Production-ready fields (legacy production-template columns).
 	ImageCode          *string `json:"image_code"`           // Mã ảnh
@@ -179,12 +181,13 @@ func (s *OrderService) UpdateItemDesign(actor Actor, itemID uint, in UpdateDesig
 	}
 
 	now := time.Now()
-	addAsset := func(assetType, urlStr string) {
+	addAssetSide := func(assetType string, side models.DesignSide, urlStr string) {
 		_ = s.repo.DB.Create(&models.ItemAsset{
-			OrderItemID: item.ID, AssetType: assetType, URL: urlStr, Version: 1,
+			OrderItemID: item.ID, AssetType: assetType, Side: side, URL: urlStr, Version: 1,
 			UploadedByID: actor.IDPtr(), UploadedAt: now,
 		}).Error
 	}
+	addAsset := func(assetType, urlStr string) { addAssetSide(assetType, models.DesignSideSingle, urlStr) }
 
 	// A design asset only counts as "touched" when its URL actually changes, so
 	// editing production-only fields (image code / QC description / sequence /
@@ -213,7 +216,16 @@ func (s *OrderService) UpdateItemDesign(actor Actor, itemID uint, in UpdateDesig
 		if v := strings.TrimSpace(*in.DesignURL); v != item.DesignURL {
 			item.DesignURL = v
 			if v != "" {
-				addAsset("DESIGN", v)
+				addAssetSide("DESIGN", models.DesignSideFront, v)
+			}
+			designTouched = true
+		}
+	}
+	if in.BackDesignURL != nil {
+		if v := strings.TrimSpace(*in.BackDesignURL); v != item.BackDesignURL {
+			item.BackDesignURL = v
+			if v != "" {
+				addAssetSide("DESIGN", models.DesignSideBack, v)
 			}
 			designTouched = true
 		}
@@ -251,9 +263,13 @@ func (s *OrderService) UpdateItemDesign(actor Actor, itemID uint, in UpdateDesig
 	}
 
 	if in.SetReady != nil && *in.SetReady {
-		if item.PrintFileURL == "" {
-			return nil, apperr.Unprocessable("Cannot set design ready: print file is missing")
-		}
+		// No print-file check: print/cut files are produced per production batch —
+		// many designs are ganged onto one sheet and the resulting file is attached
+		// to the whole batch (BatchService.SetBatchLink fans it back down onto every
+		// item), so it cannot exist at item level yet. Requiring it here would also
+		// deadlock the flow: an item could never reach READY, never be batched, and
+		// so never reach the screen where the shared link is entered. Readiness gates
+		// on the mockup (QC reference) only.
 		if item.MockupURL == "" {
 			return nil, apperr.Unprocessable("Cannot set design ready: mockup URL is missing (QC reference required)")
 		}
@@ -268,14 +284,98 @@ func (s *OrderService) UpdateItemDesign(actor Actor, itemID uint, in UpdateDesig
 	return s.GetItem(item.ID)
 }
 
+// DesignQueueMaterials returns the materials present in the design queue so the NVL
+// filter only offers ones that would actually return rows. MaterialID is cleared: a
+// facet must not narrow by the very field it is offering choices for.
+func (s *OrderService) DesignQueueMaterials(f repositories.ItemFilter) ([]repositories.MaterialBucket, error) {
+	f.NeedsDesign = true
+	f.ReviewApproved = true
+	f.MaterialID = nil
+	return s.repo.OrderItem.DesignQueueMaterials(f)
+}
+
+// BulkSetReadyResult reports the outcome of BulkSetDesignReady: which items became
+// ready and which were skipped, each with a short reason for the toast.
+type BulkSetReadyResult struct {
+	ReadyIDs []uint         `json:"ready_ids"`
+	Skipped  []BulkSkipItem `json:"skipped"`
+}
+
+// BulkSkipItem is one item BulkSetDesignReady left untouched, and why.
+type BulkSkipItem struct {
+	ItemID   uint   `json:"item_id"`
+	ItemCode string `json:"item_code"`
+	Reason   string `json:"reason"`
+}
+
+// BulkSetDesignReady marks many design-queue items ready in one action, so a
+// designer can clear a whole material's worth of orders without opening each one.
+// An item becomes ready only when its order is approved, it is not cancelled and it
+// carries a mockup (the QC reference) — print/cut files are added later on the batch,
+// never here. Anything ineligible is returned as skipped with a reason instead of
+// failing the whole call, so one bad row never blocks the rest. Items already ready
+// are silently ignored (nothing to do), not counted as skipped.
+func (s *OrderService) BulkSetDesignReady(actor Actor, itemIDs []uint) (*BulkSetReadyResult, error) {
+	res := &BulkSetReadyResult{ReadyIDs: []uint{}, Skipped: []BulkSkipItem{}}
+	if len(itemIDs) == 0 {
+		return res, nil
+	}
+	itemsByID, err := s.repo.OrderItem.FindForBatching(itemIDs)
+	if err != nil {
+		return nil, apperr.Internal("could not load items for bulk set-ready").Wrap(err)
+	}
+
+	skip := func(id uint, code, reason string) {
+		res.Skipped = append(res.Skipped, BulkSkipItem{ItemID: id, ItemCode: code, Reason: reason})
+	}
+
+	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
+		txRepo := repositories.New(tx)
+		for _, id := range itemIDs {
+			item, ok := itemsByID[id]
+			if !ok {
+				skip(id, "", "không tồn tại")
+				continue
+			}
+			switch {
+			case itemCancelled(item.CancellationStatus):
+				skip(id, item.InternalCode, "đã huỷ")
+			case item.Order == nil || item.Order.ReviewStatus != models.ReviewApproved:
+				skip(id, item.InternalCode, "chưa duyệt")
+			case item.DesignStatus == models.DesignReady:
+				// already ready — nothing to do, and not an error
+			case strings.TrimSpace(item.MockupURL) == "":
+				skip(id, item.InternalCode, "thiếu mockup")
+			default:
+				item.DesignStatus = models.DesignReady
+				if err := txRepo.OrderItem.Update(item); err != nil {
+					return apperr.Internal("could not set item design-ready").Wrap(err)
+				}
+				res.ReadyIDs = append(res.ReadyIDs, id)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if len(res.ReadyIDs) > 0 {
+		s.audit.Log(actor, "ITEM_DESIGN_READY_BULK", "order_item", nil,
+			fmt.Sprintf("Bulk set %d item(s) design-ready", len(res.ReadyIDs)),
+			models.JSONMap{"ready_ids": res.ReadyIDs})
+	}
+	return res, nil
+}
+
 // ---------- Create-batch helpers ----------
 
 func (s *OrderService) MaterialBuckets() ([]repositories.MaterialBucket, error) {
 	return s.repo.OrderItem.MaterialBuckets()
 }
 
-func (s *OrderService) DesignReadyItemsForMaterial(materialID uint, page repositories.Page) ([]models.OrderItem, int64, error) {
-	return s.repo.OrderItem.DesignReadyItemsForMaterial(materialID, page.Normalize())
+func (s *OrderService) DesignReadyItemsForMaterial(materialID uint, page repositories.Page, sortBy, sortDir string) ([]models.OrderItem, int64, error) {
+	return s.repo.OrderItem.DesignReadyItemsForMaterial(materialID, page.Normalize(), sortBy, sortDir)
 }
 
 // ---------- Direct create (convenience / TODO) ----------
@@ -323,6 +423,12 @@ func (s *OrderService) CreateOrderDirect(actor Actor, in DirectOrderInput) (*mod
 	var order *models.Order
 	err := s.repo.DB.Transaction(func(tx *gorm.DB) error {
 		txRepo := repositories.New(tx)
+		now := time.Now()
+		orderDate := AppDateString(now)
+		seq, seqErr := txRepo.Order.NextDailySeq(orderDate, now)
+		if seqErr != nil {
+			return seqErr
+		}
 		order = &models.Order{
 			StoreOrderID: in.StoreOrderID, StoreOrderRef: in.StoreOrderID, SellerID: in.SellerID,
 			StoreName: in.StoreName, Account: in.Account, ShippingMethod: in.ShippingMethod, ShippingName: in.ShippingName,
@@ -330,6 +436,7 @@ func (s *OrderService) CreateOrderDirect(actor Actor, in DirectOrderInput) (*mod
 			ShippingCity: in.ShippingCity, ShippingZip: in.ShippingZip, ShippingProvince: in.ShippingProvince,
 			ShippingCountry: in.ShippingCountry, ShippingPhone: in.ShippingPhone, ShippingEmail: in.ShippingEmail,
 			IOSS: in.IOSS, Note: in.Note, SellerStatus: models.SellerStatusProduction,
+			OrderDate: orderDate, DailySeq: seq, TrackingStatus: models.TrackingNone,
 			// New orders enter operational review before production.
 			ReviewStatus: models.ReviewPending, CancellationStatus: models.CancellationNone,
 			CreatedByID: actor.IDPtr(),

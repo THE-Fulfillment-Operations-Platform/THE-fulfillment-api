@@ -3,6 +3,7 @@ package handlers
 import (
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -62,6 +63,95 @@ func (h *Handlers) CreateOrderDirect(c *gin.Context) {
 	response.Created(c, o)
 }
 
+// UpdateOrder edits an order (shipping/note/items) as an internal manager.
+// PUT /api/orders/:id
+func (h *Handlers) UpdateOrder(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	var in services.UpdateOrderInput
+	if !bindJSON(c, &in) {
+		return
+	}
+	o, err := h.svc.Order.UpdateOrder(actor(c), id, in)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, o)
+}
+
+// CancelOrder is an internal (OPS/ADMIN/OWNER) manual cancellation with a reason.
+// POST /api/orders/:id/cancel
+func (h *Handlers) CancelOrder(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	o, err := h.svc.Order.CancelOrder(actor(c), id, bindNote(c).Reason)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, o)
+}
+
+// DeleteOrder soft-deletes an order (ADMIN/OWNER only). DELETE /api/orders/:id
+func (h *Handlers) DeleteOrder(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	if err := h.svc.Order.DeleteOrder(actor(c), id); err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, gin.H{"deleted": true, "id": id})
+}
+
+// UpdateOrderTracking sets tracking number/status/carrier/url on an order.
+// PATCH /api/orders/:id/tracking
+func (h *Handlers) UpdateOrderTracking(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	var in services.UpdateTrackingInput
+	if !bindJSON(c, &in) {
+		return
+	}
+	o, err := h.svc.Order.UpdateTracking(actor(c), id, in)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, o)
+}
+
+// SellerUpdateOrder lets a seller edit their own order while still in review.
+// PUT /api/seller/orders/:id
+func (h *Handlers) SellerUpdateOrder(c *gin.Context) {
+	sellerID, ok := sellerIDFrom(c)
+	if !ok {
+		return
+	}
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	var in services.UpdateOrderInput
+	if !bindJSON(c, &in) {
+		return
+	}
+	o, err := h.svc.Order.SellerUpdateOrder(actor(c), sellerID, id, in)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, o)
+}
+
 // ---------- Items ----------
 
 func itemFilterFrom(c *gin.Context) repositories.ItemFilter {
@@ -69,12 +159,19 @@ func itemFilterFrom(c *gin.Context) repositories.ItemFilter {
 		Page:           pageFrom(c),
 		SellerID:       uintQueryPtr(c, "seller_id"),
 		StoreID:        uintQueryPtr(c, "store_id"),
+		StoreOrderID:   strings.TrimSpace(c.Query("store_order_id")),
 		SKUCode:        c.Query("sku"),
+		InternalCode:   strings.TrimSpace(c.Query("internal_code")),
 		InternalStatus: c.Query("status"),
 		DesignStatus:   c.Query("design_status"),
+		ReviewStatus:   c.Query("review_status"),
 		BatchID:        uintQueryPtr(c, "batch_id"),
+		BatchCode:      strings.TrimSpace(c.Query("batch")),
+		MaterialID:     uintQueryPtr(c, "material_id"),
 		DateFrom:       timeQueryPtr(c, "date_from"),
 		DateTo:         timeQueryPtr(c, "date_to"),
+		SortBy:         c.Query("sort"),
+		SortDir:        c.Query("order"),
 	}
 }
 
@@ -116,15 +213,19 @@ func (h *Handlers) DesignQueue(c *gin.Context) {
 	response.List(c, rows, metaFor(f.Page, total))
 }
 
-// DownloadDesignAssetsZip streams the design + mockup files of the design queue
-// as a ZIP, one folder per internal code. An optional ?item_ids=1,2,3 restricts
-// the export to the ticked rows; omitting it bundles the whole queue.
+// DownloadDesignAssetsZip streams ONLY the original design files (front/back, no
+// mockup/print/cut) of the design queue as a ZIP. Everything lands in one folder
+// named per DesignAssetsFolder — "Batch_<code>" when ?batch= narrows the queue,
+// else "Design_<date>". An optional ?item_ids=1,2,3 restricts the export to the
+// ticked rows; omitting it bundles the whole (optionally batch-filtered) queue.
 // GET /api/design-queue/assets.zip
 func (h *Handlers) DownloadDesignAssetsZip(c *gin.Context) {
 	ids := parseUintCSV(c.Query("item_ids"))
-	c.Header("Content-Disposition", `attachment; filename="design-assets.zip"`)
+	batch := strings.TrimSpace(c.Query("batch"))
+	folder := services.DesignAssetsFolder(batch, time.Now())
+	c.Header("Content-Disposition", `attachment; filename="`+folder+`.zip"`)
 	c.Header("Content-Type", "application/zip")
-	if err := h.svc.Order.StreamDesignAssetsZip(c.Request.Context(), c.Writer, ids); err != nil {
+	if err := h.svc.Order.StreamDesignAssetsZip(c.Request.Context(), c.Writer, ids, batch, folder); err != nil {
 		// Only surface a JSON error if nothing has been streamed yet; once the ZIP
 		// body has started we can't switch to an error envelope.
 		if !c.Writer.Written() {
@@ -173,6 +274,35 @@ func (h *Handlers) UpdateItemDesign(c *gin.Context) {
 	response.OK(c, it)
 }
 
+// BulkSetDesignReady marks many design-queue items ready at once, so a designer can
+// clear a whole material's orders without opening each. POST /api/design-queue/set-ready
+func (h *Handlers) BulkSetDesignReady(c *gin.Context) {
+	var in struct {
+		ItemIDs []uint `json:"item_ids" binding:"required,min=1"`
+	}
+	if !bindJSON(c, &in) {
+		return
+	}
+	res, err := h.svc.Order.BulkSetDesignReady(actor(c), in.ItemIDs)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, res)
+}
+
+// DesignQueueMaterials lists the materials that have items in the design queue, with
+// counts, so the NVL filter only offers materials that actually have work.
+// GET /api/design-queue/materials
+func (h *Handlers) DesignQueueMaterials(c *gin.Context) {
+	rows, err := h.svc.Order.DesignQueueMaterials(itemFilterFrom(c))
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, rows)
+}
+
 // MaterialBuckets returns design-ready unbatched item counts per material.
 // GET /api/design-queue/material-buckets
 func (h *Handlers) MaterialBuckets(c *gin.Context) {
@@ -192,7 +322,7 @@ func (h *Handlers) DesignReadyItemsForMaterial(c *gin.Context) {
 		return
 	}
 	p := pageFrom(c)
-	rows, total, err := h.svc.Order.DesignReadyItemsForMaterial(materialID, p)
+	rows, total, err := h.svc.Order.DesignReadyItemsForMaterial(materialID, p, c.Query("sort"), c.Query("order"))
 	if err != nil {
 		response.Fail(c, err)
 		return

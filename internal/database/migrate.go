@@ -3,6 +3,7 @@ package database
 import (
 	"fmt"
 	"log"
+	"os"
 
 	"gorm.io/gorm"
 
@@ -31,9 +32,11 @@ func AutoMigrate(db *gorm.DB) error {
 		&models.Order{},
 		&models.OrderItem{},
 		&models.ItemAsset{},
+		&models.DailyCounter{},
 		// production
 		&models.Batch{},
 		&models.BatchItem{},
+		&models.BatchLink{},
 		&models.StatusHistory{},
 		&models.QCRecord{},
 		// fulfillment
@@ -53,6 +56,66 @@ func AutoMigrate(db *gorm.DB) error {
 	}
 	if err := ensurePerformanceIndexes(db); err != nil {
 		return err
+	}
+	if err := backfillOrderDailySeq(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+// backfillOrderDailySeq assigns a stable per-day sequence ("STT trong ngày") to
+// every legacy order that predates the daily_seq feature, then seeds the
+// daily_counters allocator so newly created orders continue after the max. It is
+// idempotent: it only touches orders whose order_date is still unset and is a
+// no-op once every order has been numbered. Postgres-only (the window function +
+// AT TIME ZONE conversion); the sqlite test harness starts empty so never needs it.
+func backfillOrderDailySeq(db *gorm.DB) error {
+	if db.Dialector.Name() != "postgres" {
+		return nil
+	}
+	var pending int64
+	if err := db.Model(&models.Order{}).
+		Where("order_date IS NULL OR order_date = ''").Count(&pending).Error; err != nil {
+		return fmt.Errorf("database: count orders needing daily_seq: %w", err)
+	}
+	if pending == 0 {
+		return nil
+	}
+	tz := os.Getenv("DB_TIMEZONE")
+	if tz == "" {
+		tz = "Asia/Ho_Chi_Minh"
+	}
+	// Number each order within its business-timezone calendar day, ordered by
+	// creation time then id (so the number is deterministic and ties break stably).
+	backfill := `
+		WITH numbered AS (
+		  SELECT id,
+		         to_char(created_at AT TIME ZONE ?, 'YYYY-MM-DD') AS d,
+		         ROW_NUMBER() OVER (
+		           PARTITION BY (created_at AT TIME ZONE ?)::date
+		           ORDER BY created_at, id
+		         ) AS rn
+		    FROM orders
+		   WHERE deleted_at IS NULL
+		)
+		UPDATE orders o
+		   SET order_date = n.d, daily_seq = n.rn
+		  FROM numbered n
+		 WHERE o.id = n.id AND (o.order_date IS NULL OR o.order_date = '')`
+	if err := db.Exec(backfill, tz, tz).Error; err != nil {
+		return fmt.Errorf("database: backfill order daily_seq: %w", err)
+	}
+	// Seed the counter so the next order created each day continues after the max
+	// already assigned. GREATEST keeps any higher value a live allocation may hold.
+	seed := `
+		INSERT INTO daily_counters (scope_date, seq, updated_at)
+		SELECT order_date, MAX(daily_seq), now()
+		  FROM orders
+		 WHERE order_date IS NOT NULL AND order_date <> ''
+		 GROUP BY order_date
+		ON CONFLICT (scope_date) DO UPDATE SET seq = GREATEST(daily_counters.seq, EXCLUDED.seq)`
+	if err := db.Exec(seed).Error; err != nil {
+		return fmt.Errorf("database: seed daily_counters: %w", err)
 	}
 	return nil
 }
@@ -80,6 +143,10 @@ func ensurePerformanceIndexes(db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_orders_review_page ON orders (review_status, id DESC) WHERE deleted_at IS NULL`,
 		// Ops order list filtered by seller_status, newest first.
 		`CREATE INDEX IF NOT EXISTS idx_orders_seller_status_page ON orders (seller_status, id DESC) WHERE deleted_at IS NULL`,
+		// "STT trong ngày" lookups + stable ordering by the per-day sequence.
+		`CREATE INDEX IF NOT EXISTS idx_orders_daily_seq ON orders (order_date, daily_seq) WHERE deleted_at IS NULL`,
+		// Tracking-number lookups (order list badge + future provider sync).
+		`CREATE INDEX IF NOT EXISTS idx_orders_tracking_number ON orders (tracking_number) WHERE deleted_at IS NULL AND tracking_number <> ''`,
 		// Item list filtered by internal_status (design/QC/packing views).
 		`CREATE INDEX IF NOT EXISTS idx_order_items_status_page ON order_items (internal_status, id DESC) WHERE deleted_at IS NULL`,
 		// Item cancellation-request queue: status filter + ORDER BY requested_at.

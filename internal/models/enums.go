@@ -185,3 +185,53 @@ const (
 	PriorityHigh   Priority = "HIGH"
 	PriorityUrgent Priority = "URGENT"
 )
+
+// TrackingStatus is the shipment tracking state on an order. NONE means no
+// tracking has been recorded yet. The other values mirror the common carrier /
+// 17TRACK lifecycle so the UI can render a stable status badge whether the value
+// was entered manually or synced from a provider later.
+type TrackingStatus string
+
+const (
+	TrackingNone       TrackingStatus = "NONE"
+	TrackingPending    TrackingStatus = "PENDING"
+	TrackingPreTransit TrackingStatus = "PRE_TRANSIT"
+	TrackingInTransit  TrackingStatus = "IN_TRANSIT"
+	TrackingDelivered  TrackingStatus = "DELIVERED"
+	TrackingUndelivered TrackingStatus = "UNDELIVERED"
+	TrackingException  TrackingStatus = "EXCEPTION"
+	TrackingExpired    TrackingStatus = "EXPIRED"
+	TrackingCancelled  TrackingStatus = "CANCELLED"
+)
+
+var trackingStatusValid = map[TrackingStatus]bool{
+	TrackingNone: true, TrackingPending: true, TrackingPreTransit: true,
+	TrackingInTransit: true, TrackingDelivered: true, TrackingUndelivered: true,
+	TrackingException: true, TrackingExpired: true, TrackingCancelled: true,
+}
+
+// Valid reports whether s is a known tracking status.
+func (s TrackingStatus) Valid() bool { return trackingStatusValid[s] }
+
+// DesignSide identifies which physical side of a product a design belongs to.
+// SINGLE covers one-sided products (the default / legacy case); FRONT and BACK
+// support two-sided products. Modelled as an enum (not two hard-coded columns) so
+// more sides can be added later without a schema change beyond new enum values.
+type DesignSide string
+
+const (
+	DesignSideSingle DesignSide = "SINGLE"
+	DesignSideFront  DesignSide = "FRONT"
+	DesignSideBack   DesignSide = "BACK"
+)
+
+// BatchLinkKind is the kind of production link attached to a whole batch.
+type BatchLinkKind string
+
+const (
+	BatchLinkPrint BatchLinkKind = "PRINT"
+	BatchLinkCut   BatchLinkKind = "CUT"
+)
+
+// Valid reports whether k is a known batch link kind.
+func (k BatchLinkKind) Valid() bool { return k == BatchLinkPrint || k == BatchLinkCut }

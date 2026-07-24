@@ -2,6 +2,7 @@ package services
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -186,20 +187,8 @@ func (s *ReviewService) GetReviewOrder(id uint) (*ReviewOrderDetail, error) {
 }
 
 func (s *ReviewService) reviewIssues(order *models.Order) []ReviewIssue {
-	issues := make([]ReviewIssue, 0)
-
-	// Order-level: shipping data.
-	if strings.TrimSpace(order.ShippingName) == "" ||
-		strings.TrimSpace(order.ShippingAddress1) == "" ||
-		strings.TrimSpace(order.ShippingCountry) == "" {
-		issues = append(issues, ReviewIssue{
-			Field: "shipping", Severity: "BLOCKER", Code: "ADDR_INVALID",
-			Message: "Thiếu thông tin giao hàng (tên, địa chỉ 1 hoặc quốc gia).",
-		})
-	}
-
 	// One query for every item's mapped-material count (instead of a COUNT per
-	// item) — the loop below is then database-free.
+	// item); the pure validation below is then database-free.
 	skuIDs := make([]uint, 0, len(order.Items))
 	for _, it := range order.Items {
 		if it.SKUID != nil && !itemCancelled(it.CancellationStatus) {
@@ -211,6 +200,25 @@ func (s *ReviewService) reviewIssues(order *models.Order) []ReviewIssue {
 		// Degrade the same way the old per-item probe did on error: skip the
 		// material-mapping check rather than fail the whole review screen.
 		materialCounts = nil
+	}
+	return reviewIssuesWith(order, materialCounts)
+}
+
+// reviewIssuesWith is the pure (no-DB) review validation given a precomputed
+// SKU->material-count map. Splitting the DB lookup out lets the bulk-approve path
+// compute material counts ONCE for every order's items and then validate each
+// order in memory. A nil materialCounts skips the material-mapping check.
+func reviewIssuesWith(order *models.Order, materialCounts map[uint]int64) []ReviewIssue {
+	issues := make([]ReviewIssue, 0)
+
+	// Order-level: shipping data.
+	if strings.TrimSpace(order.ShippingName) == "" ||
+		strings.TrimSpace(order.ShippingAddress1) == "" ||
+		strings.TrimSpace(order.ShippingCountry) == "" {
+		issues = append(issues, ReviewIssue{
+			Field: "shipping", Severity: "BLOCKER", Code: "ADDR_INVALID",
+			Message: "Thiếu thông tin giao hàng (tên, địa chỉ 1 hoặc quốc gia).",
+		})
 	}
 
 	// Item-level: SKU/material mapping, mockup, design, quantity.
@@ -314,6 +322,162 @@ func (s *ReviewService) RequestCorrection(actor Actor, id uint, note string) (*m
 		return nil, apperr.Conflict("Only orders pending review or needing correction can be sent back")
 	}
 	return s.transitionReview(actor, order, models.ReviewNeedsFix, note, "REVIEW_REQUEST_CORRECTION", "Requested correction on order")
+}
+
+// ---------- Bulk approve (OPS / ADMIN / DESIGNER) ----------
+
+// BulkApproveInput is the body for approving several orders at once.
+type BulkApproveInput struct {
+	OrderIDs []uint `json:"order_ids" binding:"required,min=1"`
+	Note     string `json:"note"`
+}
+
+// BulkSkip explains why one order in a bulk operation was not approved.
+type BulkSkip struct {
+	OrderID uint   `json:"order_id"`
+	Code    string `json:"code"`
+	Reason  string `json:"reason"`
+}
+
+// BulkApproveResult reports the outcome of a bulk approve: which orders were
+// approved and which were skipped (with a reason), so the UI can show a clear,
+// partial-success summary.
+type BulkApproveResult struct {
+	Approved      []uint     `json:"approved"`
+	ApprovedCount int        `json:"approved_count"`
+	Skipped       []BulkSkip `json:"skipped"`
+	SkippedCount  int        `json:"skipped_count"`
+}
+
+// BulkApprove approves every order in ids that is still reviewable and has no
+// blocking validation issue, skipping the rest with a reason. Each order's
+// approval is independent (partial success is intentional): a not-found, already
+// decided, or blocked order never prevents the others from being approved. The
+// same server-side BLOCKER check as the single-order Approve is enforced per
+// order, so a bulk call can never bypass validation or approve an order that is
+// not in the caller's review scope.
+func (s *ReviewService) BulkApprove(actor Actor, in BulkApproveInput) (*BulkApproveResult, error) {
+	res := &BulkApproveResult{Approved: []uint{}, Skipped: []BulkSkip{}}
+	note := strings.TrimSpace(in.Note)
+
+	// De-duplicate the requested ids, preserving order and dropping zeros.
+	ids := make([]uint, 0, len(in.OrderIDs))
+	seen := map[uint]bool{}
+	for _, id := range in.OrderIDs {
+		if id == 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return res, nil
+	}
+
+	// 1. Load every requested order + its items in bulk (2 queries) instead of the
+	//    old per-order FindByID (~6 queries each). On a remote database this is the
+	//    single biggest win: query count no longer scales with the number of orders.
+	orders, err := s.repo.Order.FindByIDsForReview(ids)
+	if err != nil {
+		return nil, apperr.Internal("could not load orders for bulk approve").Wrap(err)
+	}
+	byID := make(map[uint]*models.Order, len(orders))
+	for i := range orders {
+		byID[orders[i].ID] = &orders[i]
+	}
+
+	// 2. Material counts for every item across ALL orders in ONE query, so the
+	//    blocker check below is evaluated purely in memory (no per-order DB call).
+	skuSeen := map[uint]bool{}
+	skuIDs := make([]uint, 0)
+	for i := range orders {
+		for _, it := range orders[i].Items {
+			if it.SKUID != nil && !itemCancelled(it.CancellationStatus) && !skuSeen[*it.SKUID] {
+				skuSeen[*it.SKUID] = true
+				skuIDs = append(skuIDs, *it.SKUID)
+			}
+		}
+	}
+	materialCounts, err := s.repo.SKU.MaterialCounts(skuIDs)
+	if err != nil {
+		materialCounts = nil // degrade: skip the material-mapping blocker check
+	}
+
+	// 3. Decide each order in memory: approvable, or skipped with a reason. Same
+	//    guards and BLOCKER validation as the single-order Approve — a bulk call
+	//    can never bypass validation.
+	type approval struct {
+		id   uint
+		from models.ReviewStatus
+	}
+	approvals := make([]approval, 0, len(ids))
+	for _, id := range ids {
+		order, ok := byID[id]
+		if !ok {
+			res.Skipped = append(res.Skipped, BulkSkip{OrderID: id, Code: "NOT_FOUND", Reason: "Đơn không tồn tại hoặc đã bị xoá"})
+			continue
+		}
+		if !isReviewable(order.ReviewStatus) {
+			res.Skipped = append(res.Skipped, BulkSkip{
+				OrderID: id, Code: "NOT_REVIEWABLE",
+				Reason: "Đơn không ở trạng thái chờ duyệt/cần sửa (hiện tại: " + string(order.ReviewStatus) + ")",
+			})
+			continue
+		}
+		if order.CancellationStatus == models.CancellationRequested {
+			res.Skipped = append(res.Skipped, BulkSkip{OrderID: id, Code: "CANCEL_PENDING", Reason: "Đơn đang có yêu cầu huỷ chờ xử lý"})
+			continue
+		}
+		blocked := ""
+		for _, iss := range reviewIssuesWith(order, materialCounts) {
+			if iss.Severity == "BLOCKER" {
+				blocked = iss.Message
+				break
+			}
+		}
+		if blocked != "" {
+			res.Skipped = append(res.Skipped, BulkSkip{OrderID: id, Code: "HAS_BLOCKER", Reason: "Còn lỗi chặn: " + blocked})
+			continue
+		}
+		approvals = append(approvals, approval{id: id, from: order.ReviewStatus})
+	}
+
+	// 4. Persist every approval in ONE transaction: a single batch UPDATE plus a
+	//    single bulk status-history insert (2 writes total, regardless of count).
+	if len(approvals) > 0 {
+		now := time.Now()
+		approvedIDs := make([]uint, len(approvals))
+		history := make([]models.StatusHistory, len(approvals))
+		for i, a := range approvals {
+			approvedIDs[i] = a.id
+			history[i] = models.StatusHistory{
+				EntityType:  models.EntityOrder,
+				EntityID:    a.id,
+				FromStatus:  string(a.from),
+				ToStatus:    string(models.ReviewApproved),
+				ChangedByID: actor.IDPtr(),
+				Note:        note,
+			}
+		}
+		txErr := s.repo.DB.Transaction(func(tx *gorm.DB) error {
+			txRepo := repositories.New(tx)
+			if err := txRepo.Order.BulkSetReviewApproved(approvedIDs, actor.IDPtr(), note, now); err != nil {
+				return err
+			}
+			return txRepo.Status.CreateBulk(history)
+		})
+		if txErr != nil {
+			return nil, apperr.Internal("could not approve orders").Wrap(txErr)
+		}
+		res.Approved = approvedIDs
+	}
+
+	res.ApprovedCount = len(res.Approved)
+	res.SkippedCount = len(res.Skipped)
+	s.audit.Log(actor, "REVIEW_BULK_APPROVE", "order", nil,
+		fmt.Sprintf("Bulk approve: %d duyệt, %d bỏ qua", res.ApprovedCount, res.SkippedCount),
+		models.JSONMap{"approved": res.Approved, "skipped_count": res.SkippedCount})
+	return res, nil
 }
 
 // ---------- Cancellation (SELLER) ----------

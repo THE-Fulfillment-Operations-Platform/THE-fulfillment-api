@@ -18,7 +18,7 @@ func newQCDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(
 		&models.User{}, &models.Seller{}, &models.Material{}, &models.SKU{}, &models.SKUMaterial{},
-		&models.Order{}, &models.OrderItem{}, &models.ItemAsset{}, &models.Batch{}, &models.BatchItem{},
+		&models.Order{}, &models.OrderItem{}, &models.ItemAsset{}, &models.Batch{}, &models.BatchItem{}, &models.BatchLink{},
 		&models.QCRecord{}, &models.StatusHistory{}, &models.AuditLog{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)

@@ -18,7 +18,7 @@ func newRollupDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(
 		&models.User{}, &models.Material{}, &models.Order{}, &models.OrderItem{},
-		&models.Batch{}, &models.BatchItem{}, &models.StatusHistory{},
+		&models.Batch{}, &models.BatchItem{}, &models.BatchLink{}, &models.StatusHistory{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
