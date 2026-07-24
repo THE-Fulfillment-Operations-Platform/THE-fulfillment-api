@@ -56,9 +56,22 @@ jobs:
       - name: Kiểm tra /health sau deploy
         run: |
           ssh -i ~/.ssh/deploy_key root@${{ secrets.VPS_HOST }} '
-            for i in $(seq 1 10); do
-              [ "$(curl -s -o /dev/null -w "%{http_code}" http://localhost/health)" = "200" ] && echo "health OK" && exit 0
-              sleep 2
-            done
-            echo "health FAIL"; exit 1
+          for i in $(seq 1 30); do
+            STATUS=$(curl -s \
+              -o /dev/null \
+              -w "%{http_code}" \
+              https://fulfillment.bacgiangdecor.com/health)
+
+            echo "Health check lần $i: HTTP $STATUS"
+
+            if [ "$STATUS" = "200" ]; then
+              echo "health OK"
+              exit 0
+            fi
+
+            sleep 3
+          done
+
+          echo "health FAIL"
+            exit 1
           '
