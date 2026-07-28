@@ -406,11 +406,9 @@ func (s *ReviewService) BulkApprove(actor Actor, in BulkApproveInput) (*BulkAppr
 	// 3. Decide each order in memory: approvable, or skipped with a reason. Same
 	//    guards and BLOCKER validation as the single-order Approve — a bulk call
 	//    can never bypass validation.
-	type approval struct {
-		id   uint
-		from models.ReviewStatus
-	}
-	approvals := make([]approval, 0, len(ids))
+	// Just the ids: the history rows read each order's pre-approval status straight
+	// out of the orders table, so there is nothing else to carry forward.
+	approvedIDs := make([]uint, 0, len(ids))
 	for _, id := range ids {
 		order, ok := byID[id]
 		if !ok {
@@ -439,45 +437,68 @@ func (s *ReviewService) BulkApprove(actor Actor, in BulkApproveInput) (*BulkAppr
 			res.Skipped = append(res.Skipped, BulkSkip{OrderID: id, Code: "HAS_BLOCKER", Reason: "Còn lỗi chặn: " + blocked})
 			continue
 		}
-		approvals = append(approvals, approval{id: id, from: order.ReviewStatus})
+		approvedIDs = append(approvedIDs, id)
 	}
 
-	// 4. Persist every approval in ONE transaction: a single batch UPDATE plus a
-	//    single bulk status-history insert (2 writes total, regardless of count).
-	if len(approvals) > 0 {
+	// 4. Persist every approval in ONE transaction of three constant-size
+	//    statements — history INSERT…SELECT, batch UPDATE, audit INSERT —
+	//    regardless of how many orders are being approved. Round trips, not rows,
+	//    are what this endpoint pays for: the database is remote, so a statement
+	//    that carries a row per order (the old bulk history insert did) cost more
+	//    than a second on its own once the selection grew past a couple hundred.
+	if len(approvedIDs) > 0 {
 		now := time.Now()
-		approvedIDs := make([]uint, len(approvals))
-		history := make([]models.StatusHistory, len(approvals))
-		for i, a := range approvals {
-			approvedIDs[i] = a.id
-			history[i] = models.StatusHistory{
-				EntityType:  models.EntityOrder,
-				EntityID:    a.id,
-				FromStatus:  string(a.from),
-				ToStatus:    string(models.ReviewApproved),
-				ChangedByID: actor.IDPtr(),
-				Note:        note,
-			}
-		}
 		txErr := s.repo.DB.Transaction(func(tx *gorm.DB) error {
 			txRepo := repositories.New(tx)
+			// History FIRST: it reads each order's pre-approval review_status out of
+			// the orders table, which the UPDATE below is about to overwrite.
+			if err := txRepo.Status.RecordEntityTransition(
+				models.EntityOrder, string(models.ReviewApproved), actor.IDPtr(), note, now,
+				txRepo.Order.ReviewApprovableSource(approvedIDs),
+			); err != nil {
+				return err
+			}
 			if err := txRepo.Order.BulkSetReviewApproved(approvedIDs, actor.IDPtr(), note, now); err != nil {
 				return err
 			}
-			return txRepo.Status.CreateBulk(history)
+			// The audit entry joins the same transaction instead of paying its own
+			// round trip afterwards — and can no longer record an approval that then
+			// failed to commit.
+			return writeBulkApproveAudit(txRepo, actor, approvedIDs, len(res.Skipped))
 		})
 		if txErr != nil {
 			return nil, apperr.Internal("could not approve orders").Wrap(txErr)
 		}
 		res.Approved = approvedIDs
+		res.ApprovedCount = len(res.Approved)
+		res.SkippedCount = len(res.Skipped)
+		return res, nil
 	}
 
 	res.ApprovedCount = len(res.Approved)
 	res.SkippedCount = len(res.Skipped)
+	// Nothing was approved, so there is no transaction to ride along in; still
+	// record the attempt.
 	s.audit.Log(actor, "REVIEW_BULK_APPROVE", "order", nil,
 		fmt.Sprintf("Bulk approve: %d duyệt, %d bỏ qua", res.ApprovedCount, res.SkippedCount),
 		models.JSONMap{"approved": res.Approved, "skipped_count": res.SkippedCount})
 	return res, nil
+}
+
+// writeBulkApproveAudit writes the bulk-approve audit entry on the transaction's
+// own connection, mirroring AuditService.Log's row without paying a separate
+// round trip for it.
+func writeBulkApproveAudit(txRepo *repositories.Repositories, actor Actor, approved []uint, skipped int) error {
+	meta, _ := models.ToJSONB(models.JSONMap{"approved": approved, "skipped_count": skipped})
+	return txRepo.Audit.Create(&models.AuditLog{
+		ActorID:    actor.IDPtr(),
+		ActorEmail: actor.Email,
+		Action:     "REVIEW_BULK_APPROVE",
+		EntityType: "order",
+		Summary:    fmt.Sprintf("Bulk approve: %d duyệt, %d bỏ qua", len(approved), skipped),
+		Metadata:   meta,
+		IP:         actor.IP,
+	})
 }
 
 // ---------- Cancellation (SELLER) ----------

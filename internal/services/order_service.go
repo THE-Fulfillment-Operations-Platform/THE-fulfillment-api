@@ -141,6 +141,12 @@ func (s *OrderService) GetItem(id uint) (*models.OrderItem, error) {
 	return it, nil
 }
 
+// ActionCounts returns the sidebar badge numbers (orders to review, cancellation
+// requests, notes needing attention) in one query — see repositories.ActionCounts.
+func (s *OrderService) ActionCounts() (repositories.ActionCounts, error) {
+	return s.repo.ActionCounts()
+}
+
 // ---------- Design queue ----------
 
 // DesignQueue lists items that still need design work (mockup/print/cut not ready).
@@ -149,6 +155,19 @@ func (s *OrderService) DesignQueue(f repositories.ItemFilter) ([]models.OrderIte
 	f.NeedsDesign = true
 	f.ReviewApproved = true // only approved orders enter the design flow
 	return s.repo.OrderItem.List(f)
+}
+
+// DesignDownloadableItems returns EVERY design-queue item that already has a design
+// file (front or back), matching the caller's filters (batch, NVL, and a q search
+// over internal_code/sku_code) — unpaginated, so it backs the "Tải ZIP" dialog's
+// pick-list over the whole queue instead of a single page. The caller passes only
+// the filter fields (Search, MaterialID, BatchCode); the queue scoping is forced
+// here so the list can never leak items outside the design flow.
+func (s *OrderService) DesignDownloadableItems(f repositories.ItemFilter) ([]models.OrderItem, error) {
+	f.NeedsDesign = true
+	f.ReviewApproved = true
+	f.HasDesignFile = true
+	return s.repo.OrderItem.ListAll(f)
 }
 
 // UpdateDesignInput updates an item's design assets and production-ready fields.
@@ -292,6 +311,16 @@ func (s *OrderService) DesignQueueMaterials(f repositories.ItemFilter) ([]reposi
 	f.ReviewApproved = true
 	f.MaterialID = nil
 	return s.repo.OrderItem.DesignQueueMaterials(f)
+}
+
+// DesignQueueSKUs returns the SKU codes present in the design queue so the SKU
+// filter only offers ones that would actually return rows. SKUCode is cleared: a
+// facet must not narrow by the very field it is offering choices for.
+func (s *OrderService) DesignQueueSKUs(f repositories.ItemFilter) ([]repositories.SKUBucket, error) {
+	f.NeedsDesign = true
+	f.ReviewApproved = true
+	f.SKUCode = ""
+	return s.repo.OrderItem.DesignQueueSKUs(f)
 }
 
 // BulkSetReadyResult reports the outcome of BulkSetDesignReady: which items became

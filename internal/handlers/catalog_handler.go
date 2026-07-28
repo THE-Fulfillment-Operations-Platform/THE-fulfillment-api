@@ -74,6 +74,27 @@ func (h *Handlers) DeleteMaterial(c *gin.Context) {
 	response.OK(c, gin.H{"deleted": true})
 }
 
+// BulkDeleteMaterials removes many materials in one request. Deleting a selection
+// id-at-a-time costs one HTTP round-trip and three statements per material, which
+// on a hosted database is minutes for a few hundred rows; this is one round-trip
+// and a handful of statements. Materials still used by a SKU or a batch come back
+// in `skipped` with a reason instead of being deleted.
+// POST /api/materials/bulk-delete  { "ids": [1,2,3] }
+func (h *Handlers) BulkDeleteMaterials(c *gin.Context) {
+	var in struct {
+		IDs []uint `json:"ids" binding:"required,min=1"`
+	}
+	if !bindJSON(c, &in) {
+		return
+	}
+	res, err := h.svc.Catalog.DeleteMaterials(actor(c), in.IDs)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, res)
+}
+
 // ---------- SKUs ----------
 
 func (h *Handlers) CreateSKU(c *gin.Context) {
@@ -139,4 +160,42 @@ func (h *Handlers) DeleteSKU(c *gin.Context) {
 		return
 	}
 	response.OK(c, gin.H{"deleted": true})
+}
+
+// BulkDeleteSKUs removes many SKUs in one request — see BulkDeleteMaterials for
+// why an id-at-a-time API is the slow path. SKUs an order line points at come
+// back in `skipped` with a reason instead of being deleted.
+// POST /api/skus/bulk-delete  { "ids": [1,2,3] }
+func (h *Handlers) BulkDeleteSKUs(c *gin.Context) {
+	var in struct {
+		IDs []uint `json:"ids" binding:"required,min=1"`
+	}
+	if !bindJSON(c, &in) {
+		return
+	}
+	res, err := h.svc.Catalog.DeleteSKUs(actor(c), in.IDs)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, res)
+}
+
+// BulkSetSKUsActive shows/hides many SKUs in one statement, instead of one full
+// SKU save per row.
+// POST /api/skus/bulk-active  { "ids": [1,2], "is_active": false }
+func (h *Handlers) BulkSetSKUsActive(c *gin.Context) {
+	var in struct {
+		IDs      []uint `json:"ids" binding:"required,min=1"`
+		IsActive *bool  `json:"is_active" binding:"required"`
+	}
+	if !bindJSON(c, &in) {
+		return
+	}
+	n, err := h.svc.Catalog.SetSKUsActive(actor(c), in.IDs, *in.IsActive)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, gin.H{"updated": n})
 }

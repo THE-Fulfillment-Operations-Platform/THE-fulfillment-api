@@ -1,6 +1,7 @@
 package services
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -62,9 +63,9 @@ func TestSplitMaterials(t *testing.T) {
 		{"Mica trong 3 ly + Basswood 5mm + Mica Hologram",
 			[]string{"Mica trong 3 ly", "Basswood 5mm", "Mica Hologram"}},
 		{"Gỗ 5 ly\nAcrylic", []string{"Gỗ 5 ly", "Acrylic"}}, // embedded newline
-		{"Mica + + Hologram", []string{"Mica", "Hologram"}},   // empty middle dropped
-		{"  Mica  +  mica  ", []string{"Mica"}},               // case-insensitive dedupe within cell
-		{"   ", nil},                                          // blank
+		{"Mica + + Hologram", []string{"Mica", "Hologram"}},  // empty middle dropped
+		{"  Mica  +  mica  ", []string{"Mica"}},              // case-insensitive dedupe within cell
+		{"   ", nil},                                         // blank
 		{"", nil},
 	}
 	for _, c := range cases {
@@ -96,11 +97,11 @@ func TestMasterImport_Combo(t *testing.T) {
 	actor := Actor{ID: 1}
 
 	rows := legacyRows(
-		[2]string{"BR A 1.6 Gai", "Mica trong 3 ly"},        // single, repeated
-		[2]string{"BR A 1.6 Gai", "Mica trong 3 ly"},        // dup → still single
-		[2]string{"BR A 2 Gai", "Mica trong 3 ly + Mica Hologram"}, // combo via +
+		[2]string{"BR A 1.6 Gai", "Mica trong 3 ly"},                 // single, repeated
+		[2]string{"BR A 1.6 Gai", "Mica trong 3 ly"},                 // dup → still single
+		[2]string{"BR A 2 Gai", "Mica trong 3 ly + Mica Hologram"},   // combo via +
 		[2]string{"BR SH 2", "Mica start Hologram\nGỗ 5 ly 3 layer"}, // combo via newline
-		[2]string{"NO MAT", ""},                             // missing material
+		[2]string{"NO MAT", ""},                                      // missing material
 	)
 
 	pv, err := svc.Preview(actor, "CSV", "legacy.csv", rows)
@@ -299,5 +300,97 @@ func TestMasterImport_InconsistentRowsFlaggedButMapped(t *testing.T) {
 	rec, _ := repo.SKU.FindByCode(normalizeSKUCode("BR A 1.6 kep"))
 	if len(rec.Materials) != 3 || !rec.IsCombo {
 		t.Fatalf("inconsistent SKU should still map all 3 as combo, got %d combo=%v", len(rec.Materials), rec.IsCombo)
+	}
+}
+
+// TestMasterImport_StaysOffTheRowByRowPath is the N+1 guard for the legacy
+// master-data import. The plan used to look every SKU up one at a time — and
+// FindByCode preloads materials, so that was three statements per SKU — while the
+// commit added a lookup + insert per material, per SKU and per mapping. A 200-row
+// file meant ~600 statements on preview and well over a thousand on commit, which
+// against a hosted database is the minute of waiting this test exists to prevent.
+func TestMasterImport_StaysOffTheRowByRowPath(t *testing.T) {
+	db := newMasterDB(t)
+	svc := masterSvc(db)
+	actor := Actor{ID: 1, Role: models.RoleOwner}
+
+	const skus = 200
+	rows := make([]LegacyRow, 0, skus)
+	for i := 0; i < skus; i++ {
+		rows = append(rows, LegacyRow{
+			RowNumber: i + 1,
+			SKU:       "SKU-" + strconv.Itoa(i),
+			// A handful of shared materials, like a real file.
+			Material:    "Mica " + strconv.Itoa(i%5) + " ly",
+			ProductName: "Sản phẩm " + strconv.Itoa(i%3),
+		})
+	}
+
+	stmts := 0
+	count := func(*gorm.DB) { stmts++ }
+	for _, reg := range []func(string, func(*gorm.DB)) error{
+		db.Callback().Query().After("gorm:query").Register,
+		db.Callback().Create().After("gorm:create").Register,
+		db.Callback().Update().After("gorm:update").Register,
+		db.Callback().Delete().After("gorm:delete").Register,
+		db.Callback().Row().After("gorm:row").Register,
+		db.Callback().Raw().After("gorm:raw").Register,
+	} {
+		if err := reg("test:count", count); err != nil {
+			t.Fatalf("register callback: %v", err)
+		}
+	}
+
+	pv, err := svc.Preview(actor, "XLSX", "legacy.xlsx", rows)
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if pv.Summary.NewSKUs != skus || pv.Summary.NewMaterials != 5 {
+		t.Fatalf("plan = %d SKUs / %d materials, want %d/5", pv.Summary.NewSKUs, pv.Summary.NewMaterials, skus)
+	}
+	// 3 catalog reads + the job insert + the audit insert.
+	if stmts > 6 {
+		t.Fatalf("preview of %d rows issued %d statements, want a fixed handful", len(rows), stmts)
+	}
+
+	stmts = 0
+	res, err := svc.Commit(actor, pv.ImportJobID)
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if res.Applied == nil || res.Applied.SKUsCreated != skus || res.Applied.MaterialsCreated != 5 {
+		t.Fatalf("applied = %+v, want %d SKUs / 5 materials", res.Applied, skus)
+	}
+	if res.Applied.MappingsCreated != skus {
+		t.Fatalf("mappings created = %d, want %d (one per SKU)", res.Applied.MappingsCreated, skus)
+	}
+	// Reads + batched inserts (200 per batch) + job/audit writes — an order of
+	// magnitude below one statement per row, let alone the seven it used to take.
+	if stmts > 15 {
+		t.Fatalf("commit of %d SKUs issued %d statements, want batched writes", skus, stmts)
+	}
+
+	// Re-importing the same file must be a no-op, not a second catalog.
+	pv2, err := svc.Preview(actor, "XLSX", "legacy.xlsx", rows)
+	if err != nil {
+		t.Fatalf("re-preview: %v", err)
+	}
+	if pv2.Summary.NewSKUs != 0 || pv2.Summary.NewMaterials != 0 || pv2.Summary.NewMappings != 0 {
+		t.Fatalf("re-preview should find nothing new, got %+v", pv2.Summary)
+	}
+	res2, err := svc.Commit(actor, pv2.ImportJobID)
+	if err != nil {
+		t.Fatalf("re-commit: %v", err)
+	}
+	if res2.Applied.SKUsCreated != 0 || res2.Applied.MaterialsCreated != 0 || res2.Applied.MappingsCreated != 0 {
+		t.Fatalf("re-commit must create nothing, got %+v", res2.Applied)
+	}
+	var skuCount, matCount, mapCount int64
+	db.Model(&models.SKU{}).Count(&skuCount)
+	db.Model(&models.Material{}).Count(&matCount)
+	db.Model(&models.SKUMaterial{}).Count(&mapCount)
+	if skuCount != skus || matCount != 5 || mapCount != skus {
+		t.Fatalf("catalog after re-import = %d SKUs / %d materials / %d mappings, want %d/5/%d",
+			skuCount, matCount, mapCount, skus, skus)
 	}
 }

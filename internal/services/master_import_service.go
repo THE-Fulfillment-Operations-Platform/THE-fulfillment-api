@@ -8,7 +8,6 @@ import (
 	"io"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"unicode"
 
@@ -66,8 +65,8 @@ type MaterialPlan struct {
 type SKUPlan struct {
 	Code          string   `json:"code"`
 	Name          string   `json:"name"`
-	ProductName   string   `json:"product_name"`             // representative human-readable name (first seen)
-	ProductNames  []string `json:"product_names,omitempty"`  // all distinct names for this SKU (one spec can label many products)
+	ProductName   string   `json:"product_name"`            // representative human-readable name (first seen)
+	ProductNames  []string `json:"product_names,omitempty"` // all distinct names for this SKU (one spec can label many products)
 	Exists        bool     `json:"exists"`
 	MaterialNames []string `json:"material_names"`
 	Status        string   `json:"status"`
@@ -230,8 +229,77 @@ type skuAgg struct {
 	firstSeen    int
 }
 
+// catalogSnapshot is the slice of the catalog one import file touches, read up
+// front in a fixed number of queries. Looking each name/code up as the plan is
+// built cost one query per SKU (three, with the material preload) — a 200-row
+// file meant ~600 round-trips, which on a hosted database is a minute of waiting.
+type catalogSnapshot struct {
+	matByName map[string]*models.Material // key: lower(trim(name))
+	skuByCode map[string]*models.SKU      // key: normalized code
+	mappings  map[[2]uint]bool            // (skuID, materialID) pairs already stored
+}
+
+func (c *catalogSnapshot) material(name string) *models.Material {
+	return c.matByName[strings.ToLower(strings.TrimSpace(name))]
+}
+func (c *catalogSnapshot) sku(code string) *models.SKU {
+	return c.skuByCode[models.NormalizeCode(code)]
+}
+
+func (s *MasterImportService) loadCatalog(matNames, skuCodes []string) (*catalogSnapshot, error) {
+	return loadCatalogSnapshot(s.repo, matNames, skuCodes)
+}
+
+// loadCatalogSnapshot reads every material name and SKU code the plan mentions,
+// plus the mappings of the SKUs that already exist. Takes the repo so commit can
+// run it on its transaction. Errors are returned, never swallowed: pretending the
+// catalog is empty would report everything as new — and create it all again.
+func loadCatalogSnapshot(repo *repositories.Repositories, matNames, skuCodes []string) (*catalogSnapshot, error) {
+	snap := &catalogSnapshot{
+		matByName: map[string]*models.Material{},
+		skuByCode: map[string]*models.SKU{},
+		mappings:  map[[2]uint]bool{},
+	}
+
+	mats, err := repo.Material.ListByNamesInsensitive(matNames)
+	if err != nil {
+		return nil, err
+	}
+	for i := range mats {
+		m := &mats[i]
+		key := strings.ToLower(strings.TrimSpace(m.Name))
+		// Names are not unique any more (the quota import can keep same-name
+		// variants apart); the oldest row wins, as FindByNameInsensitive did.
+		if _, seen := snap.matByName[key]; !seen {
+			snap.matByName[key] = m
+		}
+	}
+
+	skus, err := repo.SKU.ListByCodes(skuCodes)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]uint, 0, len(skus))
+	for i := range skus {
+		sku := &skus[i]
+		snap.skuByCode[models.NormalizeCode(sku.Code)] = sku
+		ids = append(ids, sku.ID)
+	}
+
+	if len(ids) > 0 {
+		pairs, err := repo.SKU.MappingsForSKUs(ids)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range pairs {
+			snap.mappings[[2]uint{p.SKUID, p.MaterialID}] = true
+		}
+	}
+	return snap, nil
+}
+
 // analyze groups the file rows by SKU and by material and derives the full plan.
-func (s *MasterImportService) analyze(rows []LegacyRow) *MasterImportPreview {
+func (s *MasterImportService) analyze(rows []LegacyRow) (*MasterImportPreview, error) {
 	skuMap := map[string]*skuAgg{}
 	var skuOrder []string
 	var matOrder []string
@@ -283,12 +351,15 @@ func (s *MasterImportService) analyze(rows []LegacyRow) *MasterImportPreview {
 	pv := &MasterImportPreview{Errors: rowErrors}
 	sum := MasterImportSummary{TotalRows: total, ErrorRows: len(rowErrors)}
 
+	// The whole catalog lookup for this file, up front.
+	snap, err := s.loadCatalog(matOrder, skuOrder)
+	if err != nil {
+		return nil, apperr.Internal("could not read catalog").Wrap(err)
+	}
+
 	// Materials plan.
 	for _, name := range matOrder {
-		exists := false
-		if m, _ := s.repo.Material.FindByNameInsensitive(name); m != nil {
-			exists = true
-		}
+		exists := snap.material(name) != nil
 		if !exists {
 			sum.NewMaterials++
 		}
@@ -298,12 +369,8 @@ func (s *MasterImportService) analyze(rows []LegacyRow) *MasterImportPreview {
 	// SKU + mapping plan.
 	for _, code := range skuOrder {
 		agg := skuMap[code]
-		skuExists := false
-		var skuRec *models.SKU
-		if rec, err := s.repo.SKU.FindByCode(code); err == nil {
-			skuExists = true
-			skuRec = rec
-		}
+		skuRec := snap.sku(code)
+		skuExists := skuRec != nil
 		if !skuExists {
 			sum.NewSKUs++
 		}
@@ -337,11 +404,9 @@ func (s *MasterImportService) analyze(rows []LegacyRow) *MasterImportPreview {
 		if status != skuStatusMissing {
 			for _, matName := range agg.matNames {
 				exists := false
-				if skuExists && skuRec != nil {
-					if matRec, _ := s.repo.Material.FindByNameInsensitive(matName); matRec != nil {
-						if ok, _ := s.repo.SKU.MappingExists(skuRec.ID, matRec.ID); ok {
-							exists = true
-						}
+				if skuRec != nil {
+					if matRec := snap.material(matName); matRec != nil {
+						exists = snap.mappings[[2]uint{skuRec.ID, matRec.ID}]
 					}
 				}
 				if !exists {
@@ -355,7 +420,7 @@ func (s *MasterImportService) analyze(rows []LegacyRow) *MasterImportPreview {
 	}
 
 	pv.Summary = sum
-	return pv
+	return pv, nil
 }
 
 // ---------- Preview / Commit ----------
@@ -366,7 +431,10 @@ func (s *MasterImportService) Preview(actor Actor, source, filename string, rows
 	if len(rows) == 0 {
 		return nil, apperr.BadRequest("Không có dòng dữ liệu để phân tích")
 	}
-	pv := s.analyze(rows)
+	pv, err := s.analyze(rows)
+	if err != nil {
+		return nil, err
+	}
 	pv.Filename = filename
 
 	raw, err := models.ToJSONB(pv)
@@ -424,85 +492,140 @@ func (s *MasterImportService) Commit(actor Actor, jobID uint) (*MasterImportPrev
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
 		txRepo := repositories.New(tx)
 
-		matIDByName := map[string]uint{}
+		// The whole catalog this plan touches, in a fixed number of reads. Doing it
+		// per row cost ~7 statements per SKU, which is minutes for a real file.
+		matNames := make([]string, 0, len(pv.Materials))
 		for _, m := range pv.Materials {
-			rec, err := txRepo.Material.FindByNameInsensitive(m.Name)
-			if err != nil {
-				return err
-			}
-			if rec == nil {
-				code := uniqueMaterialCode(txRepo, m.Code)
-				rec = &models.Material{Code: code, Name: m.Name}
-				if err := txRepo.Material.Create(rec); err != nil {
-					return err
-				}
-				applied.MaterialsCreated++
-			}
-			matIDByName[strings.ToLower(strings.TrimSpace(m.Name))] = rec.ID
+			matNames = append(matNames, m.Name)
+		}
+		skuCodes := make([]string, 0, len(pv.SKUs))
+		for _, sp := range pv.SKUs {
+			skuCodes = append(skuCodes, sp.Code)
+		}
+		snap, err := loadCatalogSnapshot(txRepo, matNames, skuCodes)
+		if err != nil {
+			return err
 		}
 
+		// ---- Materials: resolve, then insert the new ones in batches ----
+		existingCodes, err := txRepo.Material.AllCodes()
+		if err != nil {
+			return err
+		}
+		taken := make(map[string]bool, len(existingCodes))
+		for _, c := range existingCodes {
+			taken[models.NormalizeCode(c)] = true
+		}
+		matIDByName := map[string]uint{}
+		var newMats []models.Material
+		for _, m := range pv.Materials {
+			key := strings.ToLower(strings.TrimSpace(m.Name))
+			if _, done := matIDByName[key]; done {
+				continue
+			}
+			if rec := snap.material(m.Name); rec != nil {
+				matIDByName[key] = rec.ID
+				continue
+			}
+			matIDByName[key] = 0 // claimed by a pending insert; filled in below
+			newMats = append(newMats, models.Material{Code: mintMaterialCode(taken, m.Code), Name: m.Name})
+		}
+		if err := txRepo.Material.CreateMany(newMats, materialInsertBatch); err != nil {
+			return err
+		}
+		for i := range newMats {
+			matIDByName[strings.ToLower(strings.TrimSpace(newMats[i].Name))] = newMats[i].ID
+			applied.MaterialsCreated++
+		}
+
+		// ---- SKUs: resolve, batch-insert the new ones, batch the name refreshes ----
 		skuIDByCode := map[string]uint{}
+		var newSKUs []models.SKU
+		// Existing SKUs whose product name the file refreshes, grouped by the new
+		// value so identical names go out as one UPDATE ... WHERE id IN (...).
+		renameIDs := map[string][]uint{}
 		for _, sp := range pv.SKUs {
+			if rec := snap.sku(sp.Code); rec != nil {
+				skuIDByCode[sp.Code] = rec.ID
+				// The file is the source of truth for the human-readable name. Scoped
+				// update — never touches the material mapping.
+				if sp.ProductName != "" && rec.ProductName != sp.ProductName {
+					renameIDs[sp.ProductName] = append(renameIDs[sp.ProductName], rec.ID)
+				}
+				continue
+			}
 			// Product name comes from the file's "Tên sản phẩm" column; when the file
 			// has no such column, fall back to the SKU display name (legacy behaviour).
 			productName := sp.ProductName
 			if productName == "" {
 				productName = sp.Name
 			}
-			rec, err := txRepo.SKU.FindByCode(sp.Code)
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				rec = &models.SKU{Code: sp.Code, Name: sp.Name, ProductName: productName, IsActive: true, IsCombo: sp.IsCombo}
-				if err := txRepo.SKU.Create(rec); err != nil {
-					return err
-				}
-				applied.SKUsCreated++
-			} else if err != nil {
+			newSKUs = append(newSKUs, models.SKU{
+				Code: sp.Code, Name: sp.Name, ProductName: productName, IsActive: true, IsCombo: sp.IsCombo,
+			})
+		}
+		if err := txRepo.SKU.CreateMany(newSKUs, skuInsertBatch); err != nil {
+			return err
+		}
+		for i := range newSKUs {
+			skuIDByCode[newSKUs[i].Code] = newSKUs[i].ID
+			applied.SKUsCreated++
+		}
+		for name, ids := range renameIDs {
+			if err := tx.Model(&models.SKU{}).Where("id IN ?", ids).
+				Update("product_name", name).Error; err != nil {
 				return err
-			} else if sp.ProductName != "" && rec.ProductName != sp.ProductName {
-				// Existing SKU: refresh the human-readable name from the file (source of
-				// truth for it). Scoped update — never touches the material mapping.
-				if err := tx.Model(&models.SKU{}).Where("id = ?", rec.ID).
-					Update("product_name", sp.ProductName).Error; err != nil {
-					return err
-				}
 			}
-			skuIDByCode[sp.Code] = rec.ID
 		}
 
+		// ---- Mappings: only the pairs that aren't stored yet, in batches ----
+		var newMappings []models.SKUMaterial
 		for _, mp := range pv.Mappings {
 			skuID := skuIDByCode[mp.SKUCode]
 			matID := matIDByName[strings.ToLower(strings.TrimSpace(mp.MaterialName))]
 			if skuID == 0 || matID == 0 {
 				continue
 			}
-			exists, err := txRepo.SKU.MappingExists(skuID, matID)
-			if err != nil {
-				return err
+			pair := [2]uint{skuID, matID}
+			// snap.mappings holds what the catalog already had; adding as we go also
+			// guards a plan that lists the same pair twice (the unique index would
+			// reject the second row and fail the whole batch).
+			if snap.mappings[pair] {
+				continue
 			}
-			if !exists {
-				if err := txRepo.SKU.AddMaterial(skuID, matID, 1, mappingSourceNote); err != nil {
-					return err
-				}
-				applied.MappingsCreated++
-			}
+			snap.mappings[pair] = true
+			newMappings = append(newMappings, models.SKUMaterial{
+				SKUID: skuID, MaterialID: matID, QuantityPerUnit: 1, Note: mappingSourceNote,
+			})
 		}
+		if err := txRepo.SKU.AddMaterialsMany(newMappings, skuInsertBatch); err != nil {
+			return err
+		}
+		applied.MappingsCreated = len(newMappings)
 
 		// Flag as combo any SKU that ended up mapped to ≥2 materials. Counting the
 		// real mappings (not just this file's plan) keeps it correct when an import
 		// additively pushes an existing single-material SKU over into a combo. This
 		// is upgrade-only: an additive import must never clear a manual combo flag.
-		for _, skuID := range skuIDByCode {
-			n, err := txRepo.SKU.CountMaterials(skuID)
-			if err != nil {
-				return err
+		// Plan order, not map order, so the statement is reproducible.
+		touched := make([]uint, 0, len(skuIDByCode))
+		for _, sp := range pv.SKUs {
+			if id := skuIDByCode[sp.Code]; id != 0 {
+				touched = append(touched, id)
 			}
-			if n >= 2 {
-				if err := tx.Model(&models.SKU{}).
-					Where("id = ? AND is_combo = ?", skuID, false).
-					Update("is_combo", true).Error; err != nil {
-					return err
-				}
+		}
+		counts, err := txRepo.SKU.MaterialCounts(touched)
+		if err != nil {
+			return err
+		}
+		combos := make([]uint, 0, len(touched))
+		for _, id := range touched {
+			if counts[id] >= 2 {
+				combos = append(combos, id)
 			}
+		}
+		if err := txRepo.SKU.MarkComboMany(combos); err != nil {
+			return err
 		}
 
 		job.Status = models.ImportCommitted
@@ -591,26 +714,6 @@ func materialCode(name string) string {
 		code = "MAT"
 	}
 	return code
-}
-
-// uniqueMaterialCode returns base, or base-2/base-3/... if the code is taken.
-func uniqueMaterialCode(repo *repositories.Repositories, base string) string {
-	if base == "" {
-		base = "MAT"
-	}
-	code := base
-	for i := 2; ; i++ {
-		if _, err := repo.Material.FindByCode(code); err != nil {
-			return code // not found → available
-		}
-		suffix := "-" + strconv.Itoa(i)
-		trimTo := 32 - len(suffix)
-		b := base
-		if len(b) > trimTo {
-			b = strings.TrimRight(b[:trimTo], "-")
-		}
-		code = b + suffix
-	}
 }
 
 func normalizeLegacyHeader(h string) string {
@@ -713,3 +816,6 @@ func (s *MasterImportService) MasterTemplateXLSX() ([]byte, string, error) {
 	}
 	return data, "master-data-template.xlsx", nil
 }
+
+// skuInsertBatch is how many SKUs / mappings ride in one INSERT.
+const skuInsertBatch = 200

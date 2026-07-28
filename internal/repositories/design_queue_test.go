@@ -235,6 +235,81 @@ func TestDesignQueue_FilterByMaterial(t *testing.T) {
 	}
 }
 
+// TestDesignQueueSKUs_OffersOnlyCodesWithWork locks in the SKU filter's facet: it
+// lists the SKU codes actually sitting in the queue with per-code counts, joins the
+// catalog name when there is one, and never offers a code whose only items have
+// left the queue (here: a design-ready item whose batch already carries both files).
+func TestDesignQueueSKUs_OffersOnlyCodesWithWork(t *testing.T) {
+	db := newQueueTestDB(t)
+	repo := New(db)
+
+	sku := &models.SKU{Code: "SKU-1", Name: "Treo cửa 2 lớp"}
+	if err := db.Create(sku).Error; err != nil {
+		t.Fatalf("seed sku: %v", err)
+	}
+
+	a := seedQueueItem(t, db, "A", models.DesignPending) // SKU-1 by default
+	a.SKUID = &sku.ID
+	if err := db.Save(a).Error; err != nil {
+		t.Fatalf("attach sku to item A: %v", err)
+	}
+	b := seedQueueItem(t, db, "B", models.DesignPending)
+	b.SKUCode = "SKU-2" // no catalog row — the code alone must still be offered
+	if err := db.Save(b).Error; err != nil {
+		t.Fatalf("retag item B: %v", err)
+	}
+
+	// Done: READY and its batch already has both production files, so it is out of
+	// the queue — and its SKU code must not be offered on account of it.
+	done := seedQueueItem(t, db, "C", models.DesignReady)
+	done.SKUCode = "SKU-DONE"
+	if err := db.Save(done).Error; err != nil {
+		t.Fatalf("retag item C: %v", err)
+	}
+	batch := batchItems(t, db, "#100001", done)
+	for _, kind := range []models.BatchLinkKind{models.BatchLinkPrint, models.BatchLinkCut} {
+		if err := db.Create(&models.BatchLink{BatchID: batch.ID, Kind: kind, URL: "https://example.com/f"}).Error; err != nil {
+			t.Fatalf("seed batch link: %v", err)
+		}
+	}
+
+	facets, err := repo.OrderItem.DesignQueueSKUs(ItemFilter{
+		Page: Page{Page: 1, PageSize: 50}, NeedsDesign: true, ReviewApproved: true,
+	})
+	if err != nil {
+		t.Fatalf("queue skus: %v", err)
+	}
+	counts := map[string]int64{}
+	names := map[string]string{}
+	for _, f := range facets {
+		counts[f.SKUCode] = f.ItemCount
+		names[f.SKUCode] = f.SKUName
+	}
+	if counts["SKU-1"] != 1 || counts["SKU-2"] != 1 {
+		t.Errorf("facet counts = %v, want one item each for SKU-1 and SKU-2", counts)
+	}
+	if _, offered := counts["SKU-DONE"]; offered {
+		t.Errorf("a SKU whose items left the queue must not be offered in the filter")
+	}
+	if names["SKU-1"] != "Treo cửa 2 lớp" {
+		t.Errorf("sku name = %q, want the catalog name", names["SKU-1"])
+	}
+	if names["SKU-2"] != "" {
+		t.Errorf("sku with no catalog row must report an empty name, got %q", names["SKU-2"])
+	}
+
+	// Picking a code narrows the queue to exactly that code's items.
+	rows, _, err := repo.OrderItem.List(ItemFilter{
+		Page: Page{Page: 1, PageSize: 50}, NeedsDesign: true, ReviewApproved: true, SKUCode: "SKU-2",
+	})
+	if err != nil {
+		t.Fatalf("list by sku: %v", err)
+	}
+	if len(rows) != 1 || rows[0].InternalCode != "B" {
+		t.Errorf("filtering by SKU-2 returned %d rows, want only item B", len(rows))
+	}
+}
+
 // TestSetProductionFileForBatch_StampsEveryLiveItem covers the fan-out that makes
 // "same batch → same print file" true for the per-item columns the production
 // export and QC read. Cancelled lines are never produced, so they must be skipped.

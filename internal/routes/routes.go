@@ -64,8 +64,10 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		log.Printf("routes: SetTrustedProxies failed: %v", err)
 	}
 	r.Use(middleware.Recovery())
+	r.Use(middleware.RequestID())
 	r.Use(middleware.RequestLogger())
 	r.Use(middleware.CORS(cfg.CORSAllowedOrigins))
+	r.Use(middleware.BodyLimit(cfg.MaxBodyBytes))
 
 	// Health + docs (public).
 	r.GET("/health", func(c *gin.Context) {
@@ -139,6 +141,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		materials.POST("", middleware.RequireRoles(roleOpsAdmin...), h.CreateMaterial)
 		materials.PUT("/:id", middleware.RequireRoles(roleOpsAdmin...), h.UpdateMaterial)
 		materials.DELETE("/:id", middleware.RequireRoles(roleAdminOwner...), h.DeleteMaterial)
+		materials.POST("/bulk-delete", middleware.RequireRoles(roleAdminOwner...), h.BulkDeleteMaterials)
 	}
 
 	// SKUs.
@@ -149,6 +152,8 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		skus.POST("", middleware.RequireRoles(roleOpsAdmin...), h.CreateSKU)
 		skus.PUT("/:id", middleware.RequireRoles(roleOpsAdmin...), h.UpdateSKU)
 		skus.DELETE("/:id", middleware.RequireRoles(roleAdminOwner...), h.DeleteSKU)
+		skus.POST("/bulk-delete", middleware.RequireRoles(roleAdminOwner...), h.BulkDeleteSKUs)
+		skus.POST("/bulk-active", middleware.RequireRoles(roleOpsAdmin...), h.BulkSetSKUsActive)
 	}
 
 	// Orders + import (internal).
@@ -211,11 +216,16 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		items.GET("/:id", middleware.RequireRoles(roleInternal...), h.GetItem)
 		items.PATCH("/:id/design", middleware.RequireRoles(roleDesignOps...), h.UpdateItemDesign)
 	}
+	// Sidebar badges — one request for all three counters.
+	authd.GET("/action-counts", middleware.RequireRoles(roleInternal...), h.ActionCounts)
+
 	design := authd.Group("/design-queue", middleware.RequireRoles(roleDesignOps...))
 	{
 		design.GET("", h.DesignQueue)
 		design.POST("/set-ready", h.BulkSetDesignReady)
 		design.GET("/materials", h.DesignQueueMaterials)
+		design.GET("/skus", h.DesignQueueSKUs)
+		design.GET("/downloadable", h.DesignDownloadableItems)
 		design.GET("/assets.zip", h.DownloadDesignAssetsZip)
 		design.GET("/material-buckets", h.MaterialBuckets)
 		design.GET("/material/:materialId/items", h.DesignReadyItemsForMaterial)
@@ -265,6 +275,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		notes.GET("/:id", h.GetNote)
 		notes.PUT("/:id", h.UpdateNote)
 		notes.DELETE("/:id", h.DeleteNote)
+		notes.POST("/bulk-delete", h.BulkDeleteNotes)
 	}
 
 	// Seller view (seller only — high-level status, no internal detail).

@@ -67,6 +67,16 @@ func (r *SellerRepository) FindByID(id uint) (*models.Seller, error) {
 	return &s, nil
 }
 
+// Exists reports whether the seller id is real, without loading the seller or
+// its stores. Callers that only need the guard (import, seller-scoped writes)
+// used to run FindByID, whose Preload("Stores") costs a second query — one extra
+// round-trip to a remote database for data nobody reads.
+func (r *SellerRepository) Exists(id uint) (bool, error) {
+	var n int64
+	err := r.db.Model(&models.Seller{}).Where("id = ?", id).Count(&n).Error
+	return n > 0, err
+}
+
 func (r *SellerRepository) FindByCode(code string) (*models.Seller, error) {
 	code = models.NormalizeCode(code)
 	var s models.Seller
@@ -164,6 +174,146 @@ func (r *MaterialRepository) FindByNameInsensitive(name string) (*models.Materia
 	return &m, nil
 }
 
+// ListByNameInsensitive returns EVERY material carrying the name, oldest first.
+// Material names are not unique (only the code is), and the quota import can
+// deliberately create several materials sharing a name when their định mức/mô tả
+// differ — so anything that has to pick the right one must see them all rather
+// than take FindByNameInsensitive's arbitrary first row.
+func (r *MaterialRepository) ListByNameInsensitive(name string) ([]models.Material, error) {
+	return r.ListByNamesInsensitive([]string{name})
+}
+
+// nameChunk caps how many names ride in one IN (...) list. Postgres allows far
+// more parameters; this just keeps statements a sane size.
+const nameChunk = 500
+
+// ListByNamesInsensitive returns every material matching ANY of the given names
+// (case- and space-insensitive), oldest first. This is what an importer uses to
+// look up a whole spreadsheet in one round-trip instead of one query per row —
+// against a hosted database that difference is minutes, not milliseconds.
+func (r *MaterialRepository) ListByNamesInsensitive(names []string) ([]models.Material, error) {
+	keys := make([]string, 0, len(names))
+	seen := map[string]bool{}
+	for _, n := range names {
+		k := strings.ToLower(strings.TrimSpace(n))
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	var out []models.Material
+	for start := 0; start < len(keys); start += nameChunk {
+		end := start + nameChunk
+		if end > len(keys) {
+			end = len(keys)
+		}
+		var rows []models.Material
+		if err := r.db.Where("LOWER(TRIM(name)) IN ?", keys[start:end]).
+			Order("id asc").Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		out = append(out, rows...)
+	}
+	return out, nil
+}
+
+// idChunk caps how many ids ride in one IN (...) list.
+const idChunk = 500
+
+// ListByIDs returns the materials with these ids, in one query per chunk.
+func (r *MaterialRepository) ListByIDs(ids []uint) ([]models.Material, error) {
+	var out []models.Material
+	for start := 0; start < len(ids); start += idChunk {
+		end := start + idChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		var rows []models.Material
+		if err := r.db.Where("id IN ?", ids[start:end]).Order("id asc").Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		out = append(out, rows...)
+	}
+	return out, nil
+}
+
+// InUseIDs reports which of the given materials are still referenced — by a SKU's
+// material list, by a batch, or by a batch line — mapped to a human reason. A
+// referenced material must not be deleted: rows point at it by id, and a soft
+// delete would leave a SKU or batch pointing at a material that no longer lists.
+// One query per referencing table, not one per material.
+func (r *MaterialRepository) InUseIDs(ids []uint) (map[uint]string, error) {
+	inUse := map[uint]string{}
+	sources := []struct {
+		table  string
+		reason string
+	}{
+		{"sku_materials", "đang được SKU sử dụng"},
+		{"batches", "đang thuộc batch sản xuất"},
+		{"batch_items", "đang thuộc batch sản xuất"},
+	}
+	for start := 0; start < len(ids); start += idChunk {
+		end := start + idChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		for _, src := range sources {
+			var used []uint
+			if err := r.db.Table(src.table).
+				Where("material_id IN ? AND deleted_at IS NULL", chunk).
+				Distinct().Pluck("material_id", &used).Error; err != nil {
+				return nil, err
+			}
+			for _, id := range used {
+				if _, seen := inUse[id]; !seen {
+					inUse[id] = src.reason
+				}
+			}
+		}
+	}
+	return inUse, nil
+}
+
+// DeleteMany soft-deletes materials by id — one statement per chunk instead of
+// one request per material.
+func (r *MaterialRepository) DeleteMany(ids []uint) (int64, error) {
+	var affected int64
+	for start := 0; start < len(ids); start += idChunk {
+		end := start + idChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		res := r.db.Where("id IN ?", ids[start:end]).Delete(&models.Material{})
+		if res.Error != nil {
+			return affected, res.Error
+		}
+		affected += res.RowsAffected
+	}
+	return affected, nil
+}
+
+// AllCodes returns every material code, so an importer can mint unique codes in
+// memory instead of probing the database once per new material.
+func (r *MaterialRepository) AllCodes() ([]string, error) {
+	var codes []string
+	err := r.db.Model(&models.Material{}).Pluck("code", &codes).Error
+	return codes, err
+}
+
+// CreateMany inserts materials in batches — one statement per batch instead of
+// one per row, which is the whole cost of a few hundred new materials.
+func (r *MaterialRepository) CreateMany(rows []models.Material, batchSize int) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	return r.db.CreateInBatches(rows, batchSize).Error
+}
+
 func (r *MaterialRepository) List(p Page) ([]models.Material, int64, error) {
 	var rows []models.Material
 	var total int64
@@ -202,6 +352,88 @@ func (r *SKURepository) ReplaceMaterials(skuID uint, mats []models.SKUMaterial) 
 		}
 		return nil
 	})
+}
+
+// ListByIDs returns the SKUs with these ids (no material preload — bulk actions
+// only need code/name), one query per chunk.
+func (r *SKURepository) ListByIDs(ids []uint) ([]models.SKU, error) {
+	var out []models.SKU
+	for start := 0; start < len(ids); start += idChunk {
+		end := start + idChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		var rows []models.SKU
+		if err := r.db.Where("id IN ?", ids[start:end]).Order("id asc").Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		out = append(out, rows...)
+	}
+	return out, nil
+}
+
+// InUseIDs reports which of the given SKUs are referenced by an order line, with
+// a reason. An order item points at its SKU by id; deleting the SKU underneath it
+// would leave the order pointing at nothing. One query per chunk.
+func (r *SKURepository) InUseIDs(ids []uint) (map[uint]string, error) {
+	inUse := map[uint]string{}
+	for start := 0; start < len(ids); start += idChunk {
+		end := start + idChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		var used []uint
+		if err := r.db.Table("order_items").
+			Where("sku_id IN ? AND deleted_at IS NULL", ids[start:end]).
+			Distinct().Pluck("sku_id", &used).Error; err != nil {
+			return nil, err
+		}
+		for _, id := range used {
+			inUse[id] = "đang có đơn hàng dùng"
+		}
+	}
+	return inUse, nil
+}
+
+// DeleteMany soft-deletes SKUs and hard-deletes their material mappings — the
+// mapping table is pure join data owned by the SKU, and leaving rows behind would
+// collide with its unique (sku_id, material_id) index if the SKU is recreated.
+func (r *SKURepository) DeleteMany(ids []uint) (int64, error) {
+	var affected int64
+	for start := 0; start < len(ids); start += idChunk {
+		end := start + idChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		if err := r.db.Unscoped().Where("sku_id IN ?", chunk).Delete(&models.SKUMaterial{}).Error; err != nil {
+			return affected, err
+		}
+		res := r.db.Where("id IN ?", chunk).Delete(&models.SKU{})
+		if res.Error != nil {
+			return affected, res.Error
+		}
+		affected += res.RowsAffected
+	}
+	return affected, nil
+}
+
+// SetActiveMany flips is_active on many SKUs in one statement per chunk.
+func (r *SKURepository) SetActiveMany(ids []uint, active bool) (int64, error) {
+	var affected int64
+	for start := 0; start < len(ids); start += idChunk {
+		end := start + idChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		res := r.db.Model(&models.SKU{}).Where("id IN ?", ids[start:end]).
+			Update("is_active", active)
+		if res.Error != nil {
+			return affected, res.Error
+		}
+		affected += res.RowsAffected
+	}
+	return affected, nil
 }
 
 func (r *SKURepository) FindByID(id uint) (*models.SKU, error) {
@@ -296,18 +528,89 @@ func (r *SKURepository) MaterialCounts(skuIDs []uint) (map[uint]int64, error) {
 // CountMaterials returns how many materials a SKU is mapped to. Used by the
 // order-import validator to distinguish "SKU exists but has no material" from a
 // fully set-up SKU.
-func (r *SKURepository) CountMaterials(skuID uint) (int64, error) {
-	var n int64
-	err := r.db.Model(&models.SKUMaterial{}).Where("sku_id = ?", skuID).Count(&n).Error
-	return n, err
+// ListByCodes returns the SKUs with these codes, WITHOUT preloading materials —
+// a bulk importer only needs id/code/product_name, and the preload is what turned
+// one lookup into three queries per SKU. Codes are normalized like FindByCode.
+func (r *SKURepository) ListByCodes(codes []string) ([]models.SKU, error) {
+	keys := make([]string, 0, len(codes))
+	seen := map[string]bool{}
+	for _, c := range codes {
+		k := models.NormalizeCode(c)
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	var out []models.SKU
+	for start := 0; start < len(keys); start += nameChunk {
+		end := start + nameChunk
+		if end > len(keys) {
+			end = len(keys)
+		}
+		var rows []models.SKU
+		if err := r.db.Where("code IN ?", keys[start:end]).Order("id asc").Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		out = append(out, rows...)
+	}
+	return out, nil
 }
 
-// MappingExists reports whether a (sku, material) mapping already exists.
-func (r *SKURepository) MappingExists(skuID, materialID uint) (bool, error) {
-	var n int64
-	err := r.db.Model(&models.SKUMaterial{}).
-		Where("sku_id = ? AND material_id = ?", skuID, materialID).Count(&n).Error
-	return n > 0, err
+// MappingsForSKUs returns every (sku_id, material_id) mapping of the given SKUs in
+// one query per chunk — the set an importer needs to know which mappings are new.
+func (r *SKURepository) MappingsForSKUs(skuIDs []uint) ([]models.SKUMaterial, error) {
+	var out []models.SKUMaterial
+	for start := 0; start < len(skuIDs); start += idChunk {
+		end := start + idChunk
+		if end > len(skuIDs) {
+			end = len(skuIDs)
+		}
+		var rows []models.SKUMaterial
+		if err := r.db.Where("sku_id IN ?", skuIDs[start:end]).Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		out = append(out, rows...)
+	}
+	return out, nil
+}
+
+// CreateMany inserts SKUs in batches — one statement per batch instead of one per
+// SKU. IDs are filled in on the passed slice.
+func (r *SKURepository) CreateMany(rows []models.SKU, batchSize int) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	return r.db.CreateInBatches(rows, batchSize).Error
+}
+
+// AddMaterialsMany inserts SKU→material mappings in batches. Additive like
+// AddMaterial: it never removes anything.
+func (r *SKURepository) AddMaterialsMany(rows []models.SKUMaterial, batchSize int) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	return r.db.CreateInBatches(rows, batchSize).Error
+}
+
+// MarkComboMany flags SKUs as combo in one statement per chunk. Upgrade-only: it
+// never clears a combo flag someone set by hand.
+func (r *SKURepository) MarkComboMany(ids []uint) error {
+	for start := 0; start < len(ids); start += idChunk {
+		end := start + idChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		if err := r.db.Model(&models.SKU{}).
+			Where("id IN ? AND is_combo = ?", ids[start:end], false).
+			Update("is_combo", true).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // AddMaterial appends a single material to a SKU (idempotent per unique index).

@@ -713,7 +713,7 @@ func BatchZipName(batch *models.Batch) string {
 // StreamBatchAssetsZip streams a batch's asset URLs into a ZIP archive.
 //
 // When designOnly is true it bundles ONLY the original design files (front + back)
-// into a single "Batch_<code>" folder, each named "STT_SKU_QUANTITY[_SIDE].EXT"
+// into a single "Batch_<code>" folder, each named "INTERNALCODE_SKU_QUANTITY[_SIDE].EXT"
 // (see designFileName) — no mockup, no print/cut — matching the "download design"
 // requirement. When false it keeps
 // the full production bundle (design, mockup, print, cut) with the legacy flat
@@ -738,7 +738,6 @@ func (s *BatchService) StreamBatchAssetsZip(ctx context.Context, w io.Writer, ba
 	// Design-only downloads gather every file into one "Batch_<code>" folder so the
 	// designer can tell one batch's pull from another; matches BatchZipName's .zip.
 	designFolder := "Batch_" + sanitizeZipComponent(batch.Code)
-	var designStt designSeq
 
 	for _, bi := range batch.Items {
 		it := bi.OrderItem
@@ -747,17 +746,12 @@ func (s *BatchService) StreamBatchAssetsZip(ctx context.Context, w io.Writer, ba
 		}
 
 		if designOnly {
-			wroteForItem := false
 			for _, a := range designAssetsForItem(it) {
-				entryName := designFileName(designFolder, designStt.next(), it.SKUCode, it.Quantity, a.side, a.url, usedNames)
+				entryName := designFileName(designFolder, it.InternalCode, it.SKUCode, it.Quantity, a.side, a.url, usedNames)
 				if err := writeURLToZipEntry(ctx, client, zw, a.url, entryName); err != nil {
 					continue // skip one broken design file, keep the rest
 				}
 				written++
-				wroteForItem = true
-			}
-			if wroteForItem {
-				designStt.commit()
 			}
 			continue
 		}

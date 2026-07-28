@@ -3,6 +3,7 @@ package handlers
 import (
 	"github.com/gin-gonic/gin"
 
+	"the-fulfillment/backend/internal/apperr"
 	"the-fulfillment/backend/internal/repositories"
 	"the-fulfillment/backend/internal/response"
 	"the-fulfillment/backend/internal/services"
@@ -90,6 +91,66 @@ func (h *Handlers) DeleteNote(c *gin.Context) {
 		return
 	}
 	response.OK(c, gin.H{"deleted": true})
+}
+
+// BulkDeleteNotes removes many notes in one request, in one of two modes:
+//
+//	{ "ids": [1,2,3] }                       — exactly these notes
+//	{ "all": true, "status": "OPEN", … }     — EVERY note matching the filter
+//
+// The second mode is what the screen's "chọn tất cả" uses. It sends the filter
+// the user is looking at rather than a list of ids, because the match can be tens
+// of thousands of rows: naming them all would mean a huge request and, worse, a
+// silent cap at whatever page the client had loaded — the user would tick "all"
+// and get only the current page deleted.
+// POST /api/notes/bulk-delete
+func (h *Handlers) BulkDeleteNotes(c *gin.Context) {
+	var in struct {
+		IDs []uint `json:"ids"`
+		All bool   `json:"all"`
+		// Filter, only read when All is set. Mirrors the list endpoint's query.
+		Status            string `json:"status"`
+		Severity          string `json:"severity"`
+		EntityType        string `json:"entity_type"`
+		EntityID          *uint  `json:"entity_id"`
+		RequiredAttention *bool  `json:"required_attention"`
+	}
+	if !bindJSON(c, &in) {
+		return
+	}
+
+	if in.All {
+		f := repositories.NoteFilter{
+			Status:            in.Status,
+			Severity:          in.Severity,
+			EntityType:        in.EntityType,
+			EntityID:          in.EntityID,
+			RequiredAttention: in.RequiredAttention,
+		}
+		n, err := h.svc.Note.DeleteNotesMatching(actor(c), f)
+		if err != nil {
+			response.Fail(c, err)
+			return
+		}
+		// Same shape as the id path so the client reads one field either way.
+		response.OK(c, gin.H{"deleted_count": n, "deleted_ids": []uint{}, "missing_ids": []uint{}})
+		return
+	}
+
+	if len(in.IDs) == 0 {
+		response.Fail(c, apperr.BadRequest("Chưa chọn ghi chú nào để xoá"))
+		return
+	}
+	res, err := h.svc.Note.DeleteNotes(actor(c), in.IDs)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, gin.H{
+		"deleted_count": len(res.DeletedIDs),
+		"deleted_ids":   res.DeletedIDs,
+		"missing_ids":   res.MissingIDs,
+	})
 }
 
 // ListAuditLogs lists audit entries (admin/owner). GET /api/audit-logs

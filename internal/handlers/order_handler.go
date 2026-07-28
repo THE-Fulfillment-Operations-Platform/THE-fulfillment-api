@@ -162,6 +162,7 @@ func itemFilterFrom(c *gin.Context) repositories.ItemFilter {
 		StoreOrderID:   strings.TrimSpace(c.Query("store_order_id")),
 		SKUCode:        c.Query("sku"),
 		InternalCode:   strings.TrimSpace(c.Query("internal_code")),
+		Search:         strings.TrimSpace(c.Query("q")),
 		InternalStatus: c.Query("status"),
 		DesignStatus:   c.Query("design_status"),
 		ReviewStatus:   c.Query("review_status"),
@@ -200,6 +201,18 @@ func (h *Handlers) GetItem(c *gin.Context) {
 	response.OK(c, it)
 }
 
+// ActionCounts backs the sidebar badges: one request and one query instead of the
+// four list endpoints the sidebar used to poll.
+// GET /api/action-counts
+func (h *Handlers) ActionCounts(c *gin.Context) {
+	counts, err := h.svc.Order.ActionCounts()
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, counts)
+}
+
 // ---------- Design queue ----------
 
 // DesignQueue lists items needing design. GET /api/design-queue
@@ -213,19 +226,38 @@ func (h *Handlers) DesignQueue(c *gin.Context) {
 	response.List(c, rows, metaFor(f.Page, total))
 }
 
+// DesignDownloadableItems lists every design-queue item that already has a design
+// file, matching ?q= (internal_code/sku_code), ?material_id= and ?batch=. It backs
+// the "Tải ZIP" dialog's pick-list, so the filtering runs over the whole queue on
+// the server rather than a single loaded page. GET /api/design-queue/downloadable
+func (h *Handlers) DesignDownloadableItems(c *gin.Context) {
+	f := itemFilterFrom(c)
+	rows, err := h.svc.Order.DesignDownloadableItems(f)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, rows)
+}
+
 // DownloadDesignAssetsZip streams ONLY the original design files (front/back, no
 // mockup/print/cut) of the design queue as a ZIP. Everything lands in one folder
 // named per DesignAssetsFolder — "Batch_<code>" when ?batch= narrows the queue,
 // else "Design_<date>". An optional ?item_ids=1,2,3 restricts the export to the
-// ticked rows; omitting it bundles the whole (optionally batch-filtered) queue.
-// GET /api/design-queue/assets.zip
+// ticked rows; omitting it bundles the whole queue matching ?q=/?material_id=/
+// ?batch= (the same filters as the pick-list). GET /api/design-queue/assets.zip
 func (h *Handlers) DownloadDesignAssetsZip(c *gin.Context) {
-	ids := parseUintCSV(c.Query("item_ids"))
 	batch := strings.TrimSpace(c.Query("batch"))
+	q := services.DesignZipQuery{
+		IDs:        parseUintCSV(c.Query("item_ids")),
+		Batch:      batch,
+		Search:     strings.TrimSpace(c.Query("q")),
+		MaterialID: uintQueryPtr(c, "material_id"),
+	}
 	folder := services.DesignAssetsFolder(batch, time.Now())
 	c.Header("Content-Disposition", `attachment; filename="`+folder+`.zip"`)
 	c.Header("Content-Type", "application/zip")
-	if err := h.svc.Order.StreamDesignAssetsZip(c.Request.Context(), c.Writer, ids, batch, folder); err != nil {
+	if err := h.svc.Order.StreamDesignAssetsZip(c.Request.Context(), c.Writer, q, folder); err != nil {
 		// Only surface a JSON error if nothing has been streamed yet; once the ZIP
 		// body has started we can't switch to an error envelope.
 		if !c.Writer.Written() {
@@ -296,6 +328,18 @@ func (h *Handlers) BulkSetDesignReady(c *gin.Context) {
 // GET /api/design-queue/materials
 func (h *Handlers) DesignQueueMaterials(c *gin.Context) {
 	rows, err := h.svc.Order.DesignQueueMaterials(itemFilterFrom(c))
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, rows)
+}
+
+// DesignQueueSKUs lists the SKU codes that have items in the design queue, with
+// counts, so the SKU filter only offers SKUs that actually have work.
+// GET /api/design-queue/skus
+func (h *Handlers) DesignQueueSKUs(c *gin.Context) {
+	rows, err := h.svc.Order.DesignQueueSKUs(itemFilterFrom(c))
 	if err != nil {
 		response.Fail(c, err)
 		return

@@ -45,6 +45,18 @@ type Config struct {
 	DBMaxIdleConns    int
 	DBConnMaxLifetime time.Duration
 	DBConnMaxIdleTime time.Duration
+	// How often the pool's connections are pinged to keep them (and their cached
+	// prepared statements) alive. 0 turns the keepalive off.
+	DBKeepAliveInterval time.Duration
+	// Server-side cap on how long any single SQL statement may run. A runaway
+	// query gets cancelled by Postgres instead of pinning a pooled connection
+	// (and, behind a shared pooler, one of the precious client slots) forever.
+	// 0 disables the cap.
+	DBStatementTimeout time.Duration
+
+	// Largest accepted request body. Uploads (Excel imports) are buffered in
+	// memory while parsing, so this is also a memory-safety cap.
+	MaxBodyBytes int64
 
 	// Auth
 	JWTSecret    string
@@ -95,10 +107,29 @@ func Load() *Config {
 		DBSSLMode:  getEnv("DB_SSLMODE", "disable"),
 		DBTimeZone: getEnv("DB_TIMEZONE", "Asia/Ho_Chi_Minh"),
 
-		DBMaxOpenConns:    getEnvAsInt("DB_MAX_OPEN_CONNS", 15),
-		DBMaxIdleConns:    getEnvAsInt("DB_MAX_IDLE_CONNS", 5),
-		DBConnMaxLifetime: time.Duration(getEnvAsInt("DB_CONN_MAX_LIFETIME_MINUTES", 30)) * time.Minute,
-		DBConnMaxIdleTime: time.Duration(getEnvAsInt("DB_CONN_MAX_IDLE_MINUTES", 5)) * time.Minute,
+		DBMaxOpenConns: getEnvAsInt("DB_MAX_OPEN_CONNS", 15),
+		// Idle == open on purpose. Opening a connection to a hosted Postgres costs
+		// a TCP+TLS+auth handshake — measured at ~1s to a Supabase pooler — while
+		// reusing a warm one costs a single round-trip. Keeping fewer idle than open
+		// means every burst of parallel requests (the app fires 6-8 per screen)
+		// closes the surplus straight after use, so the next burst pays the handshake
+		// all over again. Warm connections cost the database almost nothing here.
+		DBMaxIdleConns:    getEnvAsInt("DB_MAX_IDLE_CONNS", getEnvAsInt("DB_MAX_OPEN_CONNS", 15)),
+		DBConnMaxLifetime: time.Duration(getEnvAsInt("DB_CONN_MAX_LIFETIME_MINUTES", 55)) * time.Minute,
+		// Long, for the same reason: an ops tool goes quiet for minutes at a time and
+		// must not pay a full handshake on the next click.
+		DBConnMaxIdleTime: time.Duration(getEnvAsInt("DB_CONN_MAX_IDLE_MINUTES", 30)) * time.Minute,
+		// Holding a connection open is not the same as it still working: hosted
+		// poolers and NAT gateways drop idle TCP sessions silently, so a pool told to
+		// keep connections for 30 minutes still hands out dead ones. 60s is well
+		// inside the shortest idle timeout we have to survive.
+		DBKeepAliveInterval: time.Duration(getEnvAsInt("DB_KEEPALIVE_SECONDS", 60)) * time.Second,
+		// 60s fits every normal query with a wide margin (list pages answer in
+		// milliseconds) while still cutting genuinely stuck statements loose. Raise
+		// it temporarily for heavy one-off migrations.
+		DBStatementTimeout: time.Duration(getEnvAsInt("DB_STATEMENT_TIMEOUT_SECONDS", 60)) * time.Second,
+
+		MaxBodyBytes: int64(getEnvAsInt("MAX_BODY_MB", 32)) << 20,
 
 		JWTSecret:    getEnv("JWT_SECRET", "change-me-in-production"),
 		JWTExpiresIn: time.Duration(getEnvAsInt("JWT_EXPIRES_HOURS", 72)) * time.Hour,
@@ -146,6 +177,16 @@ func Load() *Config {
 	}
 	if cfg.DBConnMaxIdleTime <= 0 {
 		cfg.DBConnMaxIdleTime = 5 * time.Minute
+	}
+	if cfg.DBStatementTimeout < 0 {
+		cfg.DBStatementTimeout = 0 // negative makes no sense; treat as disabled
+	}
+
+	// Guard the body cap: a non-positive value would reject every request (or,
+	// unbounded, allow a memory-exhausting upload), so fall back to 32 MB.
+	if cfg.MaxBodyBytes <= 0 {
+		log.Printf("config: MAX_BODY_MB invalid (must be > 0); using 32")
+		cfg.MaxBodyBytes = 32 << 20
 	}
 
 	return cfg
@@ -212,10 +253,16 @@ func (c *Config) Validate() error {
 
 // DSN builds the PostgreSQL connection string for GORM.
 func (c *Config) DSN() string {
-	return fmt.Sprintf(
+	dsn := fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s TimeZone=%s",
 		c.DBHost, c.DBPort, c.DBUser, c.DBPassword, c.DBName, c.DBSSLMode, c.DBTimeZone,
 	)
+	// Sent as a startup parameter so EVERY pooled connection gets the cap —
+	// a post-connect `SET` would only reach whichever connection ran it.
+	if c.DBStatementTimeout > 0 {
+		dsn += fmt.Sprintf(" options='-c statement_timeout=%d'", c.DBStatementTimeout.Milliseconds())
+	}
+	return dsn
 }
 
 // IsProduction reports whether the app is running in a production environment.

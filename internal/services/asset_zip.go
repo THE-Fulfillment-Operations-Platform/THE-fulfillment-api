@@ -37,35 +37,14 @@ func designAssetsForItem(it *models.OrderItem) []designAsset {
 	return out
 }
 
-// padSeq zero-pads the STT to at least 3 digits so files sort naturally
-// (001, 002, ... 010). A missing/zero sequence renders as 000.
-func padSeq(seq int) string {
-	if seq < 0 {
-		seq = 0
-	}
-	return fmt.Sprintf("%03d", seq)
-}
-
-// designSeq hands out the STT that prefixes design file names: it counts position
-// WITHIN THIS ARCHIVE — 001 for the first item, 002 for the next — so the numbers
-// run 1,2,3,… with no gaps and the designer can count files off against the list
-// they exported. (It deliberately does not use the order's DailySeq, which skips
-// around because it numbers the whole day's orders, not this download.)
-//
-// A number is only consumed once the item actually lands a file in the ZIP, so an
-// item whose every URL is broken doesn't burn an STT and leave a hole.
-type designSeq struct{ n int }
-
-// next is the number the current item would take; commit claims it.
-func (d *designSeq) next() int { return d.n + 1 }
-func (d *designSeq) commit()   { d.n++ }
-
-// sanitizeSKUForFile strips any character that could break a file name, keeping
+// sanitizeFileToken strips any character that could break a file name (or split
+// it across folders, e.g. the "/" in an internal code like 100001_1/3), keeping
 // only ASCII letters, digits, dash and underscore. Everything else becomes a
-// dash. Guarantees a non-empty token.
-func sanitizeSKUForFile(sku string) string {
+// dash. Guarantees a non-empty token. Used for both the SKU and the internal code
+// that make up a design file's name.
+func sanitizeFileToken(token string) string {
 	var b strings.Builder
-	for _, r := range strings.TrimSpace(sku) {
+	for _, r := range strings.TrimSpace(token) {
 		switch {
 		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
 			b.WriteRune(r)
@@ -94,18 +73,19 @@ func extFromURL(rawURL string) string {
 	return ext
 }
 
-// designFileName builds the "STT_SKU_QUANTITY[_SIDE].EXT" name required for design
-// downloads (e.g. 001_WDHWB-10IN_2_FRONT.pdf), where STT is the file's position in
-// this archive (see designSeq) and QUANTITY is the item's ordered quantity. Both
-// sides of one item share an STT — it numbers items, not files. SINGLE-side files
-// carry no side suffix. usedNames guards against overwriting when two files would
+// designFileName builds the "INTERNALCODE_SKU_QUANTITY[_SIDE].EXT" name required
+// for design downloads (e.g. 100001_1-3_WDHWB-10IN_2_FRONT.pdf), where INTERNALCODE
+// is the item's internal (QR) code and QUANTITY is the item's ordered quantity —
+// so a designer opening a file sees exactly which order/SKU it belongs to. Both
+// sides of one item share the same internal-code prefix; SINGLE-side files carry
+// no side suffix. usedNames guards against overwriting when two files would
 // otherwise collide, appending -2, -3, … The optional folder prefixes the name.
-func designFileName(folder string, seq int, sku string, qty int, side models.DesignSide, rawURL string, usedNames map[string]int) string {
+func designFileName(folder, internalCode, sku string, qty int, side models.DesignSide, rawURL string, usedNames map[string]int) string {
 	ext := extFromURL(rawURL)
 	if qty < 1 {
 		qty = 1
 	}
-	base := fmt.Sprintf("%s_%s_%d", padSeq(seq), sanitizeSKUForFile(sku), qty)
+	base := fmt.Sprintf("%s_%s_%d", sanitizeFileToken(internalCode), sanitizeFileToken(sku), qty)
 	switch side {
 	case models.DesignSideFront:
 		base += "_FRONT"

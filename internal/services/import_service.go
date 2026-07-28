@@ -54,7 +54,7 @@ type ImportRow struct {
 	ProductName      string  `json:"ProductName"`
 	VariantCode      string  `json:"VariantCode"`
 	SKU              string  `json:"SKU"`
-	ImageCode        string  `json:"ImageCode"` // "Mã ảnh"
+	ImageCode        string  `json:"ImageCode"`   // "Mã ảnh"
 	Design           string  `json:"Design"`      // legacy single/front design column (kept compatible)
 	FrontDesign      string  `json:"FrontDesign"` // front design link (new)
 	BackDesign       string  `json:"BackDesign"`  // back design link (optional, two-sided products)
@@ -147,21 +147,21 @@ var headerToField = map[string]func(*ImportRow, string){
 	"variantcode":    func(r *ImportRow, v string) { r.VariantCode = v },
 	"sku":            func(r *ImportRow, v string) { r.SKU = v },
 	// "Mã ảnh" — normalized VN header (diacritics preserved), plus safe aliases.
-	"mãảnh":            func(r *ImportRow, v string) { r.ImageCode = v },
-	"maanh":            func(r *ImportRow, v string) { r.ImageCode = v },
-	"imagecode":        func(r *ImportRow, v string) { r.ImageCode = v },
-	"design":           func(r *ImportRow, v string) { r.Design = v },
+	"mãảnh":     func(r *ImportRow, v string) { r.ImageCode = v },
+	"maanh":     func(r *ImportRow, v string) { r.ImageCode = v },
+	"imagecode": func(r *ImportRow, v string) { r.ImageCode = v },
+	"design":    func(r *ImportRow, v string) { r.Design = v },
 	// Front/Back design aliases. "Front Design (Link)" and "Back Design (Link)" are
 	// the new template columns; the legacy single "Design" column keeps working as
 	// the front/single side, so old templates import unchanged.
-	"frontdesign":     func(r *ImportRow, v string) { r.FrontDesign = v },
-	"frontdesignlink": func(r *ImportRow, v string) { r.FrontDesign = v },
-	"designfront":     func(r *ImportRow, v string) { r.FrontDesign = v },
-	"backdesign":      func(r *ImportRow, v string) { r.BackDesign = v },
-	"backdesignlink":  func(r *ImportRow, v string) { r.BackDesign = v },
-	"designback":      func(r *ImportRow, v string) { r.BackDesign = v },
-	"mockup":          func(r *ImportRow, v string) { r.Mockup = v },
-	"mockupurl":       func(r *ImportRow, v string) { r.Mockup = v },
+	"frontdesign":      func(r *ImportRow, v string) { r.FrontDesign = v },
+	"frontdesignlink":  func(r *ImportRow, v string) { r.FrontDesign = v },
+	"designfront":      func(r *ImportRow, v string) { r.FrontDesign = v },
+	"backdesign":       func(r *ImportRow, v string) { r.BackDesign = v },
+	"backdesignlink":   func(r *ImportRow, v string) { r.BackDesign = v },
+	"designback":       func(r *ImportRow, v string) { r.BackDesign = v },
+	"mockup":           func(r *ImportRow, v string) { r.Mockup = v },
+	"mockupurl":        func(r *ImportRow, v string) { r.Mockup = v },
 	"engravetext":      func(r *ImportRow, v string) { r.EngraveText = v },
 	"shippingname":     func(r *ImportRow, v string) { r.ShippingName = v },
 	"shippingaddress1": func(r *ImportRow, v string) { r.ShippingAddress1 = v },
@@ -370,7 +370,9 @@ func (s *ImportService) validateRow(rowNumber int, row ImportRow, skus map[strin
 // PREVIEW) and returns the per-row errors. Nothing is created in the orders
 // tables yet — that happens on Commit.
 func (s *ImportService) Preview(actor Actor, sellerID uint, source, filename string, rows []ImportRow) (*PreviewResult, error) {
-	if _, err := s.repo.Seller.FindByID(sellerID); err != nil {
+	// Existence check only — FindByID would also preload the seller's stores, a
+	// second round-trip for data this path never reads.
+	if ok, err := s.repo.Seller.Exists(sellerID); err != nil || !ok {
 		return nil, apperr.BadRequest("seller_id does not reference an existing seller")
 	}
 	if len(rows) == 0 {
@@ -511,13 +513,29 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 	created := 0
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
 		txRepo := repositories.New(tx)
-		for _, key := range orderKeys {
+
+		// Everything below is built in memory and written in batches. Creating an
+		// order at a time cost 5-6 statements PER ORDER (sequence, insert, code
+		// stamp, items, assets, notes); a thousand-order file meant thousands of
+		// round-trips, which against a remote database is tens of minutes. The
+		// batched shape is a fixed handful of statements per few hundred rows.
+		now := time.Now()
+		orderDate := AppDateString(now)
+		// One reservation for the whole file: we own the block ending at lastSeq.
+		lastSeq, seqErr := txRepo.Order.ReserveDailySeq(orderDate, len(orderKeys), now)
+		if seqErr != nil {
+			return seqErr
+		}
+		firstSeq := lastSeq - len(orderKeys) + 1
+
+		orders := make([]models.Order, 0, len(orderKeys))
+		for i, key := range orderKeys {
 			g := groups[key]
 			// StoreOrderID is a repeatable reference label, not a key: always create
 			// a fresh, independent order with its own system-generated internal code.
 			// The same store order id arriving again (a later import) simply becomes
 			// another order — never an overwrite of an existing one.
-			order := &models.Order{}
+			order := models.Order{}
 			order.StoreOrderID = key
 			order.StoreOrderRef = key
 			order.SellerID = *job.SellerID
@@ -539,37 +557,36 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 			// (Re)enter the review queue with a clean slate — must be reviewed
 			// before entering the design/production flow.
 			order.ReviewStatus = models.ReviewPending
-			order.ReviewedByID = nil
-			order.ReviewedAt = nil
-			order.ReviewNote = ""
 			order.CancellationStatus = models.CancellationNone
-			order.CancellationRequestedByID = nil
-			order.CancellationRequestedAt = nil
 			order.TrackingStatus = models.TrackingNone
 			order.ImportJobID = &job.ID
 			order.CreatedByID = actor.IDPtr()
-			// Assign the per-day sequence ("STT trong ngày") atomically before insert.
-			now := time.Now()
-			order.OrderDate = AppDateString(now)
-			seq, seqErr := txRepo.Order.NextDailySeq(order.OrderDate, now)
-			if seqErr != nil {
-				return seqErr
-			}
-			order.DailySeq = seq
-			if err := txRepo.Order.Create(order); err != nil {
-				return err
-			}
-			// The base code needs the DB-assigned id, so stamp it after Create.
-			order.InternalCode = internalBaseCode(order.ID)
-			if err := txRepo.Order.Update(order); err != nil {
-				return err
-			}
+			// "STT trong ngày" comes out of the reserved block, in file order.
+			order.OrderDate = orderDate
+			order.DailySeq = firstSeq + i
+			// internal_code is UNIQUE and can only be computed from the DB id, so the
+			// insert carries a placeholder that is already distinct per row —
+			// inserting a batch of blanks would collide on the unique index. The
+			// stamp right after the insert replaces every one of them, inside this
+			// same transaction, so a placeholder can never outlive the commit.
+			order.InternalCode = fmt.Sprintf("TMP-%d-%d", job.ID, i)
+			orders = append(orders, order)
+		}
+		if err := txRepo.Order.CreateMany(orders, importInsertBatch); err != nil {
+			return err
+		}
 
-			// Build the order's items up front (the internal code only needs the
-			// order id + position) and insert them in one statement; assets and
-			// required-attention notes follow as two more bulk inserts.
+		// The internal code is derived from the DB-assigned id, so it can only be
+		// stamped after the insert — one UPDATE per batch, not one per order.
+		if err := stampInternalCodes(tx, orders); err != nil {
+			return err
+		}
+
+		items := make([]models.OrderItem, 0, len(rows))
+		for i, key := range orderKeys {
+			g := groups[key]
+			orderID := orders[i].ID
 			total := len(g.items)
-			items := make([]models.OrderItem, 0, total)
 			for lineNo, row := range g.items {
 				skuCode := models.NormalizeCode(row.SKU)
 				var skuID *uint
@@ -582,9 +599,9 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 					designStatus = models.DesignMissing
 				}
 				items = append(items, models.OrderItem{
-					OrderID:        order.ID,
+					OrderID:        orderID,
 					LineNo:         lineNo + 1,
-					InternalCode:   itemInternalCode(order.ID, lineNo+1, total),
+					InternalCode:   itemInternalCode(orderID, lineNo+1, total),
 					SKUID:          skuID,
 					SKUCode:        skuCode,
 					ProductName:    row.ProductName,
@@ -599,64 +616,69 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 					DesignStatus:   designStatus,
 				})
 			}
-			if err := tx.Create(&items).Error; err != nil {
+		}
+		if len(items) > 0 {
+			if err := tx.CreateInBatches(&items, importInsertBatch).Error; err != nil {
 				return err
 			}
-			var assets []models.ItemAsset
-			var notes []models.Note
-			for i := range items {
-				item := &items[i]
-				// Record design assets with their side so the versioned history keeps
-				// front/back distinct. A one-sided item records a SINGLE design.
-				if item.DesignURL != "" {
-					side := models.DesignSideSingle
-					if item.BackDesignURL != "" {
-						side = models.DesignSideFront
-					}
-					assets = append(assets, models.ItemAsset{
-						OrderItemID: item.ID, AssetType: "DESIGN", Side: side, URL: item.DesignURL, Version: 1,
-						UploadedByID: actor.IDPtr(),
-					})
-				}
-				if item.BackDesignURL != "" {
-					assets = append(assets, models.ItemAsset{
-						OrderItemID: item.ID, AssetType: "DESIGN", Side: models.DesignSideBack, URL: item.BackDesignURL, Version: 1,
-						UploadedByID: actor.IDPtr(),
-					})
-				}
-				if item.MockupURL != "" {
-					assets = append(assets, models.ItemAsset{
-						OrderItemID: item.ID, AssetType: "MOCKUP", URL: item.MockupURL, Version: 1,
-						UploadedByID: actor.IDPtr(),
-					})
-				} else {
-					// Missing mockup is a blocking-for-QC issue → required attention.
-					notes = append(notes, models.Note{
-						Title:               "Thiếu Mockup URL",
-						Body:                "Item " + item.InternalCode + " chưa có mockup để QC đối chiếu.",
-						ReasonCode:          "ART_MISSING",
-						Severity:            models.SeverityHigh,
-						Status:              models.NoteOpen,
-						IsRequiredAttention: true,
-						EntityType:          models.EntityOrderItem,
-						EntityID:            &item.ID,
-						OwnerRole:           models.RoleDesigner,
-						CreatedByID:         actor.IDPtr(),
-					})
-				}
-			}
-			if len(assets) > 0 {
-				if err := tx.Create(&assets).Error; err != nil {
-					return err
-				}
-			}
-			if len(notes) > 0 {
-				if err := tx.Create(&notes).Error; err != nil {
-					return err
-				}
-			}
-			created++
 		}
+
+		// Assets and required-attention notes need the item ids, so they follow —
+		// again as two bulk inserts for the whole file rather than per order.
+		var assets []models.ItemAsset
+		var notes []models.Note
+		for i := range items {
+			item := &items[i]
+			// Record design assets with their side so the versioned history keeps
+			// front/back distinct. A one-sided item records a SINGLE design.
+			if item.DesignURL != "" {
+				side := models.DesignSideSingle
+				if item.BackDesignURL != "" {
+					side = models.DesignSideFront
+				}
+				assets = append(assets, models.ItemAsset{
+					OrderItemID: item.ID, AssetType: "DESIGN", Side: side, URL: item.DesignURL, Version: 1,
+					UploadedByID: actor.IDPtr(),
+				})
+			}
+			if item.BackDesignURL != "" {
+				assets = append(assets, models.ItemAsset{
+					OrderItemID: item.ID, AssetType: "DESIGN", Side: models.DesignSideBack, URL: item.BackDesignURL, Version: 1,
+					UploadedByID: actor.IDPtr(),
+				})
+			}
+			if item.MockupURL != "" {
+				assets = append(assets, models.ItemAsset{
+					OrderItemID: item.ID, AssetType: "MOCKUP", URL: item.MockupURL, Version: 1,
+					UploadedByID: actor.IDPtr(),
+				})
+			} else {
+				// Missing mockup is a blocking-for-QC issue → required attention.
+				notes = append(notes, models.Note{
+					Title:               "Thiếu Mockup URL",
+					Body:                "Item " + item.InternalCode + " chưa có mockup để QC đối chiếu.",
+					ReasonCode:          "ART_MISSING",
+					Severity:            models.SeverityHigh,
+					Status:              models.NoteOpen,
+					IsRequiredAttention: true,
+					EntityType:          models.EntityOrderItem,
+					EntityID:            &item.ID,
+					OwnerRole:           models.RoleDesigner,
+					CreatedByID:         actor.IDPtr(),
+				})
+			}
+		}
+		if len(assets) > 0 {
+			if err := tx.CreateInBatches(&assets, importInsertBatch).Error; err != nil {
+				return err
+			}
+		}
+		if len(notes) > 0 {
+			if err := tx.CreateInBatches(&notes, importInsertBatch).Error; err != nil {
+				return err
+			}
+		}
+		created = len(orders)
 
 		job.Status = models.ImportCommitted
 		job.CreatedCount = created
@@ -720,4 +742,37 @@ func looksLikeURL(v string) bool {
 func isValidHTTPURL(v string) bool {
 	u, err := url.ParseRequestURI(strings.TrimSpace(v))
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+// importInsertBatch is how many rows ride in one INSERT during a commit.
+const importInsertBatch = 200
+
+// stampInternalCodes writes the id-derived order code onto orders that were just
+// inserted. The code can only be computed after the insert (it comes from the DB
+// id), so it goes out as one UPDATE … CASE per batch rather than an UPDATE per
+// order — the difference between a handful of statements and one per order.
+func stampInternalCodes(tx *gorm.DB, orders []models.Order) error {
+	for start := 0; start < len(orders); start += importInsertBatch {
+		end := start + importInsertBatch
+		if end > len(orders) {
+			end = len(orders)
+		}
+		chunk := orders[start:end]
+		var sb strings.Builder
+		args := make([]interface{}, 0, len(chunk)*2+len(chunk))
+		sb.WriteString("UPDATE orders SET internal_code = CASE id")
+		ids := make([]uint, 0, len(chunk))
+		for i := range chunk {
+			sb.WriteString(" WHEN ? THEN ?")
+			args = append(args, chunk[i].ID, internalBaseCode(chunk[i].ID))
+			ids = append(ids, chunk[i].ID)
+			chunk[i].InternalCode = internalBaseCode(chunk[i].ID)
+		}
+		sb.WriteString(" END WHERE id IN ?")
+		args = append(args, ids)
+		if err := tx.Exec(sb.String(), args...).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }

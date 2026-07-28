@@ -11,7 +11,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Chặn cửa: build + test phải xanh thì mới được deploy. Code hỏng dừng ở đây,
+  # không bao giờ tới VPS.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lấy code
+        uses: actions/checkout@v4
+
+      - name: Cài Go theo go.mod
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build + vet + test
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./...
+
   deploy:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Lấy code

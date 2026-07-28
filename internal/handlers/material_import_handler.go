@@ -67,7 +67,12 @@ func (h *Handlers) MaterialImportPreview(c *gin.Context) {
 		rows = body.Rows
 	}
 
-	response.OK(c, h.svc.Catalog.PreviewMaterialImport(filename, rows, parseErrors))
+	pv, err := h.svc.Catalog.PreviewMaterialImport(filename, rows, parseErrors)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, pv)
 }
 
 // MaterialImportCommit applies the material-quota plan. OWNER-only.

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -29,6 +30,13 @@ import (
 
 func main() {
 	cfg := config.Load()
+	// JSON logs in production so a log collector (or plain grep on structured
+	// fields) can filter by status/path/request id. slog.SetDefault also routes
+	// the classic log.Printf callers through the same handler. Dev keeps the
+	// human-readable default.
+	if cfg.IsProduction() {
+		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+	}
 	log.Printf("%s starting (env=%s)", cfg.AppName, cfg.AppEnv)
 
 	// Refuse to boot on insecure production config (default JWT secret, demo
@@ -66,6 +74,15 @@ func main() {
 	// ago than the retention window, so GORM soft-deletes don't pile up forever.
 	purgeCtx, stopPurge := context.WithCancel(context.Background())
 	defer stopPurge()
+
+	// Keep the connection pool hot. The database is remote, so opening a connection
+	// costs a ~1s TCP+TLS+auth handshake, and the pool only ever opens them lazily —
+	// on a request that is already waiting. Pinging on a timer pays that in the
+	// background instead of charging it to whoever clicks first after a quiet spell.
+	if cfg.DBKeepAliveInterval > 0 {
+		go database.KeepWarm(purgeCtx, db, cfg.DBMaxIdleConns, cfg.DBKeepAliveInterval)
+	}
+
 	if cfg.PurgeEnabled {
 		maintenance.NewPurgeScheduler(repo.Admin, cfg.PurgeRetentionDays, cfg.PurgeInterval).Start(purgeCtx)
 		log.Printf("maintenance: purge scheduler on (retention=%dd, interval=%s)", cfg.PurgeRetentionDays, cfg.PurgeInterval)
@@ -81,6 +98,13 @@ func main() {
 		Addr:              ":" + cfg.Port,
 		Handler:           router,
 		ReadHeaderTimeout: 10 * time.Second,
+		// Generous on purpose: Read must fit an Excel import upload on a slow
+		// connection, Write must fit streaming a multi-hundred-MB design zip.
+		// They exist so a stalled/malicious client can't hold a connection (and
+		// its pooled DB slot upstream) forever — not to police normal requests.
+		ReadTimeout:  5 * time.Minute,
+		WriteTimeout: 15 * time.Minute,
+		IdleTimeout:  90 * time.Second,
 	}
 
 	// Run server with graceful shutdown.
@@ -101,5 +125,8 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Printf("forced shutdown: %v", err)
 	}
+	// Audit entries are written by a background worker; flush what is still queued
+	// before the process goes away.
+	svc.Audit.Drain(ctx)
 	log.Println("server stopped")
 }

@@ -277,11 +277,41 @@ func (r *StatusHistoryRepository) Create(h *models.StatusHistory) error { return
 
 // CreateBulk inserts many history rows in one statement — used by cascades that
 // previously wrote one INSERT per affected batch item.
+//
+// Careful with large row counts: the statement carries 7 placeholders PER ROW,
+// so a 1000-row call builds (and, with PrepareStmt on, makes Postgres parse) a
+// 7000-placeholder INSERT — measured at ~1.4s against a remote database, and
+// never reused because every distinct row count is a different statement. When
+// the rows can be derived from a table the database already has, prefer
+// RecordEntityTransition below, whose statement size is constant.
 func (r *StatusHistoryRepository) CreateBulk(rows []models.StatusHistory) error {
 	if len(rows) == 0 {
 		return nil
 	}
 	return r.db.Create(&rows).Error
+}
+
+// RecordEntityTransition writes one history row per row matched by `source`,
+// reading each entity's id and CURRENT status straight out of its own table via
+// INSERT…SELECT. Nothing but the note and actor crosses the wire, so the
+// statement stays a few hundred bytes — and one reusable prepared statement —
+// whether it covers 5 entities or 5000.
+//
+// `source` must select exactly two columns: the entity id and its from-status.
+// It has to be evaluated BEFORE the caller's UPDATE, while the old status is
+// still there; running both under the same WHERE guard inside one transaction
+// keeps history and the status change in lockstep even when a concurrent writer
+// decides some of the entities first.
+// `at` is bound as a parameter rather than read from the database's own clock,
+// so the statement runs unchanged on Postgres and on the SQLite the tests use,
+// and the history timestamp matches the one stamped on the entity itself.
+func (r *StatusHistoryRepository) RecordEntityTransition(
+	entityType models.EntityType, to string, actorID *uint, note string, at time.Time, source *gorm.DB,
+) error {
+	sql := `INSERT INTO status_histories
+		(created_at, updated_at, entity_type, entity_id, from_status, to_status, changed_by_id, note)
+		SELECT ?, ?, ?, src.entity_id, src.from_status, ?, ?, ? FROM (?) AS src`
+	return r.db.Exec(sql, at, at, string(entityType), to, actorID, note, source).Error
 }
 
 func (r *StatusHistoryRepository) ListForEntity(entityType models.EntityType, entityID uint) ([]models.StatusHistory, error) {

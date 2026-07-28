@@ -139,3 +139,77 @@ func TestBulkApprove_PartialSuccess(t *testing.T) {
 		t.Fatalf("re-approve should skip NOT_REVIEWABLE, got %+v", res2)
 	}
 }
+
+// TestBulkApprove_WritesStatusHistory pins down the history rows bulk approve
+// leaves behind. They are written by an INSERT…SELECT that reads each order's
+// pre-approval status out of the orders table (so approving 1000 orders doesn't
+// ship 1000 rows over the wire) — raw SQL that no other test would catch if it
+// silently wrote nothing, the wrong from_status, or a row per skipped order.
+func TestBulkApprove_WritesStatusHistory(t *testing.T) {
+	db := newImportDB(t)
+	imp := importSvc(db)
+	rsvc := reviewSvc(db)
+	actor := Actor{ID: 7, Role: models.RoleOps}
+
+	prev, err := imp.Preview(actor, 1, "XLSX", "f.xlsx", []ImportRow{row("H-1", "A"), row("H-2", "B")})
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if _, err := imp.Commit(actor, prev.ImportJobID); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	orders := loadOrders(t, db, 1)
+	if len(orders) != 2 {
+		t.Fatalf("want 2 orders, got %d", len(orders))
+	}
+	// Approving one of them beforehand means the bulk call has a NOT_REVIEWABLE
+	// order in the batch: history must not gain a row for it.
+	if _, err := rsvc.Approve(actor, orders[0].ID, ""); err != nil {
+		t.Fatalf("pre-approve: %v", err)
+	}
+
+	res, err := rsvc.BulkApprove(actor, BulkApproveInput{
+		OrderIDs: []uint{orders[0].ID, orders[1].ID}, Note: "duyệt hàng loạt",
+	})
+	if err != nil {
+		t.Fatalf("bulk approve: %v", err)
+	}
+	if res.ApprovedCount != 1 {
+		t.Fatalf("want 1 approved, got %d (skipped=%+v)", res.ApprovedCount, res.Skipped)
+	}
+
+	var rows []models.StatusHistory
+	if err := db.Where("entity_type = ? AND entity_id = ?", models.EntityOrder, orders[1].ID).
+		Order("id asc").Find(&rows).Error; err != nil {
+		t.Fatalf("load history: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want exactly 1 history row for the bulk-approved order, got %d (%+v)", len(rows), rows)
+	}
+	h := rows[0]
+	if h.FromStatus != string(models.ReviewPending) {
+		t.Fatalf("from_status: want %s, got %q", models.ReviewPending, h.FromStatus)
+	}
+	if h.ToStatus != string(models.ReviewApproved) {
+		t.Fatalf("to_status: want %s, got %q", models.ReviewApproved, h.ToStatus)
+	}
+	if h.ChangedByID == nil || *h.ChangedByID != actor.ID {
+		t.Fatalf("changed_by_id: want %d, got %v", actor.ID, h.ChangedByID)
+	}
+	if h.Note != "duyệt hàng loạt" {
+		t.Fatalf("note: got %q", h.Note)
+	}
+	if h.CreatedAt.IsZero() {
+		t.Fatal("created_at not stamped")
+	}
+
+	// The order that was already APPROVED before the bulk call must not have
+	// picked up a second history row from it.
+	var extra int64
+	db.Model(&models.StatusHistory{}).
+		Where("entity_type = ? AND entity_id = ?", models.EntityOrder, orders[0].ID).
+		Count(&extra)
+	if extra != 1 {
+		t.Fatalf("already-approved order: want its 1 single-approve row, got %d", extra)
+	}
+}

@@ -48,7 +48,7 @@ type Services struct {
 
 // New builds the service bundle.
 func New(repo *repositories.Repositories, jwt *auth.Manager, carrier shipping.Carrier) *Services {
-	audit := &AuditService{repo: repo}
+	audit := NewAuditService(repo)
 	return &Services{
 		Auth:         &AuthService{repo: repo, jwt: jwt, audit: audit},
 		User:         &UserService{repo: repo, audit: audit},

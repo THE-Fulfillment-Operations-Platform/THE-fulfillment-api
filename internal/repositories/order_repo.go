@@ -84,14 +84,36 @@ func (r *OrderRepository) UpdateTracking(id uint, fields map[string]interface{})
 // the order. Works on both Postgres and the sqlite test engine (both support
 // INSERT ... ON CONFLICT DO UPDATE ... RETURNING).
 func (r *OrderRepository) NextDailySeq(scopeDate string, now time.Time) (int, error) {
+	last, err := r.ReserveDailySeq(scopeDate, 1, now)
+	return last, err
+}
+
+// ReserveDailySeq allocates a BLOCK of n consecutive per-day sequences in one
+// statement and returns the LAST one, so the caller owns [last-n+1 … last]. An
+// import of a thousand orders reserves once instead of paying a round-trip per
+// order, and the single UPDATE keeps the allocation just as race-safe: two
+// concurrent imports get disjoint blocks.
+func (r *OrderRepository) ReserveDailySeq(scopeDate string, n int, now time.Time) (int, error) {
+	if n < 1 {
+		n = 1
+	}
 	var seq int
 	err := r.db.Raw(
-		`INSERT INTO daily_counters (scope_date, seq, updated_at) VALUES (?, 1, ?)
-		 ON CONFLICT (scope_date) DO UPDATE SET seq = daily_counters.seq + 1, updated_at = ?
+		`INSERT INTO daily_counters (scope_date, seq, updated_at) VALUES (?, ?, ?)
+		 ON CONFLICT (scope_date) DO UPDATE SET seq = daily_counters.seq + ?, updated_at = ?
 		 RETURNING seq`,
-		scopeDate, now, now,
+		scopeDate, n, now, n, now,
 	).Scan(&seq).Error
 	return seq, err
+}
+
+// CreateMany inserts orders in batches — one statement per batch instead of one
+// per order. IDs are filled in on the passed slice.
+func (r *OrderRepository) CreateMany(rows []models.Order, batchSize int) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	return r.db.CreateInBatches(rows, batchSize).Error
 }
 
 func (r *OrderRepository) FindByID(id uint) (*models.Order, error) {
@@ -126,6 +148,27 @@ func (r *OrderRepository) FindByIDsForReview(ids []uint) ([]models.Order, error)
 	return orders, err
 }
 
+// reviewApprovable is the guard shared by the bulk-approve UPDATE and the
+// history INSERT…SELECT that runs alongside it: only orders still pending
+// review / needing correction may be approved. Both statements applying the
+// identical predicate is what keeps the two in step when a concurrent writer
+// decides some of the orders in between.
+func reviewApprovable(db *gorm.DB, ids []uint) *gorm.DB {
+	return db.Model(&models.Order{}).
+		Where("id IN ? AND review_status IN ?", ids,
+			[]string{string(models.ReviewPending), string(models.ReviewNeedsFix)})
+}
+
+// ReviewApprovableSource selects (entity_id, from_status) for every order in ids
+// that bulk-approve is still allowed to approve. It feeds
+// StatusHistoryRepository.RecordEntityTransition, which turns it into history
+// rows inside the database — so approving 1000 orders never ships 1000 rows over
+// the wire. Must run BEFORE BulkSetReviewApproved, while from_status is still
+// the pre-approval value.
+func (r *OrderRepository) ReviewApprovableSource(ids []uint) *gorm.DB {
+	return reviewApprovable(r.db, ids).Select("id AS entity_id, review_status AS from_status")
+}
+
 // BulkSetReviewApproved flips several orders to APPROVED in a single UPDATE,
 // stamping the reviewer, note and timestamp. The review_status guard makes it
 // safe under concurrency: only orders still pending review / needing correction
@@ -134,9 +177,7 @@ func (r *OrderRepository) BulkSetReviewApproved(ids []uint, reviewerID *uint, no
 	if len(ids) == 0 {
 		return nil
 	}
-	return r.db.Model(&models.Order{}).
-		Where("id IN ? AND review_status IN ?", ids,
-			[]string{string(models.ReviewPending), string(models.ReviewNeedsFix)}).
+	return reviewApprovable(r.db, ids).
 		Updates(map[string]interface{}{
 			"review_status":  models.ReviewApproved,
 			"reviewed_by_id": reviewerID,
@@ -280,6 +321,8 @@ type ItemFilter struct {
 	StoreOrderID   string // partial, case-insensitive match on the parent order's store order id
 	SKUCode        string
 	InternalCode   string // partial, case-insensitive match on the item's internal (QR) code
+	Search         string // partial, case-insensitive match on EITHER internal_code OR sku_code (one search box)
+	HasDesignFile  bool   // only items that already have a front or back design file (design-download pick-list)
 	InternalStatus string
 	DesignStatus   string
 	ReviewStatus   string // exact match on the parent order's review_status
@@ -302,22 +345,31 @@ type ItemFilter struct {
 // the primary key has duplicates (e.g. many items share a SKU). Unknown keys fall
 // back to newest-first — this is the only place item sort SQL is built, so a
 // client-supplied value can never inject into the query.
+// itemOrderClause builds the ORDER BY for the item list.
+//
+// Every branch tie-breaks on (line_no ASC, id ASC), NOT on id DESC: the rows of
+// one order are its lines 1/3, 2/3, 3/3 and must read in that order whichever
+// column the user sorts by. Tie-breaking on id DESC printed them backwards
+// (3/3, 2/3, 1/3), which reads as broken numbering even though the data is fine.
 func itemOrderClause(sortBy, sortDir string) string {
 	dir := "DESC"
 	if strings.EqualFold(sortDir, "asc") {
 		dir = "ASC"
 	}
+	// Lines within an order: always ascending, and last in the key so it only ever
+	// breaks ties.
+	const lines = ", order_items.line_no ASC, order_items.id ASC"
 	switch strings.ToLower(strings.TrimSpace(sortBy)) {
 	case "sku", "sku_code":
-		return "order_items.sku_code " + dir + ", order_items.id DESC"
+		return "order_items.sku_code " + dir + lines
 	case "quantity", "qty":
-		return "order_items.quantity " + dir + ", order_items.id DESC"
+		return "order_items.quantity " + dir + lines
 	case "created_at", "date":
-		return "order_items.created_at " + dir + ", order_items.id DESC"
+		return "order_items.created_at " + dir + lines
 	case "stt", "daily_seq":
-		return "orders.order_date " + dir + ", orders.daily_seq " + dir + ", order_items.id DESC"
+		return "orders.order_date " + dir + ", orders.daily_seq " + dir + lines
 	case "internal_code":
-		return "order_items.internal_code " + dir + ", order_items.id DESC"
+		return "order_items.internal_code " + dir + lines
 	case "batch", "batch_code":
 		// An item can belong to several material batches. MIN(code) gives it one
 		// stable grouping key; unbatched items are placed after batched items in
@@ -327,9 +379,11 @@ func itemOrderClause(sortBy, sortDir string) string {
 			JOIN batches b ON b.id = bi.batch_id AND b.deleted_at IS NULL
 			WHERE bi.order_item_id = order_items.id AND bi.deleted_at IS NULL)`
 		return "CASE WHEN " + batchKey + " IS NULL THEN 1 ELSE 0 END ASC, " +
-			batchKey + " " + dir + ", order_items.id DESC"
+			batchKey + " " + dir + lines
 	default:
-		return "order_items.id DESC"
+		// Newest order first, but its lines still in order — the default view is a
+		// list of orders' items, not a stream of rows in insert order.
+		return "orders.created_at DESC, orders.id DESC" + lines
 	}
 }
 
@@ -463,6 +517,20 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 	}
 	if f.InternalCode != "" {
 		q = q.Where("order_items.internal_code ILIKE ?", "%"+f.InternalCode+"%")
+	}
+	if f.Search != "" {
+		// One search box over two columns. LOWER(col) LIKE LOWER(pattern) rather than
+		// ILIKE so the same clause is case-insensitive on both Postgres and the SQLite
+		// used in tests. Grouped so the OR can't leak into the surrounding AND chain
+		// (which would widen every other filter).
+		like := "%" + strings.ToLower(f.Search) + "%"
+		q = q.Where(r.db.Where("LOWER(order_items.internal_code) LIKE ?", like).
+			Or("LOWER(order_items.sku_code) LIKE ?", like))
+	}
+	if f.HasDesignFile {
+		// COALESCE guards against NULL (the columns have no NOT NULL constraint), so
+		// "has a file" means a non-empty front OR back design URL.
+		q = q.Where("COALESCE(order_items.design_url, '') <> '' OR COALESCE(order_items.back_design_url, '') <> ''")
 	}
 	if f.InternalStatus != "" {
 		q = q.Where("order_items.internal_status = ?", f.InternalStatus)
@@ -621,6 +689,33 @@ func (r *OrderItemRepository) DesignQueueMaterials(f ItemFilter) ([]MaterialBuck
 			"COUNT(DISTINCT order_items.id) AS item_count").
 		Group("m.id, m.code, m.name").
 		Order("m.code ASC").
+		Scan(&rows).Error
+	return rows, err
+}
+
+// SKUBucket groups design-queue items by SKU code, with how many items each covers.
+type SKUBucket struct {
+	SKUCode   string `json:"sku_code"`
+	SKUName   string `json:"sku_name"`
+	ItemCount int64  `json:"item_count"`
+}
+
+// DesignQueueSKUs lists only the SKU codes that actually have items in the design
+// queue, with counts — the same idea as DesignQueueMaterials, for the SKU filter.
+// Grouping is on order_items.sku_code (the code stamped on the line), so an item
+// whose SKU row was removed from the catalog still shows up; the name is joined in
+// when the SKU exists. Callers pass the queue's own filter with SKUCode cleared, so
+// the facet reflects the other active filters (batch, NVL) but never itself.
+func (r *OrderItemRepository) DesignQueueSKUs(f ItemFilter) ([]SKUBucket, error) {
+	var rows []SKUBucket
+	err := r.baseQuery(f).
+		Joins("LEFT JOIN skus s ON s.id = order_items.sku_id AND s.deleted_at IS NULL").
+		// MAX() rather than adding s.name to GROUP BY: one code maps to one SKU row,
+		// and this keeps the grouping key exactly what the filter sends back.
+		Select("order_items.sku_code AS sku_code, COALESCE(MAX(s.name), '') AS sku_name, " +
+			"COUNT(DISTINCT order_items.id) AS item_count").
+		Group("order_items.sku_code").
+		Order("order_items.sku_code ASC").
 		Scan(&rows).Error
 	return rows, err
 }

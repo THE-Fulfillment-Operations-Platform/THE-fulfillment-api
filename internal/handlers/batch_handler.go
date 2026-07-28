@@ -90,7 +90,7 @@ func (h *Handlers) DownloadBatchAssetsZip(c *gin.Context) {
 		return
 	}
 	// assets=design → design-only bundle (front/back, no mockup/print/cut) named
-	// per the STT_SKU_QUANTITY rule, in a Batch_<code>.zip. Anything else keeps the
+	// per the INTERNALCODE_SKU_QUANTITY rule, in a Batch_<code>.zip. Anything else keeps the
 	// full production bundle (backward compatible with the existing board button).
 	designOnly := c.Query("assets") == "design"
 	filename := "batch-" + strings.ReplaceAll(batch.Code, "#", "") + "-assets.zip"

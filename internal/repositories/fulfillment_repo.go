@@ -110,6 +110,42 @@ func (r *NoteRepository) Create(n *models.Note) error { return r.db.Create(n).Er
 func (r *NoteRepository) Update(n *models.Note) error { return r.db.Save(n).Error }
 func (r *NoteRepository) Delete(id uint) error        { return r.db.Delete(&models.Note{}, id).Error }
 
+// ListByIDs returns the notes with these ids, one query per chunk.
+func (r *NoteRepository) ListByIDs(ids []uint) ([]models.Note, error) {
+	var out []models.Note
+	for start := 0; start < len(ids); start += idChunk {
+		end := start + idChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		var rows []models.Note
+		if err := r.db.Where("id IN ?", ids[start:end]).Order("id asc").Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		out = append(out, rows...)
+	}
+	return out, nil
+}
+
+// DeleteMany soft-deletes notes by id — one statement per chunk instead of one
+// request per note. Notes reference other rows but nothing references a note, so
+// there is no in-use guard here: a note can always go.
+func (r *NoteRepository) DeleteMany(ids []uint) (int64, error) {
+	var affected int64
+	for start := 0; start < len(ids); start += idChunk {
+		end := start + idChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		res := r.db.Where("id IN ?", ids[start:end]).Delete(&models.Note{})
+		if res.Error != nil {
+			return affected, res.Error
+		}
+		affected += res.RowsAffected
+	}
+	return affected, nil
+}
+
 func (r *NoteRepository) FindByID(id uint) (*models.Note, error) {
 	var n models.Note
 	if err := r.db.First(&n, id).Error; err != nil {
@@ -138,6 +174,23 @@ func (r *NoteRepository) baseQuery(f NoteFilter) *gorm.DB {
 	return q
 }
 
+// CountByFilter reports how many notes match, ignoring pagination — the number a
+// "select everything that matches" action operates on.
+func (r *NoteRepository) CountByFilter(f NoteFilter) (int64, error) {
+	var n int64
+	err := r.baseQuery(f).Count(&n).Error
+	return n, err
+}
+
+// DeleteByFilter soft-deletes EVERY note matching the filter in one statement,
+// however many there are. This is what "xoá tất cả" runs on: shipping tens of
+// thousands of ids to the server just to name the same set would be slower, and
+// would silently truncate at whatever request/limit the client hits first.
+func (r *NoteRepository) DeleteByFilter(f NoteFilter) (int64, error) {
+	res := r.baseQuery(f).Delete(&models.Note{})
+	return res.RowsAffected, res.Error
+}
+
 func (r *NoteRepository) List(f NoteFilter) ([]models.Note, int64, error) {
 	var rows []models.Note
 	var total int64
@@ -158,4 +211,34 @@ func (r *AuditRepository) List(p Page) ([]models.AuditLog, int64, error) {
 	r.db.Model(&models.AuditLog{}).Count(&total)
 	err := r.db.Order("id desc").Limit(p.PageSize).Offset(p.Offset()).Find(&rows).Error
 	return rows, total, err
+}
+
+// ---------- Sidebar action counts ----------
+
+// ActionCounts is the "work waiting for you" tally behind the sidebar badges.
+type ActionCounts struct {
+	Review        int64 `json:"review"`        // orders pending review
+	Cancellations int64 `json:"cancellations"` // cancellation requests (orders + items)
+	Notes         int64 `json:"notes"`         // notes flagged for attention
+}
+
+// ActionCounts returns all three badge numbers in ONE round-trip. The sidebar
+// used to poll four list endpoints, each of which ran a COUNT and a SELECT and
+// held its own pooled connection — four HTTP requests and eight statements just
+// to draw three little numbers, repeated on every tab focus.
+func (r *Repositories) ActionCounts() (ActionCounts, error) {
+	var c ActionCounts
+	err := r.DB.Raw(`
+		SELECT
+			(SELECT COUNT(*) FROM orders
+			   WHERE deleted_at IS NULL AND review_status = ?) AS review,
+			(SELECT COUNT(*) FROM orders
+			   WHERE deleted_at IS NULL AND cancellation_status = ?)
+			+ (SELECT COUNT(*) FROM order_items
+			   WHERE deleted_at IS NULL AND cancellation_status = ?) AS cancellations,
+			(SELECT COUNT(*) FROM notes
+			   WHERE deleted_at IS NULL AND is_required_attention = true) AS notes`,
+		models.ReviewPending, models.CancellationRequested, models.CancellationRequested,
+	).Scan(&c).Error
+	return c, err
 }

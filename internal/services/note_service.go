@@ -2,6 +2,7 @@ package services
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -127,13 +128,121 @@ func (s *NoteService) Update(actor Actor, id uint, in NoteInput) (*models.Note, 
 	return n, nil
 }
 
+// NoteDeleteResult reports what a (bulk) note delete actually did.
+type NoteDeleteResult struct {
+	DeletedIDs []uint `json:"deleted_ids"`
+	// Ids that were already gone. Notes have no in-use guard — nothing references
+	// a note — so this is the only reason a delete skips one.
+	MissingIDs []uint `json:"missing_ids"`
+}
+
+// DeleteNotes removes many notes in one request: a couple of statements for the
+// whole selection instead of the three per note (read, delete, audit) that an
+// id-at-a-time API costs. A screen full of auto-generated warnings is exactly the
+// case this exists for.
+func (s *NoteService) DeleteNotes(actor Actor, ids []uint) (*NoteDeleteResult, error) {
+	clean := dedupeIDs(ids)
+	if len(clean) == 0 {
+		return nil, apperr.BadRequest("Chưa chọn ghi chú nào để xoá")
+	}
+	if len(clean) > maxDeleteIDs {
+		return nil, apperr.BadRequest(fmt.Sprintf("Chỉ xoá tối đa %d ghi chú mỗi lần", maxDeleteIDs))
+	}
+
+	found, err := s.repo.Note.ListByIDs(clean)
+	if err != nil {
+		return nil, apperr.Internal("lookup failed").Wrap(err)
+	}
+	exists := make(map[uint]bool, len(found))
+	for _, n := range found {
+		exists[n.ID] = true
+	}
+
+	res := &NoteDeleteResult{DeletedIDs: []uint{}, MissingIDs: []uint{}}
+	for _, id := range clean {
+		if exists[id] {
+			res.DeletedIDs = append(res.DeletedIDs, id)
+		} else {
+			res.MissingIDs = append(res.MissingIDs, id)
+		}
+	}
+	if len(res.DeletedIDs) > 0 {
+		if _, err := s.repo.Note.DeleteMany(res.DeletedIDs); err != nil {
+			return nil, apperr.Internal("could not delete notes").Wrap(err)
+		}
+	}
+
+	// One audit entry per action, not per row.
+	if len(res.DeletedIDs) == 1 {
+		id := res.DeletedIDs[0]
+		s.audit.Log(actor, "NOTE_DELETE", "note", &id, "Deleted note", nil)
+	} else if len(res.DeletedIDs) > 1 {
+		s.audit.Log(actor, "NOTE_DELETE_BULK", "note", nil,
+			fmt.Sprintf("Deleted %d notes", len(res.DeletedIDs)), nil)
+	}
+	return res, nil
+}
+
+// DeleteNotesMatching removes EVERY note matching the filter — what the screen's
+// "chọn tất cả" does. The client sends the filter it is looking at, not a list of
+// ids: the set can be tens of thousands of rows, and naming them one by one would
+// mean either a huge request or a silent cap at whatever the client managed to
+// load. Returns how many rows were actually removed.
+func (s *NoteService) DeleteNotesMatching(actor Actor, f repositories.NoteFilter) (int64, error) {
+	// Pagination is meaningless here — the action covers the whole match.
+	f.Page = repositories.Page{}
+	n, err := s.repo.Note.DeleteByFilter(f)
+	if err != nil {
+		return 0, apperr.Internal("could not delete notes").Wrap(err)
+	}
+	s.audit.Log(actor, "NOTE_DELETE_BULK", "note", nil,
+		fmt.Sprintf("Deleted %d notes matching filter (%s)", n, describeNoteFilter(f)), nil)
+	return n, nil
+}
+
+// describeNoteFilter renders the filter for the audit trail, so the log says what
+// a bulk delete actually covered rather than just a number.
+func describeNoteFilter(f repositories.NoteFilter) string {
+	parts := []string{}
+	if f.Status != "" {
+		parts = append(parts, "status="+f.Status)
+	}
+	if f.Severity != "" {
+		parts = append(parts, "severity="+f.Severity)
+	}
+	if f.EntityType != "" {
+		parts = append(parts, "entity_type="+f.EntityType)
+	}
+	if f.EntityID != nil {
+		parts = append(parts, fmt.Sprintf("entity_id=%d", *f.EntityID))
+	}
+	if f.RequiredAttention != nil {
+		parts = append(parts, fmt.Sprintf("required_attention=%t", *f.RequiredAttention))
+	}
+	if len(parts) == 0 {
+		return "no filter — all notes"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// CountNotesMatching reports the size of a filter's match, so the UI can offer
+// (and confirm) "select all N" with the real number rather than a page count.
+func (s *NoteService) CountNotesMatching(f repositories.NoteFilter) (int64, error) {
+	f.Page = repositories.Page{}
+	n, err := s.repo.Note.CountByFilter(f)
+	if err != nil {
+		return 0, apperr.Internal("lookup failed").Wrap(err)
+	}
+	return n, nil
+}
+
 func (s *NoteService) Delete(actor Actor, id uint) error {
-	if _, err := s.Get(id); err != nil {
+	res, err := s.DeleteNotes(actor, []uint{id})
+	if err != nil {
 		return err
 	}
-	if err := s.repo.Note.Delete(id); err != nil {
-		return apperr.Internal("could not delete note").Wrap(err)
+	if len(res.DeletedIDs) == 0 {
+		return apperr.NotFound("Note not found")
 	}
-	s.audit.Log(actor, "NOTE_DELETE", "note", &id, "Deleted note", nil)
 	return nil
 }

@@ -2,6 +2,7 @@ package services
 
 import (
 	"errors"
+	"fmt"
 
 	"gorm.io/gorm"
 
@@ -101,14 +102,99 @@ func (s *CatalogService) UpdateMaterial(actor Actor, id uint, in MaterialUpdateI
 	return m, nil
 }
 
+// MaterialDeleteSkip is one material a delete left alone, and why.
+type MaterialDeleteSkip struct {
+	ID     uint   `json:"id"`
+	Code   string `json:"code"`
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
+// MaterialDeleteResult reports what a (bulk) delete actually did.
+type MaterialDeleteResult struct {
+	DeletedIDs []uint               `json:"deleted_ids"`
+	Skipped    []MaterialDeleteSkip `json:"skipped"`
+}
+
+// maxDeleteIDs bounds one bulk delete request. Well above any real selection, low
+// enough that a runaway client can't ask for an unbounded statement.
+const maxDeleteIDs = 5000
+
+// DeleteMaterials removes many materials in one go: a handful of statements for
+// the whole set instead of the three-per-material an id-at-a-time API costs.
+// Materials still referenced by a SKU or a batch are skipped with a reason rather
+// than deleted — those rows point at the material by id, and soft-deleting it
+// would leave them pointing at something that no longer lists.
+func (s *CatalogService) DeleteMaterials(actor Actor, ids []uint) (*MaterialDeleteResult, error) {
+	clean := dedupeIDs(ids)
+	if len(clean) == 0 {
+		return nil, apperr.BadRequest("Chưa chọn nguyên vật liệu nào để xoá")
+	}
+	if len(clean) > maxDeleteIDs {
+		return nil, apperr.BadRequest(fmt.Sprintf("Chỉ xoá tối đa %d nguyên vật liệu mỗi lần", maxDeleteIDs))
+	}
+
+	found, err := s.repo.Material.ListByIDs(clean)
+	if err != nil {
+		return nil, apperr.Internal("lookup failed").Wrap(err)
+	}
+	byID := make(map[uint]*models.Material, len(found))
+	for i := range found {
+		byID[found[i].ID] = &found[i]
+	}
+	inUse, err := s.repo.Material.InUseIDs(clean)
+	if err != nil {
+		return nil, apperr.Internal("lookup failed").Wrap(err)
+	}
+
+	res := &MaterialDeleteResult{DeletedIDs: []uint{}, Skipped: []MaterialDeleteSkip{}}
+	deletable := make([]uint, 0, len(clean))
+	for _, id := range clean {
+		m := byID[id]
+		if m == nil {
+			res.Skipped = append(res.Skipped, MaterialDeleteSkip{ID: id, Reason: "không còn tồn tại"})
+			continue
+		}
+		if reason, used := inUse[id]; used {
+			res.Skipped = append(res.Skipped, MaterialDeleteSkip{
+				ID: id, Code: m.Code, Name: m.Name, Reason: reason,
+			})
+			continue
+		}
+		deletable = append(deletable, id)
+	}
+
+	if len(deletable) > 0 {
+		if _, err := s.repo.Material.DeleteMany(deletable); err != nil {
+			return nil, apperr.Internal("could not delete materials").Wrap(err)
+		}
+		res.DeletedIDs = deletable
+	}
+
+	// One audit entry for the action, not one per row — a bulk cleanup should read
+	// as a single event in the log.
+	if len(res.DeletedIDs) == 1 {
+		id := res.DeletedIDs[0]
+		s.audit.Log(actor, "MATERIAL_DELETE", "material", &id, "Deleted material "+byID[id].Code, nil)
+	} else if len(res.DeletedIDs) > 1 {
+		s.audit.Log(actor, "MATERIAL_DELETE_BULK", "material", nil,
+			fmt.Sprintf("Deleted %d materials (skipped %d)", len(res.DeletedIDs), len(res.Skipped)), nil)
+	}
+	return res, nil
+}
+
 func (s *CatalogService) DeleteMaterial(actor Actor, id uint) error {
-	if _, err := s.GetMaterial(id); err != nil {
+	res, err := s.DeleteMaterials(actor, []uint{id})
+	if err != nil {
 		return err
 	}
-	if err := s.repo.Material.Delete(id); err != nil {
-		return apperr.Internal("could not delete material").Wrap(err)
+	if len(res.DeletedIDs) == 0 {
+		skip := res.Skipped[0]
+		if skip.Reason == "không còn tồn tại" {
+			return apperr.NotFound("Material not found")
+		}
+		return apperr.Conflict("Không xoá được: nguyên vật liệu " + skip.Reason)
 	}
-	s.audit.Log(actor, "MATERIAL_DELETE", "material", &id, "Deleted material", nil)
 	return nil
 }
 
@@ -245,13 +331,129 @@ func (s *CatalogService) UpdateSKU(actor Actor, id uint, in SKUUpdateInput) (*mo
 	return full, nil
 }
 
+// SKUDeleteSkip is one SKU a delete left alone, and why.
+type SKUDeleteSkip struct {
+	ID     uint   `json:"id"`
+	Code   string `json:"code"`
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
+// SKUDeleteResult reports what a (bulk) SKU delete actually did.
+type SKUDeleteResult struct {
+	DeletedIDs []uint          `json:"deleted_ids"`
+	Skipped    []SKUDeleteSkip `json:"skipped"`
+}
+
+// dedupeIDs drops zeros and repeats while keeping the caller's order, so a bulk
+// response reads like the selection that produced it.
+func dedupeIDs(ids []uint) []uint {
+	seen := make(map[uint]bool, len(ids))
+	out := make([]uint, 0, len(ids))
+	for _, id := range ids {
+		if id == 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
+// DeleteSKUs removes many SKUs in one go — a handful of statements for the whole
+// set instead of the three-per-SKU an id-at-a-time API costs. A SKU an order line
+// points at is skipped with a reason: deleting it would leave the order pointing
+// at a SKU that no longer lists.
+func (s *CatalogService) DeleteSKUs(actor Actor, ids []uint) (*SKUDeleteResult, error) {
+	clean := dedupeIDs(ids)
+	if len(clean) == 0 {
+		return nil, apperr.BadRequest("Chưa chọn SKU nào để xoá")
+	}
+	if len(clean) > maxDeleteIDs {
+		return nil, apperr.BadRequest(fmt.Sprintf("Chỉ xoá tối đa %d SKU mỗi lần", maxDeleteIDs))
+	}
+
+	found, err := s.repo.SKU.ListByIDs(clean)
+	if err != nil {
+		return nil, apperr.Internal("lookup failed").Wrap(err)
+	}
+	byID := make(map[uint]*models.SKU, len(found))
+	for i := range found {
+		byID[found[i].ID] = &found[i]
+	}
+	inUse, err := s.repo.SKU.InUseIDs(clean)
+	if err != nil {
+		return nil, apperr.Internal("lookup failed").Wrap(err)
+	}
+
+	res := &SKUDeleteResult{DeletedIDs: []uint{}, Skipped: []SKUDeleteSkip{}}
+	deletable := make([]uint, 0, len(clean))
+	for _, id := range clean {
+		sku := byID[id]
+		if sku == nil {
+			res.Skipped = append(res.Skipped, SKUDeleteSkip{ID: id, Reason: "không còn tồn tại"})
+			continue
+		}
+		if reason, used := inUse[id]; used {
+			res.Skipped = append(res.Skipped, SKUDeleteSkip{
+				ID: id, Code: sku.Code, Name: sku.Name, Reason: reason,
+			})
+			continue
+		}
+		deletable = append(deletable, id)
+	}
+
+	if len(deletable) > 0 {
+		if _, err := s.repo.SKU.DeleteMany(deletable); err != nil {
+			return nil, apperr.Internal("could not delete SKUs").Wrap(err)
+		}
+		res.DeletedIDs = deletable
+	}
+
+	if len(res.DeletedIDs) == 1 {
+		id := res.DeletedIDs[0]
+		s.audit.Log(actor, "SKU_DELETE", "sku", &id, "Deleted SKU "+byID[id].Code, nil)
+	} else if len(res.DeletedIDs) > 1 {
+		s.audit.Log(actor, "SKU_DELETE_BULK", "sku", nil,
+			fmt.Sprintf("Deleted %d SKUs (skipped %d)", len(res.DeletedIDs), len(res.Skipped)), nil)
+	}
+	return res, nil
+}
+
 func (s *CatalogService) DeleteSKU(actor Actor, id uint) error {
-	if _, err := s.GetSKU(id); err != nil {
+	res, err := s.DeleteSKUs(actor, []uint{id})
+	if err != nil {
 		return err
 	}
-	if err := s.repo.SKU.Delete(id); err != nil {
-		return apperr.Internal("could not delete SKU").Wrap(err)
+	if len(res.DeletedIDs) == 0 {
+		skip := res.Skipped[0]
+		if skip.Reason == "không còn tồn tại" {
+			return apperr.NotFound("SKU not found")
+		}
+		return apperr.Conflict("Không xoá được: SKU " + skip.Reason)
 	}
-	s.audit.Log(actor, "SKU_DELETE", "sku", &id, "Deleted SKU", nil)
 	return nil
+}
+
+// SetSKUsActive turns many SKUs on/off in one statement per chunk. Hiding a
+// catalogue's worth of SKUs used to be one PUT (and a full SKU save) per row.
+func (s *CatalogService) SetSKUsActive(actor Actor, ids []uint, active bool) (int64, error) {
+	clean := dedupeIDs(ids)
+	if len(clean) == 0 {
+		return 0, apperr.BadRequest("Chưa chọn SKU nào")
+	}
+	if len(clean) > maxDeleteIDs {
+		return 0, apperr.BadRequest(fmt.Sprintf("Chỉ đổi tối đa %d SKU mỗi lần", maxDeleteIDs))
+	}
+	n, err := s.repo.SKU.SetActiveMany(clean, active)
+	if err != nil {
+		return 0, apperr.Internal("could not update SKUs").Wrap(err)
+	}
+	state := "hidden"
+	if active {
+		state = "active"
+	}
+	s.audit.Log(actor, "SKU_SET_ACTIVE_BULK", "sku", nil,
+		fmt.Sprintf("Set %d SKUs %s", n, state), nil)
+	return n, nil
 }

@@ -29,7 +29,6 @@ const (
 	matActionNoChange = "NOCHANGE"
 
 	errQuotaInvalid  = "QUOTA_INVALID"
-	errQuotaConflict = "QUOTA_CONFLICT"
 	errMaterialBlank = "MATERIAL_BLANK"
 )
 
@@ -61,12 +60,17 @@ type MaterialImportItem struct {
 	Name               string `json:"name"`
 	Code               string `json:"code"`
 	Exists             bool   `json:"exists"`
+	MaterialID         *uint  `json:"material_id"`         // the existing material this row updates
 	CurrentQuota       *int   `json:"current_quota"`       // existing quota if the material exists
 	Quota              *int   `json:"quota"`               // quota from file (nil = unlimited/blank)
 	CurrentDescription string `json:"current_description"` // existing description
 	Description        string `json:"description"`         // description from file (blank = leave as-is)
 	Action             string `json:"action"`              // CREATE | UPDATE | NOCHANGE
 	RowNumbers         []int  `json:"row_numbers"`
+	// NameVariant marks a material whose name also appears on another line of the
+	// file with a different quota/description — those are separate materials, not a
+	// contradiction, so the preview can flag them instead of silently merging.
+	NameVariant bool `json:"name_variant"`
 }
 
 type MaterialImportRowError struct {
@@ -74,6 +78,10 @@ type MaterialImportRowError struct {
 	Material  string `json:"material"`
 	ErrorCode string `json:"error_code"`
 	Message   string `json:"message"`
+	// Every file row this error covers. A quota conflict is caused by two or more
+	// rows at once, so reporting only RowNumber would send the owner to fix one
+	// half of a disagreement; the preview highlights all of them.
+	RowNumbers []int `json:"row_numbers,omitempty"`
 }
 
 type MaterialImportSummary struct {
@@ -82,6 +90,12 @@ type MaterialImportSummary struct {
 	Updates      int `json:"updates"` // materials whose quota and/or description changed
 	Unchanged    int `json:"unchanged"`
 	ErrorRows    int `json:"error_rows"`
+	// DuplicateRows counts the rows folded away because an earlier row carried the
+	// exact same Loại VL + Định mức + Mô tả (a real spreadsheet duplicate).
+	DuplicateRows int `json:"duplicate_rows"`
+	// NameVariants counts the materials that share a name with another line but
+	// differ in quota/description — kept apart on purpose, worth showing.
+	NameVariants int `json:"name_variants"`
 }
 
 type MaterialImportApplied struct {
@@ -200,19 +214,126 @@ func quotaEqual(a, b *int) bool {
 	return *a == *b
 }
 
-// analyzeMaterialImport groups rows by material name, detects quota conflicts
-// (same material spelled with different quotas) and derives per-material actions.
-func (s *CatalogService) analyzeMaterialImport(rows []MaterialQuotaRow, parseErrors []MaterialImportRowError) MaterialImportPreview {
+// materialInsertBatch is how many new materials ride in one INSERT.
+const materialInsertBatch = 200
+
+// mintMaterialCode hands out a free code for `base`, appending -2, -3… on
+// collision and remembering what it handed out. Cấp mã trong bộ nhớ,
+// resolved against an in-memory set so an import costs one code read in total
+// rather than a lookup per new material.
+func mintMaterialCode(taken map[string]bool, base string) string {
+	base = models.NormalizeCode(base)
+	if base == "" {
+		base = "MAT"
+	}
+	code := base
+	for i := 2; taken[code]; i++ {
+		suffix := "-" + strconv.Itoa(i)
+		trimTo := 32 - len(suffix)
+		b := base
+		if len(b) > trimTo {
+			b = strings.TrimRight(b[:trimTo], "-")
+		}
+		code = b + suffix
+	}
+	taken[code] = true
+	return code
+}
+
+// tripleKey identifies one material line by its three columns together — Loại VL
+// + Định mức + Mô tả. It is what "dòng trùng nhau" means for this import: only
+// rows equal in all three are the same material and get folded into one. Differ in
+// any one column and it is a separate material, kept apart.
+func tripleKey(name string, quota *int, desc string) string {
+	return strings.ToLower(strings.TrimSpace(name)) + "\x00" +
+		quotaKey(quota) + "\x00" +
+		strings.ToLower(strings.TrimSpace(desc))
+}
+
+// materialIndex is the slice of the catalog a single import touches, read in one
+// query up front. Matching every line against this map is what keeps an import of
+// a few hundred rows at a couple of round-trips instead of one per row — on a
+// hosted database that is the difference between a second and minutes.
+type materialIndex struct {
+	byName map[string][]*models.Material // key: lower(trim(name))
+}
+
+// loadMaterialIndex reads every catalog material carrying one of the file's names.
+// A failure is returned, never swallowed: pretending the catalog is empty would
+// turn every line into CREATE and duplicate the whole thing on commit.
+func (s *CatalogService) loadMaterialIndex(rows []MaterialQuotaRow) (*materialIndex, error) {
+	names := make([]string, 0, len(rows))
+	for _, r := range rows {
+		names = append(names, r.Material)
+	}
+	found, err := s.repo.Material.ListByNamesInsensitive(names)
+	if err != nil {
+		return nil, err
+	}
+	idx := &materialIndex{byName: make(map[string][]*models.Material, len(found))}
+	for i := range found {
+		m := &found[i]
+		key := strings.ToLower(strings.TrimSpace(m.Name))
+		idx.byName[key] = append(idx.byName[key], m)
+	}
+	return idx, nil
+}
+
+// matchCatalogMaterial picks which existing material (if any) a file line refers
+// to. Names are not unique in the catalog — this import can deliberately create
+// several materials sharing one — so the line is matched on its data, best fit
+// first: same quota AND description, then same quota, and only when the file uses
+// that name on a single line does a name-only match count (the plain "sửa định
+// mức của NVL này" case). Anything already claimed by an earlier line is off the
+// table, and no fit at all means the line is a new material.
+func (idx *materialIndex) matchCatalogMaterial(name string, quota *int, desc string, nameVariant bool, claimed map[uint]bool) *models.Material {
+	candidates := idx.byName[strings.ToLower(strings.TrimSpace(name))]
+	var best *models.Material
+	bestScore := 0
+	for _, c := range candidates {
+		if claimed[c.ID] {
+			continue
+		}
+		// A blank cell says "leave as is", so it matches whatever is stored.
+		quotaMatch := quota == nil || quotaEqual(c.ProductsPerUnit, quota)
+		descMatch := desc == "" || strings.EqualFold(strings.TrimSpace(c.Description), desc)
+		score := 0
+		switch {
+		case quotaMatch && descMatch:
+			score = 3
+		case quotaMatch:
+			score = 2
+		case !nameVariant:
+			score = 1
+		}
+		if score > bestScore {
+			best, bestScore = c, score
+		}
+	}
+	return best
+}
+
+// analyzeMaterialImport folds exact-duplicate rows together, keeps same-name rows
+// that differ in quota/description apart as separate materials, and derives the
+// per-material action against what is already in the catalog.
+func (s *CatalogService) analyzeMaterialImport(rows []MaterialQuotaRow, parseErrors []MaterialImportRowError) (MaterialImportPreview, error) {
+	idx, err := s.loadMaterialIndex(rows)
+	if err != nil {
+		return MaterialImportPreview{}, apperr.Internal("could not read materials").Wrap(err)
+	}
 	type agg struct {
 		name    string
-		keys    map[string]*int // distinct quota values seen for this material
-		desc    string          // first non-empty description across the rows
+		quota   *int
+		desc    string
 		rowNums []int
 	}
-	byName := map[string]*agg{}
+	byTriple := map[string]*agg{}
 	var order []string
+	// Which distinct triples each name covers, so a name used on several lines can
+	// be flagged (and matched against the catalog) without a second pass.
+	variantsByName := map[string]int{}
 	errs := append([]MaterialImportRowError{}, parseErrors...)
-	total := 0
+	total, duplicates := 0, 0
 
 	for _, r := range rows {
 		name := strings.TrimSpace(r.Material)
@@ -227,48 +348,48 @@ func (s *CatalogService) analyzeMaterialImport(rows []MaterialQuotaRow, parseErr
 			continue
 		}
 		total++
-		key := strings.ToLower(name)
-		a := byName[key]
+		key := tripleKey(name, r.Quota, desc)
+		a := byTriple[key]
 		if a == nil {
-			a = &agg{name: name, keys: map[string]*int{}}
-			byName[key] = a
+			a = &agg{name: name, quota: r.Quota, desc: desc}
+			byTriple[key] = a
 			order = append(order, key)
-		}
-		a.keys[quotaKey(r.Quota)] = r.Quota
-		if a.desc == "" && desc != "" {
-			a.desc = desc
+			variantsByName[strings.ToLower(name)]++
+		} else {
+			duplicates++ // same three columns as an earlier row → one material
 		}
 		a.rowNums = append(a.rowNums, r.RowNumber)
 	}
 
 	pv := MaterialImportPreview{}
-	sum := MaterialImportSummary{TotalRows: total}
+	sum := MaterialImportSummary{TotalRows: total, DuplicateRows: duplicates}
+	// A catalog material can back at most one line of the file: once a line claims
+	// it, the next line with the same name has to create its own material instead of
+	// both overwriting the same row.
+	claimed := map[uint]bool{}
 	for _, key := range order {
-		a := byName[key]
-		if len(a.keys) > 1 {
-			errs = append(errs, MaterialImportRowError{
-				RowNumber: a.rowNums[0], Material: a.name, ErrorCode: errQuotaConflict,
-				Message: "Cùng Loại VL nhưng định mức khác nhau giữa các dòng",
-			})
-			continue
-		}
-		var quota *int
-		for _, v := range a.keys {
-			quota = v
+		a := byTriple[key]
+		nameVariant := variantsByName[strings.ToLower(a.name)] > 1
+		if nameVariant {
+			sum.NameVariants++
 		}
 
-		exists := false
+		match := idx.matchCatalogMaterial(a.name, a.quota, a.desc, nameVariant, claimed)
+		exists := match != nil
+		var materialID *uint
 		var current *int
 		currentDesc := ""
-		if m, _ := s.repo.Material.FindByNameInsensitive(a.name); m != nil {
-			exists = true
-			current = m.ProductsPerUnit
-			currentDesc = m.Description
+		if exists {
+			claimed[match.ID] = true
+			id := match.ID
+			materialID = &id
+			current = match.ProductsPerUnit
+			currentDesc = match.Description
 		}
 
 		// Blank cells never overwrite: a blank quota/description only takes effect
 		// when creating a brand-new material, never to clear an existing value.
-		quotaChange := quota != nil && !quotaEqual(current, quota)
+		quotaChange := a.quota != nil && !quotaEqual(current, a.quota)
 		descChange := a.desc != "" && a.desc != currentDesc
 		action := matActionNoChange
 		switch {
@@ -283,26 +404,29 @@ func (s *CatalogService) analyzeMaterialImport(rows []MaterialQuotaRow, parseErr
 		}
 
 		pv.Items = append(pv.Items, MaterialImportItem{
-			Name: a.name, Code: materialCode(a.name), Exists: exists,
-			CurrentQuota: current, Quota: quota,
+			Name: a.name, Code: materialCode(a.name), Exists: exists, MaterialID: materialID,
+			CurrentQuota: current, Quota: a.quota,
 			CurrentDescription: currentDesc, Description: a.desc,
-			Action: action, RowNumbers: a.rowNums,
+			Action: action, RowNumbers: a.rowNums, NameVariant: nameVariant,
 		})
 	}
 
 	sum.ErrorRows = len(errs)
 	pv.Errors = errs
 	pv.Summary = sum
-	return pv
+	return pv, nil
 }
 
 // ---------- Preview / Commit ----------
 
 // PreviewMaterialImport analyses rows and returns the plan (nothing is written).
-func (s *CatalogService) PreviewMaterialImport(filename string, rows []MaterialQuotaRow, parseErrors []MaterialImportRowError) *MaterialImportPreview {
-	pv := s.analyzeMaterialImport(rows, parseErrors)
+func (s *CatalogService) PreviewMaterialImport(filename string, rows []MaterialQuotaRow, parseErrors []MaterialImportRowError) (*MaterialImportPreview, error) {
+	pv, err := s.analyzeMaterialImport(rows, parseErrors)
+	if err != nil {
+		return nil, err
+	}
 	pv.Filename = filename
-	return &pv
+	return &pv, nil
 }
 
 // CommitMaterialImport applies the plan: find-or-create each material and set its
@@ -312,43 +436,61 @@ func (s *CatalogService) CommitMaterialImport(actor Actor, rows []MaterialQuotaR
 	if actor.Role != models.RoleOwner {
 		return nil, apperr.Forbidden("Chỉ OWNER được nhập định mức nguyên vật liệu")
 	}
-	pv := s.analyzeMaterialImport(rows, nil)
+	pv, err := s.analyzeMaterialImport(rows, nil)
+	if err != nil {
+		return nil, err
+	}
 
 	applied := MaterialImportApplied{}
-	err := s.repo.DB.Transaction(func(tx *gorm.DB) error {
+	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
 		txRepo := repositories.New(tx)
+		// Every code in one read, then mint in memory: probing the database per new
+		// material turned a 200-material file into 200+ round-trips.
+		existingCodes, err := txRepo.Material.AllCodes()
+		if err != nil {
+			return err
+		}
+		taken := make(map[string]bool, len(existingCodes))
+		for _, c := range existingCodes {
+			taken[models.NormalizeCode(c)] = true
+		}
+
+		var toCreate []models.Material
 		for _, it := range pv.Items {
 			switch it.Action {
 			case matActionCreate:
-				code := uniqueMaterialCode(txRepo, it.Code)
-				m := &models.Material{Code: code, Name: it.Name, Description: it.Description, ProductsPerUnit: it.Quota}
-				if err := txRepo.Material.Create(m); err != nil {
-					return err
-				}
+				toCreate = append(toCreate, models.Material{
+					Code: mintMaterialCode(taken, it.Code), Name: it.Name,
+					Description: it.Description, ProductsPerUnit: it.Quota,
+				})
 				applied.Created++
 			case matActionUpdate:
-				m, err := txRepo.Material.FindByNameInsensitive(it.Name)
-				if err != nil {
-					return err
-				}
-				if m == nil {
+				// By ID, not by name: several materials may share a name, and analyze
+				// already decided which one this line belongs to. A name lookup here
+				// would write to whichever row the DB returned first. Only the columns
+				// the file actually fills are written — a blank cell never clears a value.
+				if it.MaterialID == nil {
 					continue
 				}
-				// Blank cells never clear an existing value — only overwrite when the
-				// file actually provides one.
+				fields := map[string]any{}
 				if it.Quota != nil {
-					m.ProductsPerUnit = it.Quota
+					fields["products_per_unit"] = *it.Quota
 				}
 				if it.Description != "" {
-					m.Description = it.Description
+					fields["description"] = it.Description
 				}
-				if err := txRepo.Material.Update(m); err != nil {
+				if len(fields) == 0 {
+					continue
+				}
+				if err := tx.Model(&models.Material{}).Where("id = ?", *it.MaterialID).
+					Updates(fields).Error; err != nil {
 					return err
 				}
 				applied.Updated++
 			}
 		}
-		return nil
+		// One INSERT per batch instead of one per material.
+		return txRepo.Material.CreateMany(toCreate, materialInsertBatch)
 	})
 	if err != nil {
 		return nil, apperr.Internal("could not commit material import").Wrap(err)

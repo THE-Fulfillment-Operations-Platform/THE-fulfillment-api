@@ -115,3 +115,11 @@ func AbortTooManyRequests(c *gin.Context, message string) {
 		Error:   &ErrorBody{Code: "TOO_MANY_REQUESTS", Message: message},
 	})
 }
+
+// AbortPayloadTooLarge is a helper for the body-size-limit middleware.
+func AbortPayloadTooLarge(c *gin.Context, message string) {
+	c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, Envelope{
+		Success: false,
+		Error:   &ErrorBody{Code: "PAYLOAD_TOO_LARGE", Message: message},
+	})
+}
