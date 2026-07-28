@@ -69,10 +69,13 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	r.Use(middleware.CORS(cfg.CORSAllowedOrigins))
 	r.Use(middleware.BodyLimit(cfg.MaxBodyBytes))
 
-	// Health + docs (public).
-	r.GET("/health", func(c *gin.Context) {
+	// Health + docs (public). HEAD is registered too: uptime monitors and load
+	// balancers commonly probe with HEAD, which would otherwise 404.
+	health := func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"status": "ok", "service": cfg.AppName}})
-	})
+	}
+	r.GET("/health", health)
+	r.HEAD("/health", health)
 	r.GET("/openapi.yaml", docs.Spec)
 	r.GET("/docs", docs.UI)
 
