@@ -1,6 +1,7 @@
 package services
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -25,6 +26,29 @@ func newRollupDB(t *testing.T) *gorm.DB {
 	return db
 }
 
+// seedOrderItems creates the order lines that the batch parts point at, with the
+// given ids. The status roll-up joins through them — a part whose line was
+// cancelled is not work the batch is waiting on — so a fixture without them has
+// no countable parts at all.
+func seedOrderItems(db *gorm.DB, t *testing.T, ids ...uint) {
+	t.Helper()
+	order := &models.Order{InternalCode: "O-1", StoreOrderID: "S-1", SellerID: 1}
+	if err := db.Create(order).Error; err != nil {
+		t.Fatalf("seed order: %v", err)
+	}
+	for _, id := range ids {
+		it := &models.OrderItem{
+			Base: models.Base{ID: id}, OrderID: order.ID,
+			InternalCode: fmt.Sprintf("I-%d", id), SKUCode: "SKU-1", Quantity: 1,
+			InternalStatus: models.StatusPending, DesignStatus: models.DesignPending,
+			CancellationStatus: models.CancellationNone,
+		}
+		if err := db.Create(it).Error; err != nil {
+			t.Fatalf("seed order item %d: %v", id, err)
+		}
+	}
+}
+
 func batchItemStatus(db *gorm.DB, batchID uint, orderItemID uint, to models.InternalStatus, t *testing.T) {
 	t.Helper()
 	var bi models.BatchItem
@@ -47,6 +71,7 @@ func TestRecomputeBatchStatus_RollsUpFromItems(t *testing.T) {
 	actor := Actor{ID: 1}
 
 	// A batch at CUT with two items, both CUT.
+	seedOrderItems(db, t, 1, 2)
 	batch := &models.Batch{Code: "B-1", Status: models.StatusCut}
 	if err := db.Create(batch).Error; err != nil {
 		t.Fatalf("seed batch: %v", err)
@@ -95,6 +120,7 @@ func TestRecomputeBatchStatus_SingleItem(t *testing.T) {
 	db := newRollupDB(t)
 	repo := repositories.New(db)
 
+	seedOrderItems(db, t, 1)
 	batch := &models.Batch{Code: "B-2", Status: models.StatusCut}
 	if err := db.Create(batch).Error; err != nil {
 		t.Fatalf("seed batch: %v", err)
@@ -111,5 +137,46 @@ func TestRecomputeBatchStatus_SingleItem(t *testing.T) {
 	got, _ := repo.Batch.FindByID(batch.ID)
 	if got.Status != models.StatusQCPassed {
 		t.Fatalf("single QC'd item → want batch QC_PASSED, got %s", got.Status)
+	}
+}
+
+// TestRecomputeBatchStatus_IgnoresCancelledItems locks in the cancellation half
+// of the roll-up: once a line is cancelled its part is not work anyone will do,
+// so the batch must be free to advance on what is left. Without this a single
+// cancelled product would pin its batch at PENDING forever.
+func TestRecomputeBatchStatus_IgnoresCancelledItems(t *testing.T) {
+	db := newRollupDB(t)
+	repo := repositories.New(db)
+
+	seedOrderItems(db, t, 1, 2)
+	batch := &models.Batch{Code: "B-3", Status: models.StatusPrinted}
+	if err := db.Create(batch).Error; err != nil {
+		t.Fatalf("seed batch: %v", err)
+	}
+	if err := db.Create(&[]models.BatchItem{
+		{BatchID: batch.ID, OrderItemID: 1, MaterialID: 1, Status: models.StatusQCPassed},
+		{BatchID: batch.ID, OrderItemID: 2, MaterialID: 1, Status: models.StatusPending},
+	}).Error; err != nil {
+		t.Fatalf("seed items: %v", err)
+	}
+
+	// The lagging part still holds the batch back while its line is live.
+	if err := recomputeBatchStatus(repo, batch.ID, Actor{ID: 1}); err != nil {
+		t.Fatalf("recompute (live): %v", err)
+	}
+	if got, _ := repo.Batch.FindByID(batch.ID); got.Status != models.StatusPending {
+		t.Fatalf("live pending part → want batch PENDING, got %s", got.Status)
+	}
+
+	// Cancel that line → the batch is done with what remains.
+	if err := db.Model(&models.OrderItem{}).Where("id = ?", 2).
+		Update("cancellation_status", models.CancellationApproved).Error; err != nil {
+		t.Fatalf("cancel item: %v", err)
+	}
+	if err := recomputeBatchStatus(repo, batch.ID, Actor{ID: 1}); err != nil {
+		t.Fatalf("recompute (cancelled): %v", err)
+	}
+	if got, _ := repo.Batch.FindByID(batch.ID); got.Status != models.StatusQCPassed {
+		t.Fatalf("cancelled part ignored → want batch QC_PASSED, got %s", got.Status)
 	}
 }

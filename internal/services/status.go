@@ -70,6 +70,119 @@ func recomputeBatchStatus(repo *repositories.Repositories, batchID uint, actor A
 	return nil
 }
 
+// recomputeBatchStatuses is recomputeBatchStatus over a set of batches, at a
+// fixed cost instead of one roll-up each.
+//
+// A combo product's parts live in one batch per material, so a single QC scan can
+// move two or three batches at once; the per-batch version spent four round trips
+// apiece and the operator paid for all of them before the screen came back. Here
+// the whole set costs one read of the parts, one read of the batches, one update
+// per distinct resulting status (at most four) and one history insert — then the
+// same again for whatever parents are affected.
+//
+// Semantics match the single version exactly: a batch with no live parts is left
+// untouched, a batch that does not move writes no history, and a child that moves
+// rolls up to its parent.
+func recomputeBatchStatuses(repo *repositories.Repositories, batchIDs []uint, actor Actor) error {
+	if len(batchIDs) == 0 {
+		return nil
+	}
+	partStatuses, err := repo.Batch.BatchItemStatusesForBatches(batchIDs)
+	if err != nil {
+		return err
+	}
+	batches, err := repo.Batch.FindLiteMany(batchIDs)
+	if err != nil {
+		return err
+	}
+
+	var history []models.StatusHistory
+	moved := map[models.InternalStatus][]uint{}
+	parents := map[uint]bool{}
+	for _, b := range batches {
+		parts, ok := partStatuses[b.ID]
+		if !ok || len(parts) == 0 {
+			continue // no live parts — nothing to derive from
+		}
+		newStatus := deriveItemStatusesFromRanks(parts)
+		if newStatus == b.Status {
+			continue
+		}
+		moved[newStatus] = append(moved[newStatus], b.ID)
+		history = append(history, models.StatusHistory{
+			EntityType: models.EntityBatch, EntityID: b.ID,
+			FromStatus: string(b.Status), ToStatus: string(newStatus),
+			ChangedByID: actor.IDPtr(), Note: "derived from batch items",
+		})
+		if b.ParentBatchID != nil {
+			parents[*b.ParentBatchID] = true
+		}
+	}
+	for status, ids := range moved {
+		if err := repo.Batch.UpdateStatusColumns(ids, status); err != nil {
+			return err
+		}
+	}
+	if err := repo.Status.CreateBulk(history); err != nil {
+		return err
+	}
+
+	if len(parents) == 0 {
+		return nil
+	}
+	parentIDs := make([]uint, 0, len(parents))
+	for id := range parents {
+		parentIDs = append(parentIDs, id)
+	}
+	return recomputeParentBatchStatuses(repo, parentIDs, actor)
+}
+
+// recomputeParentBatchStatuses is recomputeParentBatchStatus over a set, on the
+// same fixed budget as recomputeBatchStatuses above.
+func recomputeParentBatchStatuses(repo *repositories.Repositories, parentIDs []uint, actor Actor) error {
+	if len(parentIDs) == 0 {
+		return nil
+	}
+	childStatuses, err := repo.Batch.ChildBatchStatusesFor(parentIDs)
+	if err != nil {
+		return err
+	}
+	parents, err := repo.Batch.FindLiteMany(parentIDs)
+	if err != nil {
+		return err
+	}
+
+	var history []models.StatusHistory
+	moved := map[models.InternalStatus][]uint{}
+	for _, p := range parents {
+		children, ok := childStatuses[p.ID]
+		if !ok || len(children) == 0 {
+			continue
+		}
+		newStatus := models.StatusQCPassed
+		for _, s := range children {
+			if s.Rank() < newStatus.Rank() {
+				newStatus = s
+			}
+		}
+		if newStatus == p.Status {
+			continue
+		}
+		moved[newStatus] = append(moved[newStatus], p.ID)
+		history = append(history, models.StatusHistory{
+			EntityType: models.EntityBatch, EntityID: p.ID,
+			FromStatus: string(p.Status), ToStatus: string(newStatus),
+			ChangedByID: actor.IDPtr(), Note: "derived from child batches",
+		})
+	}
+	for status, ids := range moved {
+		if err := repo.Batch.UpdateStatusColumns(ids, status); err != nil {
+			return err
+		}
+	}
+	return repo.Status.CreateBulk(history)
+}
+
 // recomputeParentBatchStatus recalculates and persists a parent batch's status as
 // the least-advanced status across its child batches — the parent reaches
 // QC_PASSED only when every child has. Called whenever a child's status changes
@@ -104,9 +217,12 @@ func recomputeParentBatchStatus(repo *repositories.Repositories, parentID uint, 
 }
 
 // recomputeOrderItemStatus recalculates and persists one item's internal status
-// from its batch parts — the single-item convenience over the bulk version.
-func recomputeOrderItemStatus(repo *repositories.Repositories, itemID uint, actor Actor) error {
-	return recomputeOrderItemStatuses(repo, []uint{itemID}, actor)
+// from its batch parts and returns the status it landed on — the single-item
+// convenience over the bulk version. Callers that already hold the item use the
+// returned status to refresh it in place instead of re-reading it.
+func recomputeOrderItemStatus(repo *repositories.Repositories, itemID uint, actor Actor) (models.InternalStatus, error) {
+	final, err := recomputeOrderItemStatuses(repo, []uint{itemID}, actor)
+	return final[itemID], err
 }
 
 // recomputeOrderItemStatuses recalculates and persists the internal status of
@@ -114,17 +230,22 @@ func recomputeOrderItemStatus(repo *repositories.Repositories, itemID uint, acto
 // items' current statuses, then a targeted status update per changed item and a
 // single bulk history insert. Replaces the per-item recompute that used to load
 // each item with five association preloads.
-func recomputeOrderItemStatuses(repo *repositories.Repositories, itemIDs []uint, actor Actor) error {
+//
+// The returned map carries the status EVERY known item ended on, unchanged ones
+// included, so a caller holding the item in memory never has to re-read it just
+// to learn what it became. Items missing from the map were not found.
+func recomputeOrderItemStatuses(repo *repositories.Repositories, itemIDs []uint, actor Actor) (map[uint]models.InternalStatus, error) {
+	final := map[uint]models.InternalStatus{}
 	if len(itemIDs) == 0 {
-		return nil
+		return final, nil
 	}
 	partStatuses, err := repo.Batch.BatchItemStatusesForOrderItems(itemIDs)
 	if err != nil {
-		return err
+		return final, err
 	}
 	current, err := repo.OrderItem.InternalStatusByIDs(itemIDs)
 	if err != nil {
-		return err
+		return final, err
 	}
 	var history []models.StatusHistory
 	// Items are grouped by the status they land on, so the writes below are one
@@ -136,6 +257,7 @@ func recomputeOrderItemStatuses(repo *repositories.Repositories, itemIDs []uint,
 			continue // item not found (deleted) — nothing to roll up
 		}
 		newStatus := deriveItemStatusesFromRanks(partStatuses[id])
+		final[id] = newStatus
 		if newStatus == cur {
 			continue
 		}
@@ -148,10 +270,10 @@ func recomputeOrderItemStatuses(repo *repositories.Repositories, itemIDs []uint,
 	}
 	for status, ids := range moved {
 		if err := repo.OrderItem.UpdateInternalStatuses(ids, status); err != nil {
-			return err
+			return final, err
 		}
 	}
-	return repo.Status.CreateBulk(history)
+	return final, repo.Status.CreateBulk(history)
 }
 
 // deriveItemStatusesFromRanks is deriveItemStatusFromBatchItems over a bare

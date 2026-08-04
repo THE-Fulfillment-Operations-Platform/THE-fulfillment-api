@@ -7,6 +7,7 @@ import (
 	"the-fulfillment/backend/internal/models"
 	"the-fulfillment/backend/internal/repositories"
 	"the-fulfillment/backend/internal/shipping"
+	"the-fulfillment/backend/internal/tracking24h"
 )
 
 // Actor is the authenticated user performing an action. It is threaded through
@@ -44,11 +45,23 @@ type Services struct {
 	Note         *NoteService
 	Audit        *AuditService
 	Admin        *AdminService
+	// TrackingSync is always present; it reports Enabled()=false when no provider
+	// is configured, so callers never branch on nil.
+	TrackingSync *TrackingSyncService
+}
+
+// TrackingOptions configures the 24hTrack shipment-tracking integration. A nil
+// Client leaves the integration off and tracking stays a manual field.
+type TrackingOptions struct {
+	Client  *tracking24h.Client
+	Tag     string
+	Resolve bool
 }
 
 // New builds the service bundle.
-func New(repo *repositories.Repositories, jwt *auth.Manager, carrier shipping.Carrier) *Services {
+func New(repo *repositories.Repositories, jwt *auth.Manager, carrier shipping.Carrier, track TrackingOptions) *Services {
 	audit := NewAuditService(repo)
+	trackingSync := NewTrackingSyncService(repo, audit, track.Client, track.Tag, track.Resolve)
 	return &Services{
 		Auth:         &AuthService{repo: repo, jwt: jwt, audit: audit},
 		User:         &UserService{repo: repo, audit: audit},
@@ -56,13 +69,14 @@ func New(repo *repositories.Repositories, jwt *auth.Manager, carrier shipping.Ca
 		Catalog:      &CatalogService{repo: repo, audit: audit},
 		Import:       &ImportService{repo: repo, audit: audit},
 		MasterImport: &MasterImportService{repo: repo, audit: audit},
-		Order:        &OrderService{repo: repo, audit: audit},
+		Order:        &OrderService{repo: repo, audit: audit, tracking: trackingSync},
 		Review:       &ReviewService{repo: repo, audit: audit},
 		Batch:        &BatchService{repo: repo, audit: audit},
 		QC:           &QCService{repo: repo, audit: audit},
-		Packing:      &PackingService{repo: repo, audit: audit, carrier: carrier},
+		Packing:      &PackingService{repo: repo, audit: audit, carrier: carrier, tracking: trackingSync},
 		Note:         &NoteService{repo: repo, audit: audit},
 		Audit:        audit,
 		Admin:        &AdminService{repo: repo, audit: audit},
+		TrackingSync: trackingSync,
 	}
 }

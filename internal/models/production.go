@@ -20,6 +20,18 @@ type Batch struct {
 	Items []BatchItem `json:"items,omitempty" gorm:"foreignKey:BatchID"`
 	Links []BatchLink `json:"links,omitempty" gorm:"foreignKey:BatchID"`
 
+	// ClosedAt marks a production run that has nothing left to produce because
+	// every piece it made was scrapped at QC. Without it such a batch sits on the
+	// board forever showing zero items and whatever status it had reached — it can
+	// never advance (no live parts) and never disappear. Re-making the product
+	// happens in a NEW batch, so this one is simply finished.
+	ClosedAt    *time.Time `json:"closed_at,omitempty" gorm:"index"`
+	CloseReason string     `json:"close_reason,omitempty" gorm:"size:120"`
+
+	// ScrappedCount is not stored: list/detail queries fill it so the UI can say
+	// "0 còn lại · 1 đã huỷ" instead of showing a batch that looks empty.
+	ScrappedCount int `json:"scrapped_count" gorm:"-"`
+
 	// ---- Parent/child batches (split by a material's production quota) ----
 	// A "parent" batch groups several "child" batches; each child holds at most
 	// Material.ProductsPerUnit products. A flat (un-split) batch leaves all of these
@@ -41,12 +53,31 @@ type BatchItem struct {
 	Base
 	BatchID     uint           `json:"batch_id" gorm:"index;not null"`
 	Batch       *Batch         `json:"batch,omitempty" gorm:"foreignKey:BatchID"`
-	OrderItemID uint           `json:"order_item_id" gorm:"index;not null;uniqueIndex:idx_item_material"`
+	OrderItemID uint           `json:"order_item_id" gorm:"index;not null;uniqueIndex:idx_item_material_attempt"`
 	OrderItem   *OrderItem     `json:"order_item,omitempty" gorm:"foreignKey:OrderItemID"`
-	MaterialID  uint           `json:"material_id" gorm:"index;not null;uniqueIndex:idx_item_material"`
+	MaterialID  uint           `json:"material_id" gorm:"index;not null;uniqueIndex:idx_item_material_attempt"`
 	Material    *Material      `json:"material,omitempty" gorm:"foreignKey:MaterialID"`
 	Status      InternalStatus `json:"status" gorm:"size:20;not null;index;default:'PENDING'"`
+
+	// Attempt is which production run of this (item, material) the row is: 1 for
+	// the first, 2 after a QC fail sent it back to be re-made, and so on. It is
+	// part of the unique key because a product CAN legitimately be produced more
+	// than once — the original schema assumed once, which is exactly why a failed
+	// item could never re-enter batching.
+	Attempt int `json:"attempt" gorm:"not null;default:1;uniqueIndex:idx_item_material_attempt"`
+
+	// ScrappedAt marks a part that failed QC and was written off. The row stays in
+	// its batch — that is where the defective piece was actually produced, and the
+	// QC record points at it — but it no longer counts anywhere: not in the item's
+	// or batch's status roll-up (else the old batch could never close), and not in
+	// the "already batched" test (else the item could never be re-batched).
+	ScrappedAt   *time.Time `json:"scrapped_at,omitempty" gorm:"index"`
+	ScrapReason  string     `json:"scrap_reason,omitempty" gorm:"size:60"`
+	ScrappedByID *uint      `json:"scrapped_by_id,omitempty"`
 }
+
+// Scrapped reports whether this production part was written off after a QC fail.
+func (b BatchItem) Scrapped() bool { return b.ScrappedAt != nil }
 
 func (BatchItem) TableName() string { return "batch_items" }
 
@@ -60,13 +91,13 @@ func (BatchItem) TableName() string { return "batch_items" }
 // change. UpdatedByID/LinkUpdatedAt record who last set the link and when.
 type BatchLink struct {
 	Base
-	BatchID      uint          `json:"batch_id" gorm:"not null;uniqueIndex:idx_batch_link_kind,where:deleted_at IS NULL"`
-	Batch        *Batch        `json:"batch,omitempty" gorm:"foreignKey:BatchID"`
-	Kind         BatchLinkKind `json:"kind" gorm:"size:10;not null;uniqueIndex:idx_batch_link_kind,where:deleted_at IS NULL"`
-	URL          string        `json:"url" gorm:"size:500;not null"`
-	UpdatedByID  *uint         `json:"updated_by_id"`
-	UpdatedBy    *User         `json:"updated_by,omitempty" gorm:"foreignKey:UpdatedByID"`
-	LinkUpdatedAt time.Time    `json:"link_updated_at"`
+	BatchID       uint          `json:"batch_id" gorm:"not null;uniqueIndex:idx_batch_link_kind,where:deleted_at IS NULL"`
+	Batch         *Batch        `json:"batch,omitempty" gorm:"foreignKey:BatchID"`
+	Kind          BatchLinkKind `json:"kind" gorm:"size:10;not null;uniqueIndex:idx_batch_link_kind,where:deleted_at IS NULL"`
+	URL           string        `json:"url" gorm:"size:500;not null"`
+	UpdatedByID   *uint         `json:"updated_by_id"`
+	UpdatedBy     *User         `json:"updated_by,omitempty" gorm:"foreignKey:UpdatedByID"`
+	LinkUpdatedAt time.Time     `json:"link_updated_at"`
 }
 
 func (BatchLink) TableName() string { return "batch_links" }

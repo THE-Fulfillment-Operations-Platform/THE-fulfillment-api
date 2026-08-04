@@ -14,13 +14,18 @@ const (
 	RoleQC         Role = "QC"
 	RolePacking    Role = "PACKING"
 	RoleShipping   Role = "SHIPPING"
-	RoleSeller     Role = "SELLER"
+	// RoleCS is customer support: they look an order up by its store order id or
+	// recipient, read the full shipping details the seller uploaded, and attach
+	// the tracking number they got from the carrier. They never touch production,
+	// the catalog or users.
+	RoleCS     Role = "CS"
+	RoleSeller Role = "SELLER"
 )
 
 // AllRoles is the canonical list used by the seeder.
 var AllRoles = []Role{
 	RoleOwner, RoleAdmin, RoleOps, RoleDesigner,
-	RoleProduction, RoleQC, RolePacking, RoleShipping, RoleSeller,
+	RoleProduction, RoleQC, RolePacking, RoleShipping, RoleCS, RoleSeller,
 }
 
 // InternalStatus is the factory-internal production status (DTWay flow):
@@ -90,8 +95,45 @@ const (
 	CancellationRejected  CancellationStatus = "REJECTED"
 )
 
+// CancelStage snapshots how far an order (or one line item) had progressed at the
+// moment a cancellation was asked for. It is the single fact that decides both
+// halves of the cancellation policy: whether the seller may cancel outright or
+// must wait for an Ops/Admin decision, and whether the customer is still charged.
+// Work that was already started consumed material and machine time, so it is
+// billed even though the order ends up cancelled.
+type CancelStage string
+
+const (
+	// CancelStageNone: no cancellation has ever touched this row.
+	CancelStageNone CancelStage = ""
+	// CancelStagePreProduction: nothing has been produced yet (still in review, or
+	// approved but no item is batched or past PENDING) — cancel is free.
+	CancelStagePreProduction CancelStage = "PRE_PRODUCTION"
+	// CancelStageInProduction: at least one item is batched / printed / cut / QC'd.
+	CancelStageInProduction CancelStage = "IN_PRODUCTION"
+	// CancelStagePacked: packed or handed off to the carrier.
+	CancelStagePacked CancelStage = "PACKED"
+	// CancelStageShipped: already shipped.
+	CancelStageShipped CancelStage = "SHIPPED"
+)
+
+// Billable reports whether a cancellation taken at this stage is still charged to
+// the customer. Only a pre-production cancellation is free.
+func (s CancelStage) Billable() bool {
+	switch s {
+	case CancelStageInProduction, CancelStagePacked, CancelStageShipped:
+		return true
+	}
+	return false
+}
+
+// NeedsApproval reports whether a seller cancellation at this stage has to go
+// through Ops/Admin instead of taking effect immediately. It is deliberately the
+// same predicate as Billable: the moment money is on the line, a human decides.
+func (s CancelStage) NeedsApproval() bool { return s.Billable() }
+
 // SellerStatus is the high-level status exposed to sellers. Sellers only ever
-// see these four values, never the internal print/cut/QC steps.
+// see these five values, never the internal print/cut/QC steps.
 type SellerStatus string
 
 const (
@@ -99,7 +141,48 @@ const (
 	SellerStatusPacked     SellerStatus = "PACKED"
 	SellerStatusHandedOff  SellerStatus = "HANDED_OFF"
 	SellerStatusShipped    SellerStatus = "SHIPPED"
+	// SellerStatusDelivered: the carrier reported the parcel delivered.
+	//
+	// Reached from the tracking sync, not from a desk in the factory — nobody here
+	// witnesses a delivery. Without it the timeline topped out at SHIPPED while the
+	// tracking badge next to it already said "Đã giao", which read as the two
+	// disagreeing about the same parcel.
+	SellerStatusDelivered SellerStatus = "DELIVERED"
 )
+
+// Rank orders the lifecycle so a transition can be checked for direction. Status
+// only ever moves forward: a provider that reports "in transit" after "delivered"
+// (a return scan, a reused number) must not walk the order backwards.
+func (s SellerStatus) Rank() int {
+	switch s {
+	case SellerStatusProduction:
+		return 1
+	case SellerStatusPacked:
+		return 2
+	case SellerStatusHandedOff:
+		return 3
+	case SellerStatusShipped:
+		return 4
+	case SellerStatusDelivered:
+		return 5
+	}
+	return 0
+}
+
+// HandedOver reports whether the parcel has left the factory for the carrier.
+//
+// This is the boundary between the two halves of an order's life: everything up
+// to it is our own production flow, everything after it belongs to the shipping
+// side. The tracking integration keys off this — a parcel nobody has handed over
+// yet has no journey to fetch, so we do not call the provider about it.
+func (s SellerStatus) HandedOver() bool {
+	return s.Rank() >= SellerStatusHandedOff.Rank()
+}
+
+// HandedOverStatuses is the SQL-friendly form of HandedOver.
+var HandedOverStatuses = []string{
+	string(SellerStatusHandedOff), string(SellerStatusShipped), string(SellerStatusDelivered),
+}
 
 // DesignStatus tracks the designer's progress on an item before it enters a batch.
 type DesignStatus string
@@ -193,25 +276,40 @@ const (
 type TrackingStatus string
 
 const (
-	TrackingNone       TrackingStatus = "NONE"
-	TrackingPending    TrackingStatus = "PENDING"
-	TrackingPreTransit TrackingStatus = "PRE_TRANSIT"
-	TrackingInTransit  TrackingStatus = "IN_TRANSIT"
-	TrackingDelivered  TrackingStatus = "DELIVERED"
-	TrackingUndelivered TrackingStatus = "UNDELIVERED"
-	TrackingException  TrackingStatus = "EXCEPTION"
-	TrackingExpired    TrackingStatus = "EXPIRED"
-	TrackingCancelled  TrackingStatus = "CANCELLED"
+	TrackingNone           TrackingStatus = "NONE"
+	TrackingPending        TrackingStatus = "PENDING"
+	TrackingPreTransit     TrackingStatus = "PRE_TRANSIT"
+	TrackingInTransit      TrackingStatus = "IN_TRANSIT"
+	TrackingOutForDelivery TrackingStatus = "OUT_FOR_DELIVERY"
+	TrackingPickUp         TrackingStatus = "PICK_UP"
+	TrackingDelivered      TrackingStatus = "DELIVERED"
+	TrackingUndelivered    TrackingStatus = "UNDELIVERED"
+	TrackingException      TrackingStatus = "EXCEPTION"
+	TrackingExpired        TrackingStatus = "EXPIRED"
+	TrackingCancelled      TrackingStatus = "CANCELLED"
 )
 
 var trackingStatusValid = map[TrackingStatus]bool{
 	TrackingNone: true, TrackingPending: true, TrackingPreTransit: true,
-	TrackingInTransit: true, TrackingDelivered: true, TrackingUndelivered: true,
+	TrackingInTransit: true, TrackingOutForDelivery: true, TrackingPickUp: true,
+	TrackingDelivered: true, TrackingUndelivered: true,
 	TrackingException: true, TrackingExpired: true, TrackingCancelled: true,
 }
 
 // Valid reports whether s is a known tracking status.
 func (s TrackingStatus) Valid() bool { return trackingStatusValid[s] }
+
+// Terminal reports whether the shipment has reached a state the carrier will not
+// move on from. The sync scheduler uses this to stop polling a parcel forever:
+// a delivered/expired/cancelled parcel never changes again, so re-checking it
+// only burns provider rate limit that a live parcel needs.
+func (s TrackingStatus) Terminal() bool {
+	switch s {
+	case TrackingDelivered, TrackingExpired, TrackingCancelled:
+		return true
+	}
+	return false
+}
 
 // DesignSide identifies which physical side of a product a design belongs to.
 // SINGLE covers one-sided products (the default / legacy case); FRONT and BACK

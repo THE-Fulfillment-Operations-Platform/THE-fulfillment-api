@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"the-fulfillment/backend/internal/middleware"
+	"the-fulfillment/backend/internal/models"
 	"the-fulfillment/backend/internal/repositories"
 	"the-fulfillment/backend/internal/response"
 	"the-fulfillment/backend/internal/services"
@@ -25,6 +26,16 @@ func (h *Handlers) ListOrders(c *gin.Context) {
 		StoreOrderID: c.Query("store_order_id"),
 		DateFrom:     timeQueryPtr(c, "date_from"),
 		DateTo:       timeQueryPtr(c, "date_to"),
+		// Customer-support lookup: one box (?search=) or a named field when the
+		// operator knows what they are holding.
+		Search:         c.Query("search"),
+		InternalCode:   c.Query("internal_code"),
+		TrackingNumber: c.Query("tracking_number"),
+		ShippingName:   c.Query("shipping_name"),
+		ShippingPhone:  c.Query("shipping_phone"),
+		TrackingStatus: c.Query("tracking_status"),
+		HasTracking:    boolQueryPtr(c, "has_tracking"),
+		HandedOver:     boolQueryPtr(c, "handed_over"),
 	}
 	rows, total, err := h.svc.Order.ListOrders(f)
 	if err != nil {
@@ -155,24 +166,32 @@ func (h *Handlers) SellerUpdateOrder(c *gin.Context) {
 // ---------- Items ----------
 
 func itemFilterFrom(c *gin.Context) repositories.ItemFilter {
+	// Cancelled lines are hidden from every work list, but a caller asking for the
+	// cancelled orders is asking for history: keeping them hidden there would make
+	// the "Đã huỷ" filter answer "không có đơn nào" for every cancelled order,
+	// since cancelling an order cancels all of its lines.
+	reviewStatus := c.Query("review_status")
+	includeCancelled := c.Query("include_cancelled") == "true" ||
+		reviewStatus == string(models.ReviewCancelled)
 	return repositories.ItemFilter{
-		Page:           pageFrom(c),
-		SellerID:       uintQueryPtr(c, "seller_id"),
-		StoreID:        uintQueryPtr(c, "store_id"),
-		StoreOrderID:   strings.TrimSpace(c.Query("store_order_id")),
-		SKUCode:        c.Query("sku"),
-		InternalCode:   strings.TrimSpace(c.Query("internal_code")),
-		Search:         strings.TrimSpace(c.Query("q")),
-		InternalStatus: c.Query("status"),
-		DesignStatus:   c.Query("design_status"),
-		ReviewStatus:   c.Query("review_status"),
-		BatchID:        uintQueryPtr(c, "batch_id"),
-		BatchCode:      strings.TrimSpace(c.Query("batch")),
-		MaterialID:     uintQueryPtr(c, "material_id"),
-		DateFrom:       timeQueryPtr(c, "date_from"),
-		DateTo:         timeQueryPtr(c, "date_to"),
-		SortBy:         c.Query("sort"),
-		SortDir:        c.Query("order"),
+		Page:             pageFrom(c),
+		SellerID:         uintQueryPtr(c, "seller_id"),
+		StoreID:          uintQueryPtr(c, "store_id"),
+		StoreOrderID:     strings.TrimSpace(c.Query("store_order_id")),
+		SKUCode:          c.Query("sku"),
+		InternalCode:     strings.TrimSpace(c.Query("internal_code")),
+		Search:           strings.TrimSpace(c.Query("q")),
+		InternalStatus:   c.Query("status"),
+		DesignStatus:     c.Query("design_status"),
+		ReviewStatus:     reviewStatus,
+		IncludeCancelled: includeCancelled,
+		BatchID:          uintQueryPtr(c, "batch_id"),
+		BatchCode:        strings.TrimSpace(c.Query("batch")),
+		MaterialID:       uintQueryPtr(c, "material_id"),
+		DateFrom:         timeQueryPtr(c, "date_from"),
+		DateTo:           timeQueryPtr(c, "date_to"),
+		SortBy:           c.Query("sort"),
+		SortDir:          c.Query("order"),
 	}
 }
 
@@ -387,10 +406,18 @@ func (h *Handlers) SellerOrders(c *gin.Context) {
 	p := pageFrom(c)
 	f := repositories.OrderFilter{
 		Page:         p,
-		SellerStatus: c.Query("status"),
 		StoreOrderID: c.Query("store_order_id"),
 		DateFrom:     timeQueryPtr(c, "date_from"),
 		DateTo:       timeQueryPtr(c, "date_to"),
+	}
+	// The seller's status filter spans two columns: PRODUCTION…SHIPPED are
+	// production phases, while CANCELLED is a review state. Sellers still owe money
+	// on orders cancelled mid-production, so they must be able to pull that list up
+	// — filtering it as a seller_status would silently match nothing.
+	if status := c.Query("status"); status == string(models.ReviewCancelled) {
+		f.ReviewStatus = status
+	} else {
+		f.SellerStatus = status
 	}
 	rows, total, err := h.svc.Order.SellerOrders(*claims.SellerID, f)
 	if err != nil {
@@ -417,4 +444,27 @@ func (h *Handlers) SellerOrderDetail(c *gin.Context) {
 		return
 	}
 	response.OK(c, v)
+}
+
+// SellerOrderHistory returns the sanitized order timeline for the seller.
+// GET /api/seller/orders/:id/history
+func (h *Handlers) SellerOrderHistory(c *gin.Context) {
+	claims := middleware.CurrentClaims(c)
+	if claims == nil || claims.SellerID == nil {
+		response.AbortForbidden(c, "Seller account required")
+		return
+	}
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	// Ownership is checked inside the service, not here: the history text can name
+	// the destination and the cancellation reason, so enumerating order ids must
+	// not reveal another seller's order even by the shape of the reply.
+	events, err := h.svc.Order.SellerOrderHistory(*claims.SellerID, id)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, events)
 }

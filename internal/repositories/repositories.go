@@ -40,6 +40,7 @@ type Repositories struct {
 	MasterImport *MasterImportRepository
 	Order        *OrderRepository
 	OrderItem    *OrderItemRepository
+	Tracking     *TrackingRepository
 	Batch        *BatchRepository
 	QC           *QCRepository
 	Status       *StatusHistoryRepository
@@ -63,6 +64,7 @@ func New(db *gorm.DB) *Repositories {
 		MasterImport: &MasterImportRepository{db: db},
 		Order:        &OrderRepository{db: db},
 		OrderItem:    &OrderItemRepository{db: db},
+		Tracking:     &TrackingRepository{db: db},
 		Batch:        &BatchRepository{db: db},
 		QC:           &QCRepository{db: db},
 		Status:       &StatusHistoryRepository{db: db},

@@ -24,6 +24,18 @@ func (r *UserRepository) FindByID(id uint) (*models.User, error) {
 	return &u, nil
 }
 
+// FindByIDs bulk-loads users for attributing a list of records to their actor.
+// One query instead of a FindByID per row, and no Seller preload: callers that
+// resolve authorship only need role + seller_id off the user itself.
+func (r *UserRepository) FindByIDs(ids []uint) ([]models.User, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var rows []models.User
+	err := r.db.Where("id IN ?", ids).Find(&rows).Error
+	return rows, err
+}
+
 func (r *UserRepository) FindByEmail(email string) (*models.User, error) {
 	var u models.User
 	if err := r.db.Preload("Seller").Where("email = ?", email).First(&u).Error; err != nil {

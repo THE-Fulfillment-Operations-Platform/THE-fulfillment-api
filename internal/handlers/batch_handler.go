@@ -37,6 +37,9 @@ func (h *Handlers) ListBatches(c *gin.Context) {
 		DateFrom:      timeQueryPtr(c, "date_from"),
 		DateTo:        timeQueryPtr(c, "date_to"),
 		ParentBatchID: uintQueryPtr(c, "parent_batch_id"),
+		// ?open=1 — chỉ batch còn việc (bảng sản xuất dùng), bỏ batch đã đóng vì
+		// toàn bộ hàng bị huỷ ở QC.
+		ExcludeClosed: c.Query("open") == "1" || c.Query("open") == "true",
 	}
 	rows, total, err := h.svc.Batch.List(f)
 	if err != nil {

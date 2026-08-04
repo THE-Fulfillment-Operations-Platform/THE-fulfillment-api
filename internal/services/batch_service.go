@@ -81,33 +81,51 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 		}
 
 		// Resolve eligible items in the caller's order (so the quota split groups them
-		// in that same order); everything ineligible is reported back as skipped.
+		// in that same order); everything ineligible is reported back as skipped —
+		// WITH the reason, because "không có sản phẩm hợp lệ" on its own leaves the
+		// user staring at a list the screen just offered them.
 		var eligible []*models.OrderItem
+		reasons := map[uint]string{} // itemID → vì sao bị loại
+		label := func(itemID uint) string {
+			if it := itemsByID[itemID]; it != nil && it.InternalCode != "" {
+				return it.InternalCode
+			}
+			return fmt.Sprintf("#%d", itemID)
+		}
+		skip := func(itemID uint, reason string) {
+			skipped = append(skipped, itemID)
+			reasons[itemID] = reason
+		}
 		for _, itemID := range in.OrderItemIDs {
 			item, ok := itemsByID[itemID]
 			if !ok {
-				skipped = append(skipped, itemID)
+				skip(itemID, "không tìm thấy sản phẩm")
 				continue
 			}
 			// Only approved orders may enter production.
-			if item.Order == nil || item.Order.ReviewStatus != models.ReviewApproved || itemCancelled(item.CancellationStatus) {
-				skipped = append(skipped, itemID)
+			if item.Order == nil || item.Order.ReviewStatus != models.ReviewApproved {
+				skip(itemID, "đơn chưa được duyệt")
+				continue
+			}
+			if itemCancelled(item.CancellationStatus) {
+				skip(itemID, "sản phẩm đã huỷ")
 				continue
 			}
 			// The item's SKU must include this material.
 			if !skuHasMaterial(item.SKU, material.ID) {
-				skipped = append(skipped, itemID)
+				skip(itemID, "SKU không dùng NVL "+material.Code)
 				continue
 			}
-			// Skip if already scheduled for this material.
+			// Skip if already scheduled for this material. Parts scrapped after a QC
+			// fail don't count — that is what lets a re-made product be batched again.
 			if existing[itemID] != nil && existing[itemID][material.ID] {
-				skipped = append(skipped, itemID)
+				skip(itemID, "đã nằm trong một batch khác của NVL này")
 				continue
 			}
 			eligible = append(eligible, item)
 		}
 		if len(eligible) == 0 {
-			return apperr.Unprocessable("No eligible items for this material (items must be design-ready, include the material, and not already batched)")
+			return apperr.Unprocessable("Không gom được sản phẩm nào vào batch: " + describeSkips(in.OrderItemIDs, reasons, label))
 		}
 
 		groups := planBatchSplit(eligible, quota)
@@ -121,10 +139,26 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 			}
 		}
 		attachItems := func(batch *models.Batch, items []*models.OrderItem) error {
+			// A product can be produced more than once (QC fail → re-make), so each
+			// new part carries the next attempt number for its (item, material). One
+			// query for the whole batch; first-time items simply get attempt 1.
+			itemIDs := make([]uint, 0, len(items))
+			for _, item := range items {
+				itemIDs = append(itemIDs, item.ID)
+			}
+			nextAttempt, err := txRepo.Batch.NextAttempts(material.ID, itemIDs)
+			if err != nil {
+				return err
+			}
 			batchItems := make([]models.BatchItem, 0, len(items))
 			for _, item := range items {
+				attempt := nextAttempt[item.ID]
+				if attempt < 1 {
+					attempt = 1
+				}
 				batchItems = append(batchItems, models.BatchItem{
-					BatchID: batch.ID, OrderItemID: item.ID, MaterialID: material.ID, Status: models.StatusPending,
+					BatchID: batch.ID, OrderItemID: item.ID, MaterialID: material.ID,
+					Status: models.StatusPending, Attempt: attempt,
 				})
 			}
 			if err := txRepo.Batch.CreateItems(batchItems); err != nil {
@@ -200,7 +234,7 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 	}
 
 	// Recompute affected items' internal status outside the create transaction.
-	_ = recomputeOrderItemStatuses(s.repo, in.OrderItemIDs, actor)
+	_, _ = recomputeOrderItemStatuses(s.repo, in.OrderItemIDs, actor)
 
 	full, _ := s.repo.Batch.FindByID(rootBatch.ID)
 	s.audit.Log(actor, "BATCH_CREATE", "batch", &rootBatch.ID,
@@ -396,7 +430,7 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 	for itemID := range affectedItems {
 		itemIDs = append(itemIDs, itemID)
 	}
-	_ = recomputeOrderItemStatuses(s.repo, itemIDs, actor)
+	_, _ = recomputeOrderItemStatuses(s.repo, itemIDs, actor)
 
 	// If this is a child batch, roll the change up into its parent's status.
 	if batch.ParentBatchID != nil {
@@ -871,4 +905,29 @@ func sanitizeZipComponent(value string) string {
 	value = strings.ReplaceAll(value, "/", "-")
 	value = strings.ReplaceAll(value, " ", "_")
 	return value
+}
+
+// describeSkips turns the per-item skip reasons into one readable sentence —
+// "100001_3/3 (đã nằm trong một batch khác của NVL này); 100002_1/1 (đơn chưa
+// được duyệt)" — so the user sees which product failed which rule instead of a
+// generic refusal listing every rule at once.
+func describeSkips(order []uint, reasons map[uint]string, label func(uint) string) string {
+	const maxShown = 3
+	parts := make([]string, 0, maxShown)
+	shown := 0
+	for _, id := range order {
+		reason, ok := reasons[id]
+		if !ok {
+			continue
+		}
+		if shown < maxShown {
+			parts = append(parts, label(id)+" ("+reason+")")
+		}
+		shown++
+	}
+	out := strings.Join(parts, "; ")
+	if shown > maxShown {
+		out += fmt.Sprintf(" … và %d sản phẩm khác", shown-maxShown)
+	}
+	return out
 }

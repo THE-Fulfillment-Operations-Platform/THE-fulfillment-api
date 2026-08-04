@@ -1,6 +1,8 @@
 package repositories
 
 import (
+	"time"
+
 	"gorm.io/gorm"
 
 	"the-fulfillment/backend/internal/models"
@@ -109,6 +111,39 @@ type NoteRepository struct{ db *gorm.DB }
 func (r *NoteRepository) Create(n *models.Note) error { return r.db.Create(n).Error }
 func (r *NoteRepository) Update(n *models.Note) error { return r.db.Save(n).Error }
 func (r *NoteRepository) Delete(id uint) error        { return r.db.Delete(&models.Note{}, id).Error }
+
+// ResolveOpenForEntity closes every still-open note attached to one entity in a
+// single statement — used when the condition a note was raised for is provably
+// gone (a QC-failed item that has now been re-made and passed). Returns how many
+// notes were closed.
+func (r *NoteRepository) ResolveOpenForEntity(entityType models.EntityType, entityID uint, byID *uint, resolution string, at time.Time) (int64, error) {
+	return r.resolveOpen(entityType, entityID, "", byID, resolution, at)
+}
+
+// ResolveOpenForEntityReason is the narrow form: it closes only the notes raised
+// for one specific reason. A settled cancellation request must clear its own
+// required-attention note out of the ops inbox, but it says nothing about the
+// other exceptions still open on the same order.
+func (r *NoteRepository) ResolveOpenForEntityReason(entityType models.EntityType, entityID uint, reasonCode string, byID *uint, resolution string, at time.Time) (int64, error) {
+	return r.resolveOpen(entityType, entityID, reasonCode, byID, resolution, at)
+}
+
+// resolveOpen closes matching open notes; an empty reasonCode means "any reason".
+func (r *NoteRepository) resolveOpen(entityType models.EntityType, entityID uint, reasonCode string, byID *uint, resolution string, at time.Time) (int64, error) {
+	q := r.db.Model(&models.Note{}).
+		Where("entity_type = ? AND entity_id = ? AND status <> ?", entityType, entityID, models.NoteResolved)
+	if reasonCode != "" {
+		q = q.Where("reason_code = ?", reasonCode)
+	}
+	res := q.Updates(map[string]any{
+		"status":                models.NoteResolved,
+		"is_required_attention": false,
+		"resolved_at":           at,
+		"resolved_by_id":        byID,
+		"resolution":            resolution,
+	})
+	return res.RowsAffected, res.Error
+}
 
 // ListByIDs returns the notes with these ids, one query per chunk.
 func (r *NoteRepository) ListByIDs(ids []uint) ([]models.Note, error) {

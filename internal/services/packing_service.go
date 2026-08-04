@@ -21,6 +21,9 @@ type PackingService struct {
 	repo    *repositories.Repositories
 	audit   *AuditService
 	carrier shipping.Carrier
+	// tracking registers a dispatched parcel with the 24hTrack provider the moment
+	// the shipping desk records its tracking number.
+	tracking *TrackingSyncService
 }
 
 // getOrCreateOpenPackage returns the order's open package, creating one (with an
@@ -343,6 +346,16 @@ func (s *PackingService) CreateHandoff(actor Actor, in HandoffInput) (*models.Ha
 	}
 	s.audit.Log(actor, "HANDOFF_CREATE", "handoff", &handoff.ID,
 		fmt.Sprintf("Handoff %s for order %s to %s", handoff.Code, order.InternalCode, s.carrier.Name()), nil)
+
+	// Handing over is the moment the shipping half of the order's life begins:
+	// from here the parcel is the carrier's, so this is when tracking starts.
+	// Orders that already carry a tracking number (CS attached it while the order
+	// was still in production) are registered with the provider right now; the
+	// rest are picked up by the periodic pass, which only looks at handed-over
+	// orders. Fire-and-forget — the packing station must not wait on a third party.
+	// (order.SellerStatus is already HANDED_OFF: the transaction above set it on
+	// this same struct, which is what makes the guard inside RegisterOrder pass.)
+	s.tracking.RegisterOrderAsync(order)
 	return handoff, nil
 }
 
@@ -351,22 +364,22 @@ func (s *PackingService) ListHandoffs(page repositories.Page) ([]models.Handoff,
 	return s.repo.Handoff.List(page.Normalize())
 }
 
-// MarkShippedInput records the carrier + tracking number for a dispatched
-// handoff. carrier is optional (falls back to the existing value); tracking is
-// required — it is the whole point of the dispatch step.
+// MarkShippedInput records the tracking number for a dispatched handoff.
+// Tracking is required — it is the whole point of the dispatch step.
+//
+// There is no carrier field: the handoff already carries our own name, and the
+// transport partner behind it is not something the shipping desk types in.
 type MarkShippedInput struct {
-	Carrier        string `json:"carrier"`
 	TrackingNumber string `json:"tracking_number"`
 	LabelURL       string `json:"label_url"`
 }
 
 // MarkShipped completes the final leg: a handed-off parcel becomes SHIPPED,
-// carrying the carrier + tracking number, and its order advances to seller
+// carrying the tracking number, and its order advances to seller
 // status SHIPPED. This is the counterpart of CreateHandoff — where CreateHandoff
 // stops at HANDED_OFF (the MVP had no dispatch step), MarkShipped closes the
 // order lifecycle so sellers see "Đã gửi đi" and can follow the tracking.
 func (s *PackingService) MarkShipped(actor Actor, handoffID uint, in MarkShippedInput) (*models.Handoff, error) {
-	in.Carrier = strings.TrimSpace(in.Carrier)
 	in.TrackingNumber = strings.TrimSpace(in.TrackingNumber)
 	in.LabelURL = strings.TrimSpace(in.LabelURL)
 	if in.TrackingNumber == "" {
@@ -384,12 +397,13 @@ func (s *PackingService) MarkShipped(actor Actor, handoffID uint, in MarkShipped
 		return nil, apperr.Unprocessable("Chỉ đánh dấu gửi được cho handoff đã bàn giao")
 	}
 
+	// Captured inside the transaction, used after it commits: the provider must
+	// only ever be told about a shipment that actually persisted.
+	var shippedOrder *models.Order
+
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
 		txRepo := repositories.New(tx)
 
-		if in.Carrier != "" {
-			handoff.Carrier = in.Carrier
-		}
 		handoff.TrackingNumber = in.TrackingNumber
 		if in.LabelURL != "" {
 			handoff.LabelURL = in.LabelURL
@@ -399,18 +413,41 @@ func (s *PackingService) MarkShipped(actor Actor, handoffID uint, in MarkShipped
 			return err
 		}
 		_ = recordStatus(txRepo, models.EntityHandoff, handoff.ID,
-			string(models.HandoffHandedOff), string(models.HandoffShipped), actor, "marked shipped via "+handoff.Carrier)
+			string(models.HandoffHandedOff), string(models.HandoffShipped), actor, "marked shipped")
 
 		// Advance the order to seller status SHIPPED (the visible end state).
 		if handoff.OrderID != nil {
 			order, oerr := txRepo.Order.FindByID(*handoff.OrderID)
-			if oerr == nil && order.SellerStatus != models.SellerStatusShipped {
-				old := string(order.SellerStatus)
-				order.SellerStatus = models.SellerStatusShipped
-				if err := txRepo.Order.Update(order); err != nil {
-					return err
+			if oerr == nil {
+				if order.SellerStatus != models.SellerStatusShipped {
+					old := string(order.SellerStatus)
+					order.SellerStatus = models.SellerStatusShipped
+					if err := txRepo.Order.Update(order); err != nil {
+						return err
+					}
+					_ = recordStatus(txRepo, models.EntityOrder, order.ID, old, string(models.SellerStatusShipped), actor, "shipped")
 				}
-				_ = recordStatus(txRepo, models.EntityOrder, order.ID, old, string(models.SellerStatusShipped), actor, "shipped")
+				// Mirror the dispatch's tracking number onto the order. The handoff is
+				// where it is captured, but the order is what every screen (and the
+				// provider sync) reads — without this the parcel would ship without the
+				// order ever knowing its own tracking number.
+				if order.TrackingNumber != handoff.TrackingNumber {
+					fields := map[string]interface{}{
+						"tracking_number":     handoff.TrackingNumber,
+						"tracking_updated_at": time.Now(),
+					}
+					// PENDING, not IN_TRANSIT: the parcel has been handed over but no
+					// scan has confirmed it yet. The provider sync overwrites this with
+					// the real shipment state on its first pass.
+					if order.TrackingStatus == models.TrackingNone || order.TrackingStatus == "" {
+						fields["tracking_status"] = models.TrackingPending
+					}
+					if err := txRepo.Order.UpdateTracking(order.ID, fields); err != nil {
+						return err
+					}
+					order.TrackingNumber = handoff.TrackingNumber
+				}
+				shippedOrder = order
 			}
 		}
 		return nil
@@ -423,6 +460,11 @@ func (s *PackingService) MarkShipped(actor Actor, handoffID uint, in MarkShipped
 	}
 
 	s.audit.Log(actor, "HANDOFF_SHIP", "handoff", &handoff.ID,
-		fmt.Sprintf("Handoff %s shipped via %s (%s)", handoff.Code, handoff.Carrier, handoff.TrackingNumber), nil)
+		fmt.Sprintf("Handoff %s shipped (%s)", handoff.Code, handoff.TrackingNumber), nil)
+
+	// Hand the parcel to the tracking provider so its journey starts being
+	// collected. Fire-and-forget: the shipping desk must not wait on a third
+	// party, and the periodic sync would pick the parcel up anyway.
+	s.tracking.RegisterOrderAsync(shippedOrder)
 	return handoff, nil
 }

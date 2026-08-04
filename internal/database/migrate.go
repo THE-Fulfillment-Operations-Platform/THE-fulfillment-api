@@ -33,6 +33,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&models.OrderItem{},
 		&models.ItemAsset{},
 		&models.DailyCounter{},
+		&models.OrderTrackingEvent{},
 		// production
 		&models.Batch{},
 		&models.BatchItem{},
@@ -59,6 +60,41 @@ func AutoMigrate(db *gorm.DB) error {
 	}
 	if err := backfillOrderDailySeq(db); err != nil {
 		return err
+	}
+	if err := purgeTransportPartnerData(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+// purgeTransportPartnerData erases the "which transport partner carried this
+// parcel" data that older versions recorded.
+//
+// Towards the seller, THE is the shipping company. Which partner physically
+// carries a parcel is supplier information, so the model no longer has a field
+// for it — but AutoMigrate never drops a column, and a value already written
+// stays readable in the table, in every backup, and in any dump handed to the
+// customer. Removing it from the code without removing it from the database
+// would only hide it from the screens.
+//
+// Both statements are idempotent, and Postgres-only like the other migrations
+// here (the sqlite test harness starts from empty models).
+func purgeTransportPartnerData(db *gorm.DB) error {
+	if db.Dialector.Name() != "postgres" {
+		return nil
+	}
+	stmts := []string{
+		// The seller-visible one: shown on the order, sent in the seller API.
+		`ALTER TABLE orders DROP COLUMN IF EXISTS tracking_carrier`,
+		// Internal-only, and the column still holds our own name by design — but
+		// the old dispatch form let the desk type a partner in, so reset whatever
+		// legacy rows collected back to the default.
+		`UPDATE handoffs SET carrier = 'THE' WHERE carrier IS DISTINCT FROM 'THE'`,
+	}
+	for _, q := range stmts {
+		if err := db.Exec(q).Error; err != nil {
+			return fmt.Errorf("database: purge transport partner data: %w", err)
+		}
 	}
 	return nil
 }
@@ -155,6 +191,21 @@ func ensurePerformanceIndexes(db *gorm.DB) error {
 		// indexes above; drop it to save write amplification. (The struct tag that
 		// created it is removed alongside this migration.)
 		`DROP INDEX IF EXISTS idx_orders_seller_id`,
+		// Rework: a product may be produced more than once (QC fail → re-make), so
+		// the old "one row per (item, material)" unique index has to go. The new key
+		// includes the attempt number; scrapped rows keep their place in the batch
+		// that made them. Dropping the old index is safe to re-run.
+		`DROP INDEX IF EXISTS idx_item_material`,
+		// Bucket/roll-up queries all filter out scrapped parts.
+		`CREATE INDEX IF NOT EXISTS idx_batch_items_live ON batch_items (order_item_id, material_id) WHERE scrapped_at IS NULL AND deleted_at IS NULL`,
+		// Back-fill: batches whose every part was scrapped at QC have nothing left to
+		// produce, but ones scrapped before the close rule existed are still sitting
+		// on the board with zero items. Idempotent — it only ever touches a batch
+		// that HAS parts and has no live one left.
+		`UPDATE batches SET closed_at = NOW(), close_reason = 'Toàn bộ sản phẩm đã huỷ do QC fail'
+		 WHERE closed_at IS NULL AND deleted_at IS NULL
+		   AND EXISTS (SELECT 1 FROM batch_items bi WHERE bi.batch_id = batches.id AND bi.deleted_at IS NULL)
+		   AND NOT EXISTS (SELECT 1 FROM batch_items bi WHERE bi.batch_id = batches.id AND bi.deleted_at IS NULL AND bi.scrapped_at IS NULL)`,
 		// Concurrency guard: at most ONE open package per order, so two packing
 		// stations scanning the same order's first item can't each create a package.
 		`CREATE UNIQUE INDEX IF NOT EXISTS uniq_packages_open_order ON packages (order_id) WHERE status = 'OPEN' AND deleted_at IS NULL`,

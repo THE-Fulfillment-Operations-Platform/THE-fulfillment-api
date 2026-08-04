@@ -6,33 +6,64 @@ import (
 	"the-fulfillment/backend/internal/models"
 )
 
-// TestSellerCancelAction verifies the cancellation rule engine: what a seller may
-// do with an order depends on its review status, cancellation status and how far
-// it has progressed (approved-but-waiting vs in-production vs packed+).
+// TestSellerCancelAction verifies the cancellation rule engine: nothing produced
+// yet → the seller cancels outright and free; anything already produced → they
+// may only request it, ops/admin decide, and the order stays billable.
 func TestSellerCancelAction(t *testing.T) {
 	cases := []struct {
 		name         string
 		review       models.ReviewStatus
 		cancellation models.CancellationStatus
-		packed       bool
-		inProduction bool
+		stage        models.CancelStage
 		want         SellerCancelAction
 	}{
-		{"pending review -> direct cancel", models.ReviewPending, models.CancellationNone, false, false, SellerActionCancel},
-		{"needs correction -> direct cancel", models.ReviewNeedsFix, models.CancellationNone, false, false, SellerActionCancel},
-		{"approved waiting for design -> request", models.ReviewApproved, models.CancellationNone, false, false, SellerActionRequest},
-		{"approved in production -> ops only", models.ReviewApproved, models.CancellationNone, false, true, SellerActionOpsOnly},
-		{"approved packed -> refund/claim", models.ReviewApproved, models.CancellationNone, true, true, SellerActionRefundClaim},
-		{"approved packed (no prod flag) -> refund/claim", models.ReviewApproved, models.CancellationNone, true, false, SellerActionRefundClaim},
-		{"request pending -> none", models.ReviewApproved, models.CancellationRequested, false, false, SellerActionNone},
-		{"already cancelled -> none", models.ReviewCancelled, models.CancellationSeller, false, false, SellerActionNone},
-		{"rejected -> none", models.ReviewRejected, models.CancellationNone, false, false, SellerActionNone},
+		{"pending review -> direct cancel", models.ReviewPending, models.CancellationNone, models.CancelStagePreProduction, SellerActionCancel},
+		{"needs correction -> direct cancel", models.ReviewNeedsFix, models.CancellationNone, models.CancelStagePreProduction, SellerActionCancel},
+		{"approved waiting for design -> direct cancel", models.ReviewApproved, models.CancellationNone, models.CancelStagePreProduction, SellerActionCancel},
+		{"approved in production -> request", models.ReviewApproved, models.CancellationNone, models.CancelStageInProduction, SellerActionRequest},
+		{"approved packed -> request", models.ReviewApproved, models.CancellationNone, models.CancelStagePacked, SellerActionRequest},
+		{"approved shipped -> request", models.ReviewApproved, models.CancellationNone, models.CancelStageShipped, SellerActionRequest},
+		{"request pending -> none", models.ReviewApproved, models.CancellationRequested, models.CancelStageInProduction, SellerActionNone},
+		{"already cancelled -> none", models.ReviewCancelled, models.CancellationSeller, models.CancelStagePreProduction, SellerActionNone},
+		{"rejected -> none", models.ReviewRejected, models.CancellationNone, models.CancelStagePreProduction, SellerActionNone},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := sellerCancelAction(tc.review, tc.cancellation, tc.packed, tc.inProduction)
+			got := sellerCancelAction(tc.review, tc.cancellation, tc.stage)
 			if got != tc.want {
 				t.Fatalf("got %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestOrderCancelStage verifies the stage — and therefore the billing decision —
+// derived from how far an order has got.
+func TestOrderCancelStage(t *testing.T) {
+	cases := []struct {
+		name         string
+		seller       models.SellerStatus
+		inProduction bool
+		want         models.CancelStage
+		wantBillable bool
+	}{
+		{"nothing started", models.SellerStatusProduction, false, models.CancelStagePreProduction, false},
+		{"work in flight", models.SellerStatusProduction, true, models.CancelStageInProduction, true},
+		{"packed", models.SellerStatusPacked, true, models.CancelStagePacked, true},
+		{"handed off", models.SellerStatusHandedOff, true, models.CancelStagePacked, true},
+		{"shipped", models.SellerStatusShipped, true, models.CancelStageShipped, true},
+		// Packed without any per-item production trace still counts as packed: the
+		// goods physically exist whatever the item rows say.
+		{"packed, no item trace", models.SellerStatusPacked, false, models.CancelStagePacked, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := orderCancelStage(tc.seller, tc.inProduction)
+			if got != tc.want {
+				t.Fatalf("stage: got %s, want %s", got, tc.want)
+			}
+			if got.Billable() != tc.wantBillable {
+				t.Fatalf("billable: got %v, want %v", got.Billable(), tc.wantBillable)
 			}
 		})
 	}

@@ -61,6 +61,24 @@ func (h *Handlers) ListHandoffs(c *gin.Context) {
 	response.List(c, rows, metaFor(p, total))
 }
 
+// ShipOrdersToCarrier hands a batch of QC-finished orders to THE in one action —
+// the step that ends the factory flow and starts the shipping one.
+// POST /api/orders/ship-to-carrier  { order_ids: [...] }
+func (h *Handlers) ShipOrdersToCarrier(c *gin.Context) {
+	var in struct {
+		OrderIDs []uint `json:"order_ids" binding:"required,min=1"`
+	}
+	if !bindJSON(c, &in) {
+		return
+	}
+	res, err := h.svc.Packing.ShipOrdersToCarrier(actor(c), in.OrderIDs)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, res)
+}
+
 // MarkHandoffShipped records carrier + tracking and moves a handed-off parcel to
 // SHIPPED. POST /api/handoffs/:id/ship
 func (h *Handlers) MarkHandoffShipped(c *gin.Context) {

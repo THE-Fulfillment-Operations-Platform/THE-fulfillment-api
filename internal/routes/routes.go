@@ -40,13 +40,26 @@ var (
 	roleDesignOps  = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleDesigner}
 	roleProdOps    = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleProduction, models.RoleDesigner}
 	roleQCOps      = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleQC}
-	rolePackOps    = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RolePacking}
-	roleShipOps    = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RolePacking, models.RoleShipping}
+	rolePackOps = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RolePacking}
+	// Roles that may record a tracking number. CS is here because attaching the
+	// carrier's tracking number to a store order IS their job — they are the ones
+	// who receive it, and the shipping desk only sees parcels it dispatched itself.
+	roleShipOps = []models.Role{
+		models.RoleOwner, models.RoleAdmin, models.RoleOps,
+		models.RolePacking, models.RoleShipping, models.RoleCS,
+	}
 	// Every internal (non-seller) role — for read-only operational screens.
+	// CS is deliberately NOT in here: customer support has no business on the
+	// production board, the design queue or the batch screens. They get the
+	// order-facing routes below instead.
 	roleInternal = []models.Role{
 		models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleDesigner,
 		models.RoleProduction, models.RoleQC, models.RolePacking, models.RoleShipping,
 	}
+	// Order-facing reads: everything roleInternal may see, plus CS. This is the
+	// customer-support surface — look an order up, read who it ships to, follow
+	// its parcel — and nothing else.
+	roleOrderRead = append(append([]models.Role{}, roleInternal...), models.RoleCS)
 )
 
 // New builds the configured Gin engine.
@@ -115,8 +128,8 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	// Sellers (ops/admin/owner write; internal read).
 	sellers := authd.Group("/sellers")
 	{
-		sellers.GET("", middleware.RequireRoles(roleInternal...), h.ListSellers)
-		sellers.GET("/:id", middleware.RequireRoles(roleInternal...), h.GetSeller)
+		sellers.GET("", middleware.RequireRoles(roleOrderRead...), h.ListSellers)
+		sellers.GET("/:id", middleware.RequireRoles(roleOrderRead...), h.GetSeller)
 		sellers.POST("", middleware.RequireRoles(roleOpsAdmin...), h.CreateSeller)
 		sellers.PUT("/:id", middleware.RequireRoles(roleOpsAdmin...), h.UpdateSeller)
 		sellers.DELETE("/:id", middleware.RequireRoles(roleAdminOwner...), h.DeleteSeller)
@@ -162,8 +175,8 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	// Orders + import (internal).
 	orders := authd.Group("/orders")
 	{
-		orders.GET("", middleware.RequireRoles(roleInternal...), h.ListOrders)
-		orders.GET("/:id", middleware.RequireRoles(roleInternal...), h.GetOrder)
+		orders.GET("", middleware.RequireRoles(roleOrderRead...), h.ListOrders)
+		orders.GET("/:id", middleware.RequireRoles(roleOrderRead...), h.GetOrder)
 		orders.POST("", middleware.RequireRoles(roleOpsAdmin...), h.CreateOrderDirect)
 		orders.GET("/import/template.xlsx", middleware.RequireRoles(roleOpsAdmin...), h.DownloadOrderImportTemplate)
 		orders.POST("/import", middleware.RequireRoles(roleOpsAdmin...), h.ImportOrders)
@@ -172,9 +185,22 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		orders.PUT("/:id", middleware.RequireRoles(roleOpsAdmin...), h.UpdateOrder)
 		orders.POST("/:id/cancel", middleware.RequireRoles(roleOpsAdmin...), h.CancelOrder)
 		orders.DELETE("/:id", middleware.RequireRoles(roleAdminOwner...), h.DeleteOrder)
+		// Send QC-finished orders to THE in one action. This is the step that ends
+		// the factory flow and starts the shipping one; the packing-scan route
+		// below still exists for stations that use it.
+		orders.POST("/ship-to-carrier", middleware.RequireRoles(rolePackOps...), h.ShipOrdersToCarrier)
 		// Tracking: ops + the packing/shipping stations may set it.
 		orders.PATCH("/:id/tracking", middleware.RequireRoles(roleShipOps...), h.UpdateOrderTracking)
+		// The shipment journey is read-only operational information — every
+		// internal role that can open an order may see where its parcel is.
+		orders.GET("/:id/tracking/events", middleware.RequireRoles(roleOrderRead...), h.GetOrderTracking)
+		// Pulling from the provider costs quota and rate limit, so it stays with
+		// the roles that own tracking.
+		orders.POST("/:id/tracking/sync", middleware.RequireRoles(roleShipOps...), h.SyncOrderTracking)
 	}
+
+	// Run one provider pass by hand instead of waiting for the scheduler.
+	authd.POST("/tracking/sync", middleware.RequireRoles(roleShipOps...), h.RunTrackingSync)
 	authd.GET("/import-jobs", middleware.RequireRoles(roleOpsAdmin...), h.ListImportJobs)
 	authd.GET("/import-jobs/:id", middleware.RequireRoles(roleOpsAdmin...), h.GetImportJob)
 
@@ -205,6 +231,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	cancellations := authd.Group("/cancellation-requests", middleware.RequireRoles(roleOpsAdmin...))
 	{
 		cancellations.GET("", h.ListCancellationRequests)
+		cancellations.GET("/resolved", h.ListResolvedCancellations)
 		cancellations.POST("/:id/approve", h.ApproveCancellation)
 		cancellations.POST("/:id/reject", h.RejectCancellation)
 		cancellations.GET("/items", h.ListItemCancellationRequests)
@@ -253,6 +280,9 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		qc.POST("/pass", h.QCPass)
 		qc.POST("/fail", h.QCFail)
 	}
+	// Kết quả QC: đọc-only, mở cho mọi vai trò nội bộ — đóng gói/OPS cần biết đơn
+	// nào đã QC đủ để lấy hàng, không chỉ tổ QC.
+	authd.GET("/qc/results", middleware.RequireRoles(roleInternal...), h.QCResults)
 
 	// Packing.
 	packing := authd.Group("/packing", middleware.RequireRoles(rolePackOps...))
@@ -271,7 +301,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	}
 
 	// Notes / required attention (all internal roles).
-	notes := authd.Group("/notes", middleware.RequireRoles(roleInternal...))
+	notes := authd.Group("/notes", middleware.RequireRoles(roleOrderRead...))
 	{
 		notes.POST("", h.CreateNote)
 		notes.GET("", h.ListNotes)
@@ -286,6 +316,12 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	{
 		seller.GET("/orders", h.SellerOrders)
 		seller.GET("/orders/:id", h.SellerOrderDetail)
+		// Where is my parcel — the same journey ops sees, scoped to the seller's
+		// own orders (ownership is enforced in the service).
+		seller.GET("/orders/:id/tracking/events", h.GetSellerOrderTracking)
+		// What happened to my order before it became a parcel — the order-level
+		// status trail (review decision, production, hand-off, cancellation).
+		seller.GET("/orders/:id/history", h.SellerOrderHistory)
 		// Seller may edit their own order while it is still in review.
 		seller.PUT("/orders/:id", h.SellerUpdateOrder)
 		// Seller self-upload: seller_id is forced to the authenticated seller.

@@ -17,6 +17,10 @@ import (
 type OrderService struct {
 	repo  *repositories.Repositories
 	audit *AuditService
+	// tracking pushes a newly recorded tracking number to the 24hTrack provider
+	// so the parcel starts being watched and is tagged with its store order id.
+	// Nil-safe: the service itself reports Enabled()=false when unconfigured.
+	tracking *TrackingSyncService
 }
 
 // ---------- Orders ----------
@@ -154,6 +158,9 @@ func (s *OrderService) DesignQueue(f repositories.ItemFilter) ([]models.OrderIte
 	f.Page = f.Page.Normalize()
 	f.NeedsDesign = true
 	f.ReviewApproved = true // only approved orders enter the design flow
+	// The design screen groups the queue by NVL taken from the SKU's bill of
+	// materials, so this is the one caller that genuinely needs that chain.
+	f.WithSKUMaterials = true
 	return s.repo.OrderItem.List(f)
 }
 
@@ -527,11 +534,65 @@ type SellerOrderView struct {
 	ReviewNote         string                    `json:"review_note,omitempty"`
 	// Allowed cancellation action for this order, so the UI can show exactly one
 	// of: cancel directly / request cancellation / (nothing).
-	CanCancel              bool             `json:"can_cancel"`
-	CanRequestCancellation bool             `json:"can_request_cancellation"`
-	ItemCount              int              `json:"item_count"`
-	CreatedAt              time.Time        `json:"created_at"`
-	Items                  []SellerItemView `json:"items,omitempty"`
+	CanCancel              bool `json:"can_cancel"`
+	CanRequestCancellation bool `json:"can_request_cancellation"`
+	// CurrentStage is where the order stands right now, and CancelWillBill says
+	// whether cancelling from here is still charged. Both describe what WOULD
+	// happen, so the seller reads the consequence on the button instead of after
+	// the invoice. CancelStage/CancelBillable below are the opposite: what a
+	// cancellation that already happened was recorded as.
+	CurrentStage   models.CancelStage `json:"current_stage"`
+	CancelWillBill bool               `json:"cancel_will_bill"`
+	CancelStage    models.CancelStage `json:"cancel_stage"`
+	CancelBillable bool               `json:"cancel_billable"`
+	// The paper trail of a cancellation that already happened. A seller who is
+	// still being charged for a cancelled order is owed the reasons on screen —
+	// what they asked for, what Ops answered and when — not just a "Đã huỷ" badge
+	// and an invoice line they have to query by email.
+	CancellationReason         string           `json:"cancellation_reason,omitempty"`
+	CancellationResolutionNote string           `json:"cancellation_resolution_note,omitempty"`
+	CancellationRequestedAt    *time.Time       `json:"cancellation_requested_at,omitempty"`
+	CancellationResolvedAt     *time.Time       `json:"cancellation_resolved_at,omitempty"`
+	ItemCount                  int              `json:"item_count"`
+	CreatedAt                  time.Time        `json:"created_at"`
+	Items                      []SellerItemView `json:"items,omitempty"`
+
+	// Shipment tracking. A seller who uploaded an order is entitled to know where
+	// its parcel is — that is the whole point of collecting the journey — so the
+	// state of the shipment crosses the sanitisation boundary.
+	//
+	// What does NOT cross: anything naming the transport partner. No company
+	// name, and no provider deep link (the page behind it names them). To the
+	// seller, THE carries the parcel; the partner is our supplier, not their
+	// business. Internal bookkeeping (sync errors, raw status) stays back too.
+	TrackingNumber    string                `json:"tracking_number,omitempty"`
+	TrackingStatus    models.TrackingStatus `json:"tracking_status,omitempty"`
+	TrackingDetail    string                `json:"tracking_detail,omitempty"`
+	TrackingLocation  string                `json:"tracking_location,omitempty"`
+	TrackingUpdatedAt *time.Time            `json:"tracking_updated_at,omitempty"`
+
+	// Recipient. This is the seller's OWN data — they typed it into the import
+	// file — so unlike the tracking block above there is nothing to sanitise; it
+	// crosses back untouched. Withholding it was never a privacy decision, just an
+	// omission, and it cost the seller the one thing they check first when a
+	// customer writes in: did the parcel go to the right address.
+	//
+	// Detail only (see toSellerView): the list renders 20 rows and none of them
+	// show an address, so shipping a full address block per row is pure payload.
+	ShippingName     string `json:"shipping_name,omitempty"`
+	ShippingAddress1 string `json:"shipping_address1,omitempty"`
+	ShippingAddress2 string `json:"shipping_address2,omitempty"`
+	ShippingCity     string `json:"shipping_city,omitempty"`
+	ShippingProvince string `json:"shipping_province,omitempty"`
+	ShippingZip      string `json:"shipping_zip,omitempty"`
+	ShippingCountry  string `json:"shipping_country,omitempty"`
+	ShippingPhone    string `json:"shipping_phone,omitempty"`
+	ShippingEmail    string `json:"shipping_email,omitempty"`
+	IOSS             string `json:"ioss,omitempty"`
+	// ShippingMethod is what the seller ASKED for on the import row, not which
+	// company we handed the parcel to — that stays redacted.
+	ShippingMethod string `json:"shipping_method,omitempty"`
+	Note           string `json:"note,omitempty"`
 }
 
 // SellerItemView only exposes product-level facts, not the factory pipeline.
@@ -543,10 +604,22 @@ type SellerItemView struct {
 	Quantity           int                       `json:"quantity"`
 	MockupURL          string                    `json:"mockup_url"`
 	CancellationStatus models.CancellationStatus `json:"cancellation_status"`
+	// Per-line cancellation rules, judged on THIS line's own progress: an
+	// untouched product inside a partly produced order can still be dropped free.
+	CanCancel              bool               `json:"can_cancel"`
+	CanRequestCancellation bool               `json:"can_request_cancellation"`
+	CancelWillBill         bool               `json:"cancel_will_bill"`
+	CancelStage            models.CancelStage `json:"cancel_stage"`
+	CancelBillable         bool               `json:"cancel_billable"`
 }
 
-func toSellerView(o models.Order, withItems bool) SellerOrderView {
-	action := sellerCancelActionForOrder(&o)
+// toSellerView sanitizes one order for the seller portal. inProduction is passed
+// in rather than derived here: the detail path reads it off preloaded items,
+// while the list path resolves a whole page in one query (InProductionIDs)
+// instead of preloading every item's batch parts.
+func toSellerView(o models.Order, withItems, inProduction bool) SellerOrderView {
+	stage := orderCancelStage(o.SellerStatus, inProduction)
+	action := sellerCancelAction(o.ReviewStatus, o.CancellationStatus, stage)
 	activeItemCount := 0
 	for i := range o.Items {
 		if !itemCancelled(o.Items[i].CancellationStatus) {
@@ -560,14 +633,65 @@ func toSellerView(o models.Order, withItems bool) SellerOrderView {
 		ReviewStatus: o.ReviewStatus, CancellationStatus: o.CancellationStatus, ReviewNote: o.ReviewNote,
 		CanCancel:              action == SellerActionCancel,
 		CanRequestCancellation: action == SellerActionRequest,
+		CurrentStage:           stage,
+		CancelWillBill:         stage.Billable(),
+		CancelStage:            o.CancelStage,
+		CancelBillable:         o.CancelBillable,
 		ItemCount:              activeItemCount, CreatedAt: o.CreatedAt,
+		TrackingNumber: o.TrackingNumber,
+		TrackingDetail: redactPartner(o.TrackingDetail),
+		// Location is only meaningful next to a real shipment state; showing
+		// "JAMAICA, NY" on an order the provider has said nothing about would read
+		// as progress.
+		TrackingUpdatedAt: o.TrackingUpdatedAt,
 	}
+	// NONE is our "nothing recorded" placeholder, not a shipment state — omit it so
+	// the seller UI can tell "no parcel yet" from "parcel waiting for its first scan".
+	if o.TrackingStatus != models.TrackingNone && o.TrackingStatus != "" {
+		v.TrackingStatus = o.TrackingStatus
+		v.TrackingLocation = redactPartner(o.TrackingLocation)
+	}
+	// Only carry the paper trail once a cancellation actually exists, so an
+	// untouched order stays as small as it was.
+	if o.CancellationStatus != models.CancellationNone {
+		v.CancellationReason = o.CancellationReason
+		v.CancellationResolutionNote = o.CancellationResolutionNote
+		v.CancellationRequestedAt = o.CancellationRequestedAt
+		v.CancellationResolvedAt = o.CancellationResolvedAt
+	}
+	// withItems marks the detail path. The recipient block rides along with it for
+	// the payload reason spelled out on the struct fields.
 	if withItems {
+		v.ShippingName = o.ShippingName
+		v.ShippingAddress1 = o.ShippingAddress1
+		v.ShippingAddress2 = o.ShippingAddress2
+		v.ShippingCity = o.ShippingCity
+		v.ShippingProvince = o.ShippingProvince
+		v.ShippingZip = o.ShippingZip
+		v.ShippingCountry = o.ShippingCountry
+		v.ShippingPhone = o.ShippingPhone
+		v.ShippingEmail = o.ShippingEmail
+		v.IOSS = o.IOSS
+		v.ShippingMethod = o.ShippingMethod
+		v.Note = o.Note
+
 		for _, it := range o.Items {
+			itemStage := itemCancelStage(&o, &it)
+			itemAction := sellerCancelAction(o.ReviewStatus, o.CancellationStatus, itemStage)
+			// Mirrors the service guard: a line waiting on ops, or already gone, has
+			// no action left. A REFUSED request does — the seller may ask again.
+			if it.CancellationStatus == models.CancellationRequested || itemCancelled(it.CancellationStatus) {
+				itemAction = SellerActionNone
+			}
 			v.Items = append(v.Items, SellerItemView{
 				ID:      it.ID,
 				SKUCode: it.SKUCode, ProductName: it.ProductName, VariantCode: it.VariantCode,
 				Quantity: it.Quantity, MockupURL: it.MockupURL, CancellationStatus: it.CancellationStatus,
+				CanCancel:              itemAction == SellerActionCancel,
+				CanRequestCancellation: itemAction == SellerActionRequest,
+				CancelWillBill:         itemStage.Billable(),
+				CancelStage:            it.CancelStage,
+				CancelBillable:         it.CancelBillable,
 			})
 		}
 	}
@@ -585,9 +709,20 @@ func (s *OrderService) SellerOrders(sellerID uint, f repositories.OrderFilter) (
 	if err := annotateStoreOrderDupSlice(s.repo, orders); err != nil {
 		return nil, 0, apperr.Internal("could not flag duplicate store orders").Wrap(err)
 	}
+	// Which of these orders already has work in flight — one query for the page.
+	// The list offers the same cancel buttons as the detail screen, so it has to
+	// answer the same question, and answering it per order would be N+1.
+	ids := make([]uint, 0, len(orders))
+	for i := range orders {
+		ids = append(ids, orders[i].ID)
+	}
+	inProduction, err := s.repo.Order.InProductionIDs(ids)
+	if err != nil {
+		return nil, 0, apperr.Internal("could not resolve production state").Wrap(err)
+	}
 	out := make([]SellerOrderView, 0, len(orders))
 	for _, o := range orders {
-		out = append(out, toSellerView(o, false))
+		out = append(out, toSellerView(o, false, inProduction[o.ID]))
 	}
 	return out, total, nil
 }
@@ -601,7 +736,7 @@ func (s *OrderService) SellerOrderDetail(sellerID, orderID uint) (*SellerOrderVi
 	if o.SellerID != sellerID {
 		return nil, apperr.Forbidden("This order does not belong to your seller account")
 	}
-	v := toSellerView(*o, true)
+	v := toSellerView(*o, true, orderInProduction(o))
 	return &v, nil
 }
 

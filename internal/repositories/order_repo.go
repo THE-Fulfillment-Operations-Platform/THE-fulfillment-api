@@ -53,9 +53,36 @@ type OrderFilter struct {
 	ReviewStatus       string   // exact review_status match
 	ReviewStatuses     []string // review_status IN (...) — used by the review queue
 	CancellationStatus string
-	StoreOrderID       string
-	DateFrom           *time.Time
-	DateTo             *time.Time
+	// CancellationStatuses is the IN (...) form — the settled-cancellation list asks
+	// for "approved OR seller-cancelled OR refused" in one query.
+	CancellationStatuses []string
+	// CancelBillable narrows to cancellations that are (or are not) still charged.
+	// nil = don't care. This is the "đơn huỷ nhưng vẫn phải tính tiền" work list.
+	CancelBillable *bool
+	StoreOrderID   string
+	DateFrom       *time.Time
+	DateTo         *time.Time
+
+	// Customer-support lookup fields. Search is the single-box form used by the CS
+	// screen: one term matched against every identifier a customer might quote —
+	// store order id, our internal code, tracking number, recipient name, phone or
+	// email. The narrower fields exist for when the operator knows WHICH of those
+	// they are holding and wants an unambiguous result.
+	Search         string
+	InternalCode   string
+	TrackingNumber string
+	ShippingName   string
+	ShippingPhone  string
+	// TrackingStatus filters by the parcel state, e.g. "the CS queue of orders
+	// still without a tracking number" (TrackingStatus=NONE).
+	TrackingStatus string
+	// HasTracking narrows to orders that do (true) or do not (false) carry a
+	// tracking number yet. nil = don't care.
+	HasTracking *bool
+	// HandedOver splits the two halves of an order's life: false = still the
+	// factory's, true = already sent to the carrier. The journey screen lists
+	// exactly HandedOver=true. nil = don't care.
+	HandedOver *bool
 }
 
 type OrderRepository struct{ db *gorm.DB }
@@ -129,6 +156,23 @@ func (r *OrderRepository) FindByID(id uint) (*models.Order, error) {
 		return nil, err
 	}
 	return &o, nil
+}
+
+// OwnerSellerID returns just the order's seller, for endpoints whose only use of
+// the order row is an ownership check. FindByID would answer the same question
+// but drags six preloads (seller, items, SKUs, batch items, materials) along with
+// it — six extra round trips to decide one integer comparison.
+// Returns found=false for a missing order, so callers answer 404 instead of
+// comparing against a zero seller id that no real order has.
+func (r *OrderRepository) OwnerSellerID(id uint) (sellerID uint, found bool, err error) {
+	var out []uint
+	if err = r.db.Model(&models.Order{}).Where("id = ?", id).Pluck("seller_id", &out).Error; err != nil {
+		return 0, false, err
+	}
+	if len(out) == 0 {
+		return 0, false, nil
+	}
+	return out[0], true, nil
 }
 
 // FindByIDsForReview loads several orders with only their line items preloaded
@@ -283,8 +327,64 @@ func (r *OrderRepository) baseQuery(f OrderFilter) *gorm.DB {
 	if f.CancellationStatus != "" {
 		q = q.Where("orders.cancellation_status = ?", f.CancellationStatus)
 	}
+	if len(f.CancellationStatuses) > 0 {
+		q = q.Where("orders.cancellation_status IN ?", f.CancellationStatuses)
+	}
+	if f.CancelBillable != nil {
+		q = q.Where("orders.cancel_billable = ?", *f.CancelBillable)
+	}
 	if f.StoreOrderID != "" {
-		q = q.Where("orders.store_order_id ILIKE ?", "%"+f.StoreOrderID+"%")
+		q = whereContains(q, "orders.store_order_id", f.StoreOrderID)
+	}
+	if f.InternalCode != "" {
+		q = whereContains(q, "orders.internal_code", f.InternalCode)
+	}
+	if f.TrackingNumber != "" {
+		q = whereContains(q, "orders.tracking_number", f.TrackingNumber)
+	}
+	if f.ShippingName != "" {
+		q = whereContains(q, "orders.shipping_name", f.ShippingName)
+	}
+	if f.ShippingPhone != "" {
+		q = whereContains(q, "orders.shipping_phone", f.ShippingPhone)
+	}
+	if f.TrackingStatus != "" {
+		q = q.Where("orders.tracking_status = ?", f.TrackingStatus)
+	}
+	if f.HasTracking != nil {
+		if *f.HasTracking {
+			q = q.Where("orders.tracking_number <> ''")
+		} else {
+			q = q.Where("orders.tracking_number = ''")
+		}
+	}
+	if f.HandedOver != nil {
+		if *f.HandedOver {
+			q = q.Where("orders.seller_status IN ?", models.HandedOverStatuses)
+		} else {
+			q = q.Where("orders.seller_status NOT IN ?", models.HandedOverStatuses)
+		}
+	}
+	// The single-box customer-support search. Everything here is something a
+	// customer can quote down the phone, so one term has to try them all — the
+	// operator should not need to know in advance whether they were handed a store
+	// order id, our code, a tracking number, a name or a phone number.
+	if s := strings.ToLower(strings.TrimSpace(f.Search)); s != "" {
+		like := "%" + s + "%"
+		cols := []string{
+			"orders.store_order_id", "orders.internal_code", "orders.tracking_number",
+			"orders.shipping_name", "orders.shipping_phone", "orders.shipping_email",
+		}
+		var sb strings.Builder
+		args := make([]interface{}, 0, len(cols))
+		for i, col := range cols {
+			if i > 0 {
+				sb.WriteString(" OR ")
+			}
+			sb.WriteString("LOWER(" + col + ") LIKE ?")
+			args = append(args, like)
+		}
+		q = q.Where("("+sb.String()+")", args...)
 	}
 	if f.DateFrom != nil {
 		q = q.Where("orders.created_at >= ?", *f.DateFrom)
@@ -299,6 +399,19 @@ func (r *OrderRepository) baseQuery(f OrderFilter) *gorm.DB {
 	return q
 }
 
+// whereContains adds a case-insensitive "contains" filter.
+//
+// LOWER(col) LIKE lower-pattern rather than Postgres' ILIKE: the same predicate
+// then runs unchanged on the sqlite engine the tests use. Neither form can use a
+// plain btree index on a leading-wildcard search anyway, so nothing is lost.
+func whereContains(q *gorm.DB, column, value string) *gorm.DB {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return q
+	}
+	return q.Where("LOWER("+column+") LIKE ?", "%"+strings.ToLower(value)+"%")
+}
+
 func (r *OrderRepository) List(f OrderFilter) ([]models.Order, int64, error) {
 	var rows []models.Order
 	var total int64
@@ -309,6 +422,38 @@ func (r *OrderRepository) List(f OrderFilter) ([]models.Order, int64, error) {
 		Order("orders.id desc").
 		Limit(f.PageSize).Offset(f.Offset()).Find(&rows).Error
 	return rows, total, err
+}
+
+// InProductionIDs returns, for the given orders, the set that already has work in
+// flight: any live line item past PENDING or scheduled into a batch.
+//
+// The cancellation rules turn on exactly this fact ("chưa sản xuất → huỷ tự do,
+// đã sản xuất → chờ duyệt"), and a list screen must answer it for a whole page of
+// orders at once. Deriving it from preloaded associations would mean pulling every
+// item's batch parts into memory per page; one grouped query over the two tables
+// answers it for all of them. Cancelled lines are excluded — they are history, not
+// work in flight.
+func (r *OrderRepository) InProductionIDs(orderIDs []uint) (map[uint]bool, error) {
+	out := make(map[uint]bool, len(orderIDs))
+	if len(orderIDs) == 0 {
+		return out, nil
+	}
+	var ids []uint
+	err := r.db.Model(&models.OrderItem{}).
+		Distinct("order_items.order_id").
+		Joins("LEFT JOIN batch_items ON batch_items.order_item_id = order_items.id AND batch_items.deleted_at IS NULL").
+		Where("order_items.order_id IN ?", orderIDs).
+		Where("order_items.cancellation_status NOT IN ?",
+			[]models.CancellationStatus{models.CancellationSeller, models.CancellationApproved}).
+		Where("order_items.internal_status <> ? OR batch_items.id IS NOT NULL", models.StatusPending).
+		Pluck("order_items.order_id", &ids).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		out[id] = true
+	}
+	return out, nil
 }
 
 // ---------- Order items ----------
@@ -332,12 +477,31 @@ type ItemFilter struct {
 	IDs            []uint // restrict to specific item ids (e.g. selected rows for a ZIP export)
 	NeedsDesign    bool   // design queue: design not ready
 	ReviewApproved bool   // only items whose order review_status = APPROVED
-	DateFrom       *time.Time
-	DateTo         *time.Time
+	// IncludeCancelled keeps cancelled lines in the result. Off everywhere work is
+	// listed; on when the caller is deliberately looking at history (the order list
+	// filtered to "Đã huỷ"), which would otherwise come back empty.
+	IncludeCancelled bool
+	DateFrom         *time.Time
+	DateTo           *time.Time
 	// Server-side sort. SortBy is whitelisted (see itemOrderClause); anything else
 	// falls back to the stable default (newest first). SortDir is asc|desc.
 	SortBy  string
 	SortDir string
+
+	// WithSKUMaterials adds the SKU → materials chain (3 extra round trips).
+	//
+	// Off by default because only the design queue reads it: that screen groups the
+	// queue by NVL from the SKU's bill of materials. The Orders/Items screen renders
+	// nothing from `sku`, so loading it there paid for three queries per request and
+	// threw the rows away — on a DB one internet hop away, that is most of the wait.
+	//
+	// A flag rather than two copies of this method: the filter/sort logic below is
+	// long and having it drift between a "lean" and a "full" variant is a worse bug
+	// than one boolean.
+	WithSKUMaterials bool
+	// WithSeller adds the parent order's seller (1 extra round trip). Only screens
+	// that print the seller's name need it.
+	WithSeller bool
 }
 
 // itemOrderClause maps a whitelisted sort key + direction to a safe SQL ORDER BY.
@@ -406,6 +570,11 @@ func (r *OrderItemRepository) FindByID(id uint) (*models.OrderItem, error) {
 	return &it, nil
 }
 
+// FindByCode is FindByID keyed on the tem code — same association set on purpose.
+// The scan stations resolve an item by code and then answer with it, so anything
+// FindByID preloads must come back here too; otherwise the caller has to re-load
+// the item just to fill the gap, and on a remote database that second load is a
+// dozen extra round trips on the operator's clock.
 func (r *OrderItemRepository) FindByCode(code string) (*models.OrderItem, error) {
 	var it models.OrderItem
 	err := r.db.
@@ -413,6 +582,7 @@ func (r *OrderItemRepository) FindByCode(code string) (*models.OrderItem, error)
 		Preload("SKU.Materials.Material").
 		Preload("BatchItems.Batch").
 		Preload("BatchItems.Material").
+		Preload("Assets").
 		Where("internal_code = ?", code).First(&it).Error
 	if err != nil {
 		return nil, err
@@ -497,12 +667,62 @@ func (r *OrderItemRepository) ListCancellationRequests(p Page) ([]models.OrderIt
 	return rows, total, err
 }
 
+// ItemCancelPatch is the terminal cancellation state stamped onto an order's
+// remaining live lines when the order as a whole is cancelled.
+type ItemCancelPatch struct {
+	Status       models.CancellationStatus
+	Reason       string
+	ResolvedByID *uint
+	ResolvedAt   time.Time
+	Note         string
+	Stage        models.CancelStage
+	Billable     bool
+}
+
+// CancelActiveForOrder propagates an order-level cancellation down to every line
+// that is not already cancelled, and reports how many lines it closed.
+//
+// This is what actually pulls a cancelled order out of the factory. Every
+// operational queue — design, batching, QC, packing — filters on the ITEM's
+// cancellation status (see baseQuery, activeBatchItems, fulfillment_repo), so an
+// order whose header says CANCELLED while its lines still say NONE reads as
+// cancelled to the seller and as live work to production. One UPDATE keeps the
+// two in step regardless of how many lines the order has.
+//
+// A line that carried its own cancellation reason (the seller asked for that one
+// product specifically) keeps it; only the empty ones inherit the order's reason.
+func (r *OrderItemRepository) CancelActiveForOrder(orderID uint, p ItemCancelPatch) (int64, error) {
+	res := r.db.Model(&models.OrderItem{}).
+		Where("order_id = ?", orderID).
+		Where("cancellation_status NOT IN ?",
+			[]models.CancellationStatus{models.CancellationSeller, models.CancellationApproved}).
+		Updates(map[string]interface{}{
+			"cancellation_status": p.Status,
+			"cancellation_reason": gorm.Expr(
+				"CASE WHEN cancellation_reason = '' THEN ? ELSE cancellation_reason END", p.Reason),
+			"cancellation_requested_at": gorm.Expr(
+				"COALESCE(cancellation_requested_at, ?)", p.ResolvedAt),
+			"cancellation_resolved_by_id":  p.ResolvedByID,
+			"cancellation_resolved_at":     p.ResolvedAt,
+			"cancellation_resolution_note": p.Note,
+			"cancel_stage":                 p.Stage,
+			"cancel_billable":              p.Billable,
+		})
+	return res.RowsAffected, res.Error
+}
+
 func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 	q := r.db.Model(&models.OrderItem{}).
-		Joins("JOIN orders ON orders.id = order_items.order_id AND orders.deleted_at IS NULL").
-		// This is the operational item list used by Orders/Items, design, batch,
-		// QC and packing. Cancelled lines are historical records, never work.
-		Where("order_items.cancellation_status NOT IN ?", []models.CancellationStatus{models.CancellationSeller, models.CancellationApproved})
+		Joins("JOIN orders ON orders.id = order_items.order_id AND orders.deleted_at IS NULL")
+	// This is the operational item list used by Orders/Items, design, batch, QC and
+	// packing. Cancelled lines are historical records, never work — so they are out
+	// by default. IncludeCancelled is the caller saying "I am looking for history,
+	// not work": without it, asking the order list for cancelled orders returns
+	// nothing at all, since cancelling an order cancels every line in it.
+	if !f.IncludeCancelled {
+		q = q.Where("order_items.cancellation_status NOT IN ?",
+			[]models.CancellationStatus{models.CancellationSeller, models.CancellationApproved})
+	}
 	if f.SellerID != nil {
 		q = q.Where("orders.seller_id = ?", *f.SellerID)
 	}
@@ -602,15 +822,31 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 	return q
 }
 
+// List returns one page of items. Associations are opt-in via the filter (see
+// WithSKUMaterials / WithSeller): every Preload here is a separate round trip, and
+// the two callers of this method render different things.
 func (r *OrderItemRepository) List(f ItemFilter) ([]models.OrderItem, int64, error) {
 	var rows []models.OrderItem
 	var total int64
 	r.baseQuery(f).Count(&total)
-	err := r.baseQuery(f).
-		Preload("Order.Seller").
-		Preload("SKU.Materials.Material").
-		Preload("BatchItems.Batch").
-		Preload("BatchItems.Material").
+	q := r.baseQuery(f).
+		// Always needed: every list shows the parent order (code, store order id,
+		// status, dates) and the item's batch parts (NVL + batch columns).
+		Preload("Order").
+		// Batch and Material are belongs-to on BatchItem, so they can ride along in
+		// the batch-items query as JOINs instead of costing a round trip each:
+		// three statements collapse into one. `Preload("BatchItems.Batch")` would be
+		// the same data in three trips.
+		Preload("BatchItems", func(db *gorm.DB) *gorm.DB {
+			return db.Joins("Batch").Joins("Material")
+		})
+	if f.WithSeller {
+		q = q.Preload("Order.Seller")
+	}
+	if f.WithSKUMaterials {
+		q = q.Preload("SKU.Materials.Material")
+	}
+	err := q.
 		Order(itemOrderClause(f.SortBy, f.SortDir)).
 		Limit(f.PageSize).Offset(f.Offset()).Find(&rows).Error
 	return rows, total, err
@@ -670,7 +906,10 @@ func (r *OrderItemRepository) designReadyUnbatchedSubquery() *gorm.DB {
 		Where("NOT EXISTS (?)",
 			r.db.Table("batch_items bi").
 				Select("1").
-				Where("bi.order_item_id = oi.id AND bi.material_id = sm.material_id AND bi.deleted_at IS NULL"))
+				// scrapped_at IS NULL: a part written off after a QC fail no longer
+				// counts as "already batched", which is what lets the item come back
+				// into the create-batch bucket to be re-made.
+				Where("bi.order_item_id = oi.id AND bi.material_id = sm.material_id AND bi.deleted_at IS NULL AND bi.scrapped_at IS NULL"))
 }
 
 // MaterialBuckets returns the count of design-ready, unbatched item parts per material.

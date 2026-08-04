@@ -26,6 +26,7 @@ import (
 	"the-fulfillment/backend/internal/seed"
 	"the-fulfillment/backend/internal/services"
 	"the-fulfillment/backend/internal/shipping"
+	"the-fulfillment/backend/internal/tracking24h"
 )
 
 func main() {
@@ -66,7 +67,16 @@ func main() {
 	jwtManager := auth.NewManager(cfg.JWTSecret, cfg.JWTExpiresIn)
 	carrier := shipping.NewNoopCarrier("THE") // MVP: no real carrier API yet
 	repo := repositories.New(db)
-	svc := services.New(repo, jwtManager, carrier)
+
+	// Shipment tracking provider. Left nil when unconfigured, which keeps
+	// tracking a manual field exactly as before.
+	trackOpts := services.TrackingOptions{Tag: cfg.Track24hTag, Resolve: cfg.Track24hResolve}
+	if cfg.Track24hEnabled {
+		trackOpts.Client = tracking24h.New(cfg.Track24hBaseURL, cfg.Track24hEmail, cfg.Track24hPassword)
+		log.Printf("tracking: 24hTrack integration on (tag=%s, interval=%s, batch=%d, resolve=%v)",
+			cfg.Track24hTag, cfg.Track24hSyncInterval, cfg.Track24hBatchSize, cfg.Track24hResolve)
+	}
+	svc := services.New(repo, jwtManager, carrier, trackOpts)
 	h := handlers.New(svc)
 	router := routes.New(cfg, h, jwtManager)
 
@@ -87,6 +97,10 @@ func main() {
 		maintenance.NewPurgeScheduler(repo.Admin, cfg.PurgeRetentionDays, cfg.PurgeInterval).Start(purgeCtx)
 		log.Printf("maintenance: purge scheduler on (retention=%dd, interval=%s)", cfg.PurgeRetentionDays, cfg.PurgeInterval)
 	}
+
+	// Shipment tracking sync. Self-disabling when no provider is configured, so
+	// there is no second flag to keep in step with the client above.
+	maintenance.NewTrackingScheduler(svc.TrackingSync, cfg.Track24hSyncInterval, cfg.Track24hBatchSize).Start(purgeCtx)
 
 	// Dev convenience: free the port if a previous run left an orphaned process
 	// holding it (a `go run` restart gotcha). No-op in production.

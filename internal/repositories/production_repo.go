@@ -21,6 +21,11 @@ type BatchFilter struct {
 	// (the default), children are hidden and only parent + flat batches are listed
 	// (see baseQuery) so the list isn't cluttered with split sub-batches.
 	ParentBatchID *uint
+	// ExcludeClosed drops batches whose production is over because every piece they
+	// made was scrapped at QC. The production board sets it — there is no work left
+	// in such a batch — while the batch list keeps showing them (greyed, with the
+	// reason) so the history stays auditable.
+	ExcludeClosed bool
 }
 
 type BatchRepository struct{ db *gorm.DB }
@@ -29,9 +34,14 @@ type BatchRepository struct{ db *gorm.DB }
 // through the OrderItem association join (rather than a hand-written JOIN) so a
 // caller can pull the order item's columns in the same statement — the join is
 // already there, and joining order_items twice would be a wasted scan.
+// activeBatchItems scopes to parts that still count: the order item is not
+// cancelled, and the part was not scrapped after a QC fail. A scrapped part stays
+// in its batch as the record of what was actually produced, but it must never
+// hold a batch back — the batch that made a defective piece still finishes.
 func activeBatchItems(db *gorm.DB) *gorm.DB {
 	return db.Joins("OrderItem").
-		Where(`"OrderItem".cancellation_status NOT IN ?`, []models.CancellationStatus{models.CancellationSeller, models.CancellationApproved})
+		Where(`"OrderItem".cancellation_status NOT IN ?`, []models.CancellationStatus{models.CancellationSeller, models.CancellationApproved}).
+		Where("batch_items.scrapped_at IS NULL")
 }
 
 func (r *BatchRepository) Create(b *models.Batch) error { return r.db.Create(b).Error }
@@ -112,6 +122,32 @@ func (r *BatchRepository) ActiveBatchItemsForBatch(batchID uint) ([]models.Batch
 	return items, err
 }
 
+// BatchIDsForOrder returns the distinct batches holding any line of an order.
+// Cancelling an order takes its parts out of every batch it was scheduled into,
+// and each of those batches then has to re-derive its own status from what is
+// left — this is how the caller learns which ones to roll up. Call it BEFORE the
+// lines are marked cancelled: afterwards the join no longer finds them.
+func (r *BatchRepository) BatchIDsForOrder(orderID uint) ([]uint, error) {
+	var ids []uint
+	err := r.db.Model(&models.BatchItem{}).
+		Distinct("batch_items.batch_id").
+		Joins("JOIN order_items ON order_items.id = batch_items.order_item_id").
+		Where("order_items.order_id = ?", orderID).
+		Pluck("batch_items.batch_id", &ids).Error
+	return ids, err
+}
+
+// BatchIDsForOrderItem is the single-line counterpart of BatchIDsForOrder, for a
+// per-product cancellation.
+func (r *BatchRepository) BatchIDsForOrderItem(itemID uint) ([]uint, error) {
+	var ids []uint
+	err := r.db.Model(&models.BatchItem{}).
+		Distinct("batch_id").
+		Where("order_item_id = ?", itemID).
+		Pluck("batch_id", &ids).Error
+	return ids, err
+}
+
 // LinkKindsForBatch returns which production links a batch has (PRINT / CUT).
 // The guard on entering fabrication only needs their presence, not the rows.
 func (r *BatchRepository) LinkKindsForBatch(batchID uint) ([]models.BatchLinkKind, error) {
@@ -153,6 +189,9 @@ func (r *BatchRepository) baseQuery(f BatchFilter) *gorm.DB {
 	if f.DateTo != nil {
 		q = q.Where("created_at <= ?", *f.DateTo)
 	}
+	if f.ExcludeClosed {
+		q = q.Where("closed_at IS NULL")
+	}
 	// Child-scoping: with a parent id, list only that parent's children; otherwise
 	// hide children entirely so the default list shows parent + flat batches only.
 	if f.ParentBatchID != nil {
@@ -174,7 +213,24 @@ func (r *BatchRepository) List(f BatchFilter) ([]models.Batch, int64, error) {
 		Preload("Items", activeBatchItems).
 		Order("id desc").
 		Limit(f.PageSize).Offset(f.Offset()).Find(&rows).Error
-	return rows, total, err
+	if err != nil {
+		return rows, total, err
+	}
+	// A batch can legitimately show zero items — every piece it made was scrapped
+	// at QC. Ship the scrapped count alongside so the screen says why instead of
+	// looking broken.
+	ids := make([]uint, 0, len(rows))
+	for i := range rows {
+		ids = append(ids, rows[i].ID)
+	}
+	scrapped, err := r.ScrappedCounts(ids)
+	if err != nil {
+		return rows, total, err
+	}
+	for i := range rows {
+		rows[i].ScrappedCount = scrapped[rows[i].ID]
+	}
+	return rows, total, nil
 }
 
 // ---------- Batch links (print / cut) ----------
@@ -218,7 +274,134 @@ func (r *BatchRepository) BatchItemsForOrderItem(orderItemID uint) ([]models.Bat
 	return items, err
 }
 
+// LiveBatchItemsForOrderItem returns only the parts still in play (not scrapped),
+// newest attempt included — what QC scans and the status roll-up work on.
+func (r *BatchRepository) LiveBatchItemsForOrderItem(orderItemID uint) ([]models.BatchItem, error) {
+	var items []models.BatchItem
+	err := r.db.Preload("Batch").Preload("Material").
+		Where("order_item_id = ? AND scrapped_at IS NULL", orderItemID).Find(&items).Error
+	return items, err
+}
+
+// NextAttempt returns the attempt number a new production part for this
+// (item, material) must carry: one past the highest ever used, so re-making a
+// piece never collides with the row that recorded the failed one.
+func (r *BatchRepository) NextAttempt(orderItemID, materialID uint) (int, error) {
+	var maxAttempt *int
+	err := r.db.Model(&models.BatchItem{}).
+		Where("order_item_id = ? AND material_id = ?", orderItemID, materialID).
+		Select("MAX(attempt)").Scan(&maxAttempt).Error
+	if err != nil {
+		return 0, err
+	}
+	if maxAttempt == nil {
+		return 1, nil
+	}
+	return *maxAttempt + 1, nil
+}
+
+// NextAttempts returns, per order item, the attempt number a NEW part for this
+// material must carry (highest used + 1, or 1 if never produced). One query for
+// a whole batch instead of a lookup per item.
+func (r *BatchRepository) NextAttempts(materialID uint, orderItemIDs []uint) (map[uint]int, error) {
+	out := map[uint]int{}
+	if len(orderItemIDs) == 0 {
+		return out, nil
+	}
+	type row struct {
+		OrderItemID uint
+		MaxAttempt  int
+	}
+	var rows []row
+	err := r.db.Model(&models.BatchItem{}).
+		Select("order_item_id, MAX(attempt) AS max_attempt").
+		Where("material_id = ? AND order_item_id IN ?", materialID, orderItemIDs).
+		Group("order_item_id").Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, x := range rows {
+		out[x.OrderItemID] = x.MaxAttempt + 1
+	}
+	return out, nil
+}
+
+// CloseIfNothingLeft closes a batch that still has parts on paper but none that
+// will ever be produced — every one of them was scrapped at QC. Returns whether
+// it closed the batch. Idempotent: a batch already closed, or one that still has
+// live parts, is left alone. A batch with NO parts at all (freshly created, items
+// not attached yet) is also left alone — that is a different situation.
+func (r *BatchRepository) CloseIfNothingLeft(batchID uint, reason string, at time.Time) (bool, error) {
+	var total, live int64
+	if err := r.db.Model(&models.BatchItem{}).Where("batch_id = ?", batchID).Count(&total).Error; err != nil {
+		return false, err
+	}
+	if total == 0 {
+		return false, nil
+	}
+	if err := r.db.Model(&models.BatchItem{}).
+		Where("batch_id = ? AND scrapped_at IS NULL", batchID).Count(&live).Error; err != nil {
+		return false, err
+	}
+	if live > 0 {
+		return false, nil
+	}
+	res := r.db.Model(&models.Batch{}).
+		Where("id = ? AND closed_at IS NULL", batchID).
+		Updates(map[string]any{"closed_at": at, "close_reason": reason})
+	return res.RowsAffected > 0, res.Error
+}
+
+// ScrappedCounts returns how many parts each batch has written off, so a list can
+// explain a batch that shows zero remaining items. One grouped query per page.
+func (r *BatchRepository) ScrappedCounts(batchIDs []uint) (map[uint]int, error) {
+	out := map[uint]int{}
+	if len(batchIDs) == 0 {
+		return out, nil
+	}
+	type row struct {
+		BatchID uint
+		N       int
+	}
+	var rows []row
+	err := r.db.Model(&models.BatchItem{}).
+		Select("batch_id, COUNT(*) AS n").
+		Where("batch_id IN ? AND scrapped_at IS NOT NULL", batchIDs).
+		Group("batch_id").Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, x := range rows {
+		out[x.BatchID] = x.N
+	}
+	return out, nil
+}
+
+// ScrapBatchItem writes a part off after a QC fail.
+func (r *BatchRepository) ScrapBatchItem(id uint, reason string, byID *uint, at time.Time) error {
+	return r.db.Model(&models.BatchItem{}).Where("id = ?", id).Updates(map[string]any{
+		"scrapped_at":    at,
+		"scrap_reason":   reason,
+		"scrapped_by_id": byID,
+	}).Error
+}
+
+// BatchItemsForBatch returns the parts that still count for the batch's status —
+// scrapped ones are excluded, otherwise a batch with one QC-failed piece could
+// never reach QC_PASSED and would sit on the production board forever. Parts
+// whose order line was cancelled drop out for the same reason: nobody is going to
+// print a cancelled product, so leaving it in would pin the batch at PENDING.
 func (r *BatchRepository) BatchItemsForBatch(batchID uint) ([]models.BatchItem, error) {
+	var items []models.BatchItem
+	err := activeBatchItems(r.db).
+		Where("batch_items.batch_id = ? AND batch_items.scrapped_at IS NULL", batchID).
+		Find(&items).Error
+	return items, err
+}
+
+// AllBatchItemsForBatch returns every part INCLUDING scrapped ones — for the
+// batch detail screen, which must still show what was made and written off.
+func (r *BatchRepository) AllBatchItemsForBatch(batchID uint) ([]models.BatchItem, error) {
 	var items []models.BatchItem
 	err := r.db.Where("batch_id = ?", batchID).Find(&items).Error
 	return items, err
@@ -239,12 +422,83 @@ func (r *BatchRepository) BatchItemStatusesForOrderItems(orderItemIDs []uint) (m
 	var rows []row
 	err := r.db.Model(&models.BatchItem{}).
 		Select("order_item_id, status").
-		Where("order_item_id IN ?", orderItemIDs).Scan(&rows).Error
+		// Scrapped parts are history, not work in progress: an item whose failed
+		// part was written off is back to "needs producing", not stuck at CUT.
+		Where("order_item_id IN ? AND scrapped_at IS NULL", orderItemIDs).Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
 	for _, r := range rows {
 		out[r.OrderItemID] = append(out[r.OrderItemID], r.Status)
+	}
+	return out, nil
+}
+
+// BatchItemStatusesForBatches is the batch-side mirror of the above: per batch,
+// the statuses of the parts that still count. One query for any number of
+// batches, so a roll-up over several batches at once stops costing a query each.
+func (r *BatchRepository) BatchItemStatusesForBatches(batchIDs []uint) (map[uint][]models.InternalStatus, error) {
+	out := map[uint][]models.InternalStatus{}
+	if len(batchIDs) == 0 {
+		return out, nil
+	}
+	type row struct {
+		BatchID uint
+		Status  models.InternalStatus
+	}
+	var rows []row
+	err := activeBatchItems(r.db).Model(&models.BatchItem{}).
+		Select("batch_items.batch_id, batch_items.status").
+		Where("batch_items.batch_id IN ?", batchIDs).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.BatchID] = append(out[r.BatchID], r.Status)
+	}
+	return out, nil
+}
+
+// FindLiteMany is FindLite for a set: the bare batch rows (no associations) a
+// roll-up needs to compare current status and find parents, in one query.
+func (r *BatchRepository) FindLiteMany(ids []uint) ([]models.Batch, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var rows []models.Batch
+	err := r.db.Where("id IN ?", ids).Find(&rows).Error
+	return rows, err
+}
+
+// UpdateStatusColumns is UpdateStatusColumn for every batch landing on the same
+// status — one statement instead of one per batch.
+func (r *BatchRepository) UpdateStatusColumns(ids []uint, status models.InternalStatus) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return r.db.Model(&models.Batch{}).Where("id IN ?", ids).Update("status", status).Error
+}
+
+// ChildBatchStatusesFor returns, per parent batch, its children's statuses — the
+// input to the parent roll-up, for many parents in one query.
+func (r *BatchRepository) ChildBatchStatusesFor(parentIDs []uint) (map[uint][]models.InternalStatus, error) {
+	out := map[uint][]models.InternalStatus{}
+	if len(parentIDs) == 0 {
+		return out, nil
+	}
+	type row struct {
+		ParentBatchID uint
+		Status        models.InternalStatus
+	}
+	var rows []row
+	err := r.db.Model(&models.Batch{}).
+		Select("parent_batch_id, status").
+		Where("parent_batch_id IN ?", parentIDs).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.ParentBatchID] = append(out[r.ParentBatchID], r.Status)
 	}
 	return out, nil
 }
@@ -257,7 +511,12 @@ func (r *BatchRepository) ExistingActiveItemMaterial(orderItemIDs []uint) (map[u
 		return out, nil
 	}
 	var rows []models.BatchItem
-	if err := r.db.Where("order_item_id IN ?", orderItemIDs).Find(&rows).Error; err != nil {
+	// scrapped_at IS NULL — a part written off after a QC fail is NOT an active
+	// schedule. Counting it here was what made a re-made product look "already
+	// batched" and kept it out of every new batch, while the create-batch picker
+	// (which ignores scrapped parts) happily offered it: the two disagreed and the
+	// user got "no eligible items" for an item the screen had just listed.
+	if err := r.db.Where("order_item_id IN ? AND scrapped_at IS NULL", orderItemIDs).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	for _, bi := range rows {
@@ -326,6 +585,17 @@ func (r *StatusHistoryRepository) ListForEntity(entityType models.EntityType, en
 type QCRepository struct{ db *gorm.DB }
 
 func (r *QCRepository) Create(q *models.QCRecord) error { return r.db.Create(q).Error }
+
+// CreateBulk writes one QC record per production part in a single statement. A
+// combo product is checked once but recorded per part, so the per-part loop it
+// replaces cost one round trip per material — paid while the operator stands at
+// the scanner waiting for the next item.
+func (r *QCRepository) CreateBulk(rows []models.QCRecord) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	return r.db.Create(&rows).Error
+}
 
 func (r *QCRepository) ListForItem(orderItemID uint) ([]models.QCRecord, error) {
 	var rows []models.QCRecord

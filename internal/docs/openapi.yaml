@@ -200,13 +200,24 @@ paths:
   /api/orders:
     get:
       tags: [Orders]
-      summary: Danh sách đơn (filter store, sku, status, date)
+      summary: Danh sách đơn (filter store, sku, status, date) + tra cứu CS
+      description: >
+        Mở cho cả role CS. `search` là ô tìm kiếm một dòng của màn CS: khớp
+        store_order_id, internal_code, tracking_number, tên/điện thoại/email
+        người nhận. Các tham số hẹp bên dưới dùng khi đã biết đang cầm mã gì.
       parameters:
         - { name: seller_id, in: query, schema: { type: integer } }
         - { name: store_id, in: query, schema: { type: integer } }
         - { name: sku, in: query, schema: { type: string } }
         - { name: status, in: query, schema: { type: string, enum: [PRODUCTION, PACKED, HANDED_OFF, SHIPPED] } }
         - { name: store_order_id, in: query, schema: { type: string } }
+        - { name: search, in: query, schema: { type: string }, description: Tra cứu CS một ô }
+        - { name: internal_code, in: query, schema: { type: string } }
+        - { name: tracking_number, in: query, schema: { type: string } }
+        - { name: shipping_name, in: query, schema: { type: string }, description: Tên người nhận }
+        - { name: shipping_phone, in: query, schema: { type: string } }
+        - { name: tracking_status, in: query, schema: { type: string } }
+        - { name: has_tracking, in: query, schema: { type: boolean }, description: "false = hàng đợi CS chưa có mã vận đơn" }
         - { name: date_from, in: query, schema: { type: string } }
         - { name: date_to, in: query, schema: { type: string } }
         - { name: page, in: query, schema: { type: integer } }
@@ -219,6 +230,64 @@ paths:
   /api/orders/{id}:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
     get: { tags: [Orders], summary: Chi tiết đơn (items, batch, timeline), responses: { '200': { description: OK } } }
+  /api/seller/orders/{id}/tracking/events:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    get:
+      tags: [Tracking]
+      summary: Seller xem hành trình đơn CỦA MÌNH (kiểm tra quyền sở hữu ở service)
+      responses:
+        '200': { description: "{ events: [...], enabled: bool }" }
+        '403': { description: Đơn không thuộc seller đang đăng nhập }
+  /api/orders/{id}/tracking:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    patch:
+      tags: [Tracking]
+      summary: Cập nhật tracking thủ công (số vận đơn, đơn vị, trạng thái, URL)
+      description: >
+        Khi mã vận đơn thay đổi, hệ thống tự đăng ký mã đó lên 24hTrack kèm
+        description "TAG:store_order_id" để lần sau tra ngược được.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tracking_number: { type: string }
+                # Link nội bộ tới nhà cung cấp tracking. Không bao giờ có mặt
+                # trong response của seller.
+                tracking_url: { type: string }
+                tracking_status:
+                  type: string
+                  enum: [NONE, PENDING, PRE_TRANSIT, IN_TRANSIT, OUT_FOR_DELIVERY, PICK_UP, DELIVERED, UNDELIVERED, EXCEPTION, EXPIRED, CANCELLED]
+      responses: { '200': { description: OK } }
+  /api/orders/{id}/tracking/events:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    get:
+      tags: [Tracking]
+      summary: Hành trình đơn hàng (đọc từ DB, không gọi 24hTrack)
+      responses:
+        '200':
+          description: "{ events: [...], enabled: bool } — enabled=false khi tích hợp 24hTrack đang tắt"
+  /api/orders/{id}/tracking/sync:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    post:
+      tags: [Tracking]
+      summary: Đồng bộ 1 đơn với 24hTrack
+      description: >
+        Đơn chưa có mã vận đơn thì tra 24hTrack theo store_order_id trước; nếu tìm
+        thấy đúng 1 kiện thì gán mã rồi kéo trạng thái + hành trình về.
+      responses:
+        '200': { description: Order sau khi đồng bộ }
+        '404': { description: 24hTrack chưa có dữ liệu cho đơn này }
+        '422': { description: Tích hợp đang tắt hoặc gọi provider thất bại }
+  /api/tracking/sync:
+    post:
+      tags: [Tracking]
+      summary: Chạy 1 lượt đồng bộ (tra mã + cập nhật trạng thái) ngay, không đợi cron
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 40, maximum: 500 } }
+      responses:
+        '200': { description: "{ resolved, synced, changed, failed, skipped }" }
   /api/items:
     get:
       tags: [Items]
@@ -402,7 +471,6 @@ paths:
               type: object
               required: [tracking_number]
               properties:
-                carrier: { type: string, description: "Đơn vị vận chuyển; bỏ trống thì giữ giá trị cũ" }
                 tracking_number: { type: string, description: "Mã vận đơn (bắt buộc)" }
                 label_url: { type: string, description: "Link nhãn/label (tuỳ chọn)" }
       responses:

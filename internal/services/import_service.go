@@ -294,6 +294,44 @@ func (s *ImportService) skuInfoForRows(rows []ImportRow) (map[string]repositorie
 
 // validateRow checks a single row and returns a blocking error (or nil). The
 // rowNumber is 1-based across data rows (matching the wireframe error table).
+// zipStateSwapped reports the classic filling mistake: the state sits in the ZIP
+// column and the ZIP in the province column.
+//
+// Why it happens: the template lists ShippingCity | ShippingZip | ShippingProvince,
+// while every address on earth reads "City, State ZIP". Anyone filling the sheet
+// by eye swaps the last two, and nothing downstream notices — both are free-text
+// columns that get printed straight onto the label. The parcel then goes out with
+// a state where the postcode should be, and comes back.
+//
+// Deliberately narrow, because the same columns carry non-US addresses too:
+// Canadian postal codes contain letters, the UK has no state at all. So flag only
+// the combination that cannot be anything else — a ZIP column holding exactly two
+// letters (no postal system uses that) AND a province column holding only digits
+// (no province name does).
+func zipStateSwapped(zip, province string) bool {
+	zip = strings.TrimSpace(zip)
+	province = strings.TrimSpace(province)
+	if len(zip) != 2 {
+		return false
+	}
+	for _, r := range zip {
+		if (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') {
+			return false
+		}
+	}
+	// ZIP+4 is written "55112-1050"; drop the separator before the digit check.
+	digits := strings.ReplaceAll(province, "-", "")
+	if digits == "" {
+		return false
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // skus is the pre-fetched SKUInfo map for the whole file (see skuInfoForRows).
 func (s *ImportService) validateRow(rowNumber int, row ImportRow, skus map[string]repositories.SKUInfo) *models.ImportError {
 	mkErr := func(field, code, msg, suggestion string) *models.ImportError {
@@ -420,6 +458,20 @@ func (s *ImportService) Preview(actor Actor, sellerID uint, source, filename str
 				Field: "StoreOrderID", ErrorCode: "ORD_DUPLICATE",
 				Message:    "StoreOrderID đã tồn tại cho seller này — không chặn, kiểm tra kẻo trùng",
 				Suggestion: "Xác nhận với khách nếu đây là đơn đã có; nếu đúng là đơn mới thì bỏ qua",
+			})
+		}
+		// Cột ZIP đang giữ mã bang và cột Bang đang giữ ZIP — xem zipStateSwapped.
+		// Cảnh báo chứ không chặn: máy chỉ SUY ĐOÁN từ hình dạng chuỗi, còn người
+		// nhập mới biết chắc. Nhưng phải nói ra, vì không nói thì sai này lặng lẽ
+		// đi thẳng lên nhãn gửi hàng và chỉ lộ khi kiện bị trả về.
+		if zipStateSwapped(row.ShippingZip, row.ShippingProvince) {
+			warnings = append(warnings, models.ImportError{
+				RowNumber: i + 1, StoreOrderID: row.StoreOrderID, SKU: row.SKU,
+				Field:     "ShippingZip",
+				ErrorCode: "ADDR_ZIP_STATE_SWAPPED",
+				Message: "Có vẻ ZIP và Bang bị đảo cột: ShippingZip=\"" + strings.TrimSpace(row.ShippingZip) +
+					"\" (giống mã bang), ShippingProvince=\"" + strings.TrimSpace(row.ShippingProvince) + "\" (giống mã ZIP)",
+				Suggestion: "Đổi chỗ hai cột: ShippingZip là mã bưu chính (số), ShippingProvince là bang/tỉnh",
 			})
 		}
 	}

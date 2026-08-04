@@ -81,6 +81,22 @@ func uintQueryPtr(c *gin.Context, name string) *uint {
 	return &u
 }
 
+// boolQueryPtr parses an optional boolean query parameter. Absent (or
+// unparseable) yields nil = "don't filter on this", which is a different answer
+// from false — a caller asking for has_tracking=false wants the orders that have
+// none, not every order.
+func boolQueryPtr(c *gin.Context, name string) *bool {
+	s := c.Query(name)
+	if s == "" {
+		return nil
+	}
+	v, err := strconv.ParseBool(s)
+	if err != nil {
+		return nil
+	}
+	return &v
+}
+
 // timeQueryPtr parses an optional RFC3339 or date (YYYY-MM-DD) query parameter.
 func timeQueryPtr(c *gin.Context, name string) *time.Time {
 	s := c.Query(name)

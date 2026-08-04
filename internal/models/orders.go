@@ -48,10 +48,10 @@ type Order struct {
 	// SellerID is covered by the composite indexes idx_orders_seller_page and
 	// idx_orders_seller_store_order (see ensurePerformanceIndexes) — no separate
 	// single-column index needed.
-	SellerID uint   `json:"seller_id" gorm:"not null"`
-	Seller   Seller `json:"seller,omitempty" gorm:"foreignKey:SellerID"`
-	StoreID      *uint  `json:"store_id" gorm:"index"`
-	StoreName    string `json:"store_name" gorm:"size:160"`
+	SellerID  uint   `json:"seller_id" gorm:"not null"`
+	Seller    Seller `json:"seller,omitempty" gorm:"foreignKey:SellerID"`
+	StoreID   *uint  `json:"store_id" gorm:"index"`
+	StoreName string `json:"store_name" gorm:"size:160"`
 
 	// Account is the seller's external account reference from the upload template
 	// (the "Account" column). It identifies which storefront account the order
@@ -93,13 +93,35 @@ type Order struct {
 
 	// Tracking (YC8). Populated manually via PATCH /orders/:id/tracking or synced
 	// from a handoff when it ships. TrackingStatus uses the TrackingStatus enum so
-	// the UI can render a consistent badge. A tracking provider integration (e.g.
-	// 17TRACK) can later refresh these fields via the same columns.
-	TrackingNumber   string         `json:"tracking_number" gorm:"size:120;index"`
-	TrackingStatus   TrackingStatus `json:"tracking_status" gorm:"size:20;not null;default:'NONE'"`
-	TrackingCarrier  string         `json:"tracking_carrier" gorm:"size:60"`
-	TrackingURL      string         `json:"tracking_url" gorm:"size:500"`
-	TrackingUpdatedAt *time.Time    `json:"tracking_updated_at"`
+	// the UI can render a consistent badge.
+	//
+	// There is deliberately NO "shipping company" column. Towards the seller, THE
+	// is the shipping company; which transport partner physically carries the
+	// parcel is supplier information. A column would be filled in, then rendered,
+	// then exported — so the field does not exist at all.
+	//
+	// TrackingURL is the internal deep link into the tracking provider. It is
+	// never included in a seller-facing response for the same reason: the page it
+	// opens names the transport partner.
+	TrackingNumber    string         `json:"tracking_number" gorm:"size:120;index"`
+	TrackingStatus    TrackingStatus `json:"tracking_status" gorm:"size:20;not null;default:'NONE'"`
+	TrackingURL       string         `json:"tracking_url" gorm:"size:500"`
+	TrackingUpdatedAt *time.Time     `json:"tracking_updated_at"`
+
+	// Provider-sync fields, filled by the tracking integration. Detail/Location
+	// mirror the latest scan so a list screen shows "where is it right now"
+	// without loading the whole timeline (see OrderTrackingEvent).
+	// RawStatus keeps the provider's own wording, which is often more specific
+	// than the normalized TrackingStatus badge.
+	TrackingDetail      string     `json:"tracking_detail" gorm:"size:500"`
+	TrackingLocation    string     `json:"tracking_location" gorm:"size:255"`
+	TrackingRawStatus   string     `json:"tracking_raw_status" gorm:"size:120"`
+	TrackingDeliveredAt *time.Time `json:"tracking_delivered_at"`
+	// TrackingSyncedAt is when the provider was last polled — set even when
+	// nothing changed, because it is what the scheduler orders by to pick the
+	// least-recently-checked parcels next.
+	TrackingSyncedAt  *time.Time `json:"tracking_synced_at" gorm:"index"`
+	TrackingSyncError string     `json:"tracking_sync_error" gorm:"size:255"`
 
 	// Review (intake) state. New orders are PENDING_REVIEW and only enter the
 	// design/production flow once APPROVED. The DB default is APPROVED so orders
@@ -118,6 +140,14 @@ type Order struct {
 	CancellationResolvedByID   *uint              `json:"cancellation_resolved_by_id"`
 	CancellationResolvedAt     *time.Time         `json:"cancellation_resolved_at"`
 	CancellationResolutionNote string             `json:"cancellation_resolution_note" gorm:"size:1000"`
+
+	// CancelStage is how far the order had progressed when the cancellation was
+	// ASKED FOR (not when it was resolved): a request that waits in the ops queue
+	// while the factory moves on is still judged by the state the seller acted on.
+	// CancelBillable starts as CancelStage.Billable() but is a separate column
+	// because Ops/Admin may waive the charge when they resolve the request.
+	CancelStage    CancelStage `json:"cancel_stage" gorm:"size:20;not null;default:''"`
+	CancelBillable bool        `json:"cancel_billable" gorm:"not null;default:false"`
 
 	Items []OrderItem `json:"items,omitempty" gorm:"foreignKey:OrderID"`
 
@@ -167,6 +197,10 @@ type OrderItem struct {
 
 	InternalStatus InternalStatus `json:"internal_status" gorm:"size:20;not null;index;default:'PENDING'"`
 	DesignStatus   DesignStatus   `json:"design_status" gorm:"size:20;not null;index;default:'PENDING'"`
+	// ReworkCount is how many times QC failed this product and sent it back to be
+	// re-made. Denormalised from the scrapped batch parts purely so the create-batch
+	// bucket and the item list can label and filter rework without a join.
+	ReworkCount int `json:"rework_count" gorm:"not null;default:0"`
 
 	// Cancellation is tracked per line item so cancelling one product does not
 	// incorrectly cancel every product grouped under the same order.
@@ -177,6 +211,11 @@ type OrderItem struct {
 	CancellationResolvedByID   *uint              `json:"cancellation_resolved_by_id"`
 	CancellationResolvedAt     *time.Time         `json:"cancellation_resolved_at"`
 	CancellationResolutionNote string             `json:"cancellation_resolution_note" gorm:"size:1000"`
+
+	// Same stage/billing snapshot as on Order — a single product cancelled after
+	// its part was printed is charged just like a whole order would be.
+	CancelStage    CancelStage `json:"cancel_stage" gorm:"size:20;not null;default:''"`
+	CancelBillable bool        `json:"cancel_billable" gorm:"not null;default:false"`
 
 	Assets     []ItemAsset `json:"assets,omitempty" gorm:"foreignKey:OrderItemID"`
 	BatchItems []BatchItem `json:"batch_items,omitempty" gorm:"foreignKey:OrderItemID"`

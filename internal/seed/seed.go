@@ -58,6 +58,7 @@ func seedRoles(db *gorm.DB) error {
 		models.RoleQC:         "Kiểm QC đối chiếu mockup",
 		models.RolePacking:    "Đóng gói",
 		models.RoleShipping:   "Bàn giao THE / shipping",
+		models.RoleCS:         "Chăm sóc khách hàng: tra đơn, nhập mã vận đơn",
 		models.RoleSeller:     "Seller: import & theo dõi trạng thái tổng",
 	}
 	for _, role := range models.AllRoles {
@@ -101,6 +102,7 @@ var demoUserDefs = []demoUserDef{
 	{"qc@the.local", "QC Demo", models.RoleQC, false},
 	{"packing@the.local", "Packing Demo", models.RolePacking, false},
 	{"shipping@the.local", "Shipping Demo", models.RoleShipping, false},
+	{"cs@the.local", "CS Demo", models.RoleCS, false},
 	{"seller@the.local", "Seller Demo", models.RoleSeller, true},
 }
 

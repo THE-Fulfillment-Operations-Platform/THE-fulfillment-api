@@ -56,7 +56,7 @@ func TestMarkShipped_EndToEnd(t *testing.T) {
 	order, handoff := seedHandedOff(t, db)
 
 	got, err := svc.MarkShipped(Actor{ID: 1, Role: models.RoleShipping}, handoff.ID, MarkShippedInput{
-		Carrier: "GHN", TrackingNumber: "GHN123456789", LabelURL: "https://labels.example.com/x.pdf",
+		TrackingNumber: "GHN123456789", LabelURL: "https://labels.example.com/x.pdf",
 	})
 	if err != nil {
 		t.Fatalf("MarkShipped failed: %v", err)
@@ -64,8 +64,13 @@ func TestMarkShipped_EndToEnd(t *testing.T) {
 	if got.Status != models.HandoffShipped {
 		t.Fatalf("handoff: want SHIPPED, got %s", got.Status)
 	}
-	if got.Carrier != "GHN" || got.TrackingNumber != "GHN123456789" {
-		t.Fatalf("handoff carrier/tracking not persisted: %+v", got)
+	if got.TrackingNumber != "GHN123456789" {
+		t.Fatalf("handoff tracking not persisted: %+v", got)
+	}
+	// The dispatch step cannot name a transport partner: the handoff keeps our
+	// own name, whatever the caller sends.
+	if got.Carrier != "THE" {
+		t.Fatalf("handoff carrier moved off our own name: %+v", got)
 	}
 
 	// Order rolled up to SHIPPED.
@@ -87,7 +92,7 @@ func TestMarkShipped_Guards(t *testing.T) {
 	actor := Actor{ID: 1, Role: models.RoleShipping}
 
 	// Missing tracking number → 400.
-	if _, err := svc.MarkShipped(actor, handoff.ID, MarkShippedInput{Carrier: "GHN"}); err == nil {
+	if _, err := svc.MarkShipped(actor, handoff.ID, MarkShippedInput{}); err == nil {
 		t.Fatal("expected error for missing tracking number")
 	} else if ae, ok := apperr.As(err); !ok || ae.Status != 400 {
 		t.Fatalf("want 400 bad request, got %v", err)

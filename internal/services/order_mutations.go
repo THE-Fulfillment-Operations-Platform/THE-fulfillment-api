@@ -245,6 +245,7 @@ func (s *OrderService) CancelOrder(actor Actor, id uint, reason string) (*models
 	}
 	now := time.Now()
 	from := order.ReviewStatus
+	stage := orderCancelStageFor(order)
 	order.ReviewStatus = models.ReviewCancelled
 	order.CancellationStatus = models.CancellationApproved
 	order.CancellationRequestedByID = actor.IDPtr()
@@ -253,12 +254,19 @@ func (s *OrderService) CancelOrder(actor Actor, id uint, reason string) (*models
 	order.CancellationResolvedByID = actor.IDPtr()
 	order.CancellationResolvedAt = &now
 	order.CancellationResolutionNote = "Huỷ bởi vận hành"
+	// Same billing rule as a seller-initiated cancellation: work already done is
+	// charged, whoever pressed the button.
+	order.CancelStage = stage
+	order.CancelBillable = stage.Billable()
 	if err := s.repo.Order.Update(order); err != nil {
 		return nil, apperr.Internal("could not cancel order").Wrap(err)
 	}
+	if err := cascadeOrderCancellation(s.repo, actor, order, now, "Huỷ bởi vận hành"); err != nil {
+		return nil, apperr.Internal("could not cancel order items").Wrap(err)
+	}
 	_ = recordStatus(s.repo, models.EntityOrder, order.ID, string(from), string(models.ReviewCancelled), actor, "ops cancelled: "+reason)
 	s.audit.Log(actor, "ORDER_OPS_CANCEL", "order", &order.ID, "Cancelled order "+order.InternalCode,
-		models.JSONMap{"reason": reason, "from": string(from)})
+		models.JSONMap{"reason": reason, "from": string(from), "stage": string(stage), "billable": order.CancelBillable})
 	return s.GetOrder(order.ID)
 }
 

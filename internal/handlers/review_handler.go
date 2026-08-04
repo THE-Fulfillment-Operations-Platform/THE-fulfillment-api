@@ -10,9 +10,12 @@ import (
 )
 
 // noteBody is the shared body for review/cancellation actions that carry a note.
+// Billable is only read when resolving a cancellation: nil keeps the charge
+// recorded when the request was raised, false waives it for this one order.
 type noteBody struct {
-	Note   string `json:"note"`
-	Reason string `json:"reason"`
+	Note     string `json:"note"`
+	Reason   string `json:"reason"`
+	Billable *bool  `json:"billable"`
 }
 
 // bindNote binds the optional note/reason body without failing on an empty body.
@@ -223,7 +226,8 @@ func (h *Handlers) ApproveItemCancellation(c *gin.Context) {
 	if !ok {
 		return
 	}
-	it, err := h.svc.Review.ResolveItemCancellation(actor(c), id, true, bindNote(c).Note)
+	b := bindNote(c)
+	it, err := h.svc.Review.ResolveItemCancellation(actor(c), id, true, b.Note, b.Billable)
 	if err != nil {
 		response.Fail(c, err)
 		return
@@ -236,7 +240,7 @@ func (h *Handlers) RejectItemCancellation(c *gin.Context) {
 	if !ok {
 		return
 	}
-	it, err := h.svc.Review.ResolveItemCancellation(actor(c), id, false, bindNote(c).Note)
+	it, err := h.svc.Review.ResolveItemCancellation(actor(c), id, false, bindNote(c).Note, nil)
 	if err != nil {
 		response.Fail(c, err)
 		return
@@ -261,14 +265,44 @@ func (h *Handlers) ListCancellationRequests(c *gin.Context) {
 	response.List(c, rows, metaFor(f.Page, total))
 }
 
+// ListResolvedCancellations lists cancellations already settled — where a
+// cancelled order can still be found once it has left every work list.
+// `billable=true|false` narrows to the ones still charged (or waived).
+// GET /api/cancellation-requests/resolved
+func (h *Handlers) ListResolvedCancellations(c *gin.Context) {
+	p := pageFrom(c)
+	f := repositories.OrderFilter{
+		Page:         p,
+		SellerID:     uintQueryPtr(c, "seller_id"),
+		StoreOrderID: c.Query("store_order_id"),
+	}
+	var billable *bool
+	switch c.Query("billable") {
+	case "true":
+		v := true
+		billable = &v
+	case "false":
+		v := false
+		billable = &v
+	}
+	rows, total, err := h.svc.Review.ListResolvedCancellations(f, billable)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.List(c, rows, metaFor(f.Page, total))
+}
+
 // ApproveCancellation approves a cancellation request (cancels the order).
+// Body may carry "billable" to override whether the customer is still charged.
 // POST /api/cancellation-requests/:id/approve
 func (h *Handlers) ApproveCancellation(c *gin.Context) {
 	id, ok := uintParam(c, "id")
 	if !ok {
 		return
 	}
-	o, err := h.svc.Review.ApproveCancellation(actor(c), id, bindNote(c).Note)
+	b := bindNote(c)
+	o, err := h.svc.Review.ApproveCancellation(actor(c), id, b.Note, b.Billable)
 	if err != nil {
 		response.Fail(c, err)
 		return

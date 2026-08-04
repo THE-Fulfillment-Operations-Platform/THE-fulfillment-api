@@ -31,36 +31,36 @@ type ReviewService struct {
 type SellerCancelAction string
 
 const (
-	// SellerActionCancel: order is still in review — seller may cancel directly.
+	// SellerActionCancel: nothing has been produced yet — the seller cancels
+	// outright, it takes effect immediately and nothing is charged.
 	SellerActionCancel SellerCancelAction = "CANCEL"
-	// SellerActionRequest: order is approved and waiting for design (not yet in
-	// production) — seller may submit a cancellation request for ops to resolve.
+	// SellerActionRequest: production has already started (or finished) — the
+	// seller may only ASK to cancel. Ops/Admin decide, and the order stays
+	// billable because the work was already done.
 	SellerActionRequest SellerCancelAction = "REQUEST"
-	// SellerActionOpsOnly: order is already in production (printed/cut/QC or
-	// batched) — only OPS/ADMIN can cancel it manually; the seller cannot.
-	SellerActionOpsOnly SellerCancelAction = "OPS_ONLY"
-	// SellerActionRefundClaim: order is packed/handed off/shipped — direct
-	// cancellation is not allowed; it is handled later as a refund/claim.
-	SellerActionRefundClaim SellerCancelAction = "REFUND_CLAIM"
 	// SellerActionNone: no action available (already cancelled/rejected, or a
 	// cancellation request is already pending).
 	SellerActionNone SellerCancelAction = "NONE"
 )
 
 // orderPacked reports whether an order has advanced to packing or beyond.
+// Rank-based rather than an explicit list: a new late-lifecycle status (DELIVERED
+// was one) is "packed or beyond" by definition, and a list would have silently
+// answered false for it.
 func orderPacked(seller models.SellerStatus) bool {
-	switch seller {
-	case models.SellerStatusPacked, models.SellerStatusHandedOff, models.SellerStatusShipped:
-		return true
-	}
-	return false
+	return seller.Rank() >= models.SellerStatusPacked.Rank()
 }
 
 // orderInProduction reports whether an approved order already has production
-// work in flight: any item scheduled into a batch or advanced past PENDING.
-// Requires the order's Items (and, for precision, their BatchItems) preloaded.
+// work in flight: any live item scheduled into a batch or advanced past PENDING.
+// Already-cancelled lines don't count — they are history, not work. Requires the
+// order's Items (and, for precision, their BatchItems) preloaded; the list path
+// uses OrderRepository.InProductionIDs instead of preloading a page of them.
 func orderInProduction(o *models.Order) bool {
 	for _, it := range o.Items {
+		if itemCancelled(it.CancellationStatus) {
+			continue
+		}
 		if it.InternalStatus != models.StatusPending {
 			return true
 		}
@@ -71,24 +71,48 @@ func orderInProduction(o *models.Order) bool {
 	return false
 }
 
-// sellerCancelAction computes the cancellation action available to the seller
-// from the order's review/cancellation state and how far it has progressed.
-func sellerCancelAction(review models.ReviewStatus, cancellation models.CancellationStatus, packed, inProduction bool) SellerCancelAction {
+// orderCancelStage snapshots how far an order has progressed. Everything about a
+// cancellation follows from it: whether the seller may cancel outright or has to
+// ask, and whether the customer is charged anyway.
+func orderCancelStage(seller models.SellerStatus, inProduction bool) models.CancelStage {
+	switch seller {
+	// Delivered is past shipped, not a separate cancellation stage — there is no
+	// "more cancelled than shipped". Both bill in full.
+	case models.SellerStatusShipped, models.SellerStatusDelivered:
+		return models.CancelStageShipped
+	case models.SellerStatusPacked, models.SellerStatusHandedOff:
+		return models.CancelStagePacked
+	}
+	if inProduction {
+		return models.CancelStageInProduction
+	}
+	return models.CancelStagePreProduction
+}
+
+// orderCancelStageFor is the order-level convenience wrapper (items preloaded).
+func orderCancelStageFor(o *models.Order) models.CancelStage {
+	return orderCancelStage(o.SellerStatus, orderInProduction(o))
+}
+
+// sellerCancelAction computes the cancellation action available to the seller.
+//
+// The whole policy is two lines: before production the seller owns the order and
+// cancels it themselves; from the first print onward the factory has spent
+// material and machine time, so a human approves the cancellation and the order
+// is still invoiced. Cancellation therefore stays available across the ENTIRE
+// lifecycle — a packed or shipped order can still be requested (Ops/Admin resolve
+// it as a claim) instead of leaving the seller with no button and a phone call.
+func sellerCancelAction(review models.ReviewStatus, cancellation models.CancellationStatus, stage models.CancelStage) SellerCancelAction {
 	// A request already in flight leaves the seller nothing to do but wait.
 	if cancellation == models.CancellationRequested {
 		return SellerActionNone
 	}
 	switch review {
-	case models.ReviewPending, models.ReviewNeedsFix:
+	case models.ReviewPending, models.ReviewNeedsFix, models.ReviewApproved:
+		if stage.NeedsApproval() {
+			return SellerActionRequest
+		}
 		return SellerActionCancel
-	case models.ReviewApproved:
-		if packed {
-			return SellerActionRefundClaim
-		}
-		if inProduction {
-			return SellerActionOpsOnly
-		}
-		return SellerActionRequest
 	default: // REJECTED, CANCELLED
 		return SellerActionNone
 	}
@@ -96,7 +120,7 @@ func sellerCancelAction(review models.ReviewStatus, cancellation models.Cancella
 
 // sellerCancelActionForOrder is the order-level convenience wrapper.
 func sellerCancelActionForOrder(o *models.Order) SellerCancelAction {
-	return sellerCancelAction(o.ReviewStatus, o.CancellationStatus, orderPacked(o.SellerStatus), orderInProduction(o))
+	return sellerCancelAction(o.ReviewStatus, o.CancellationStatus, orderCancelStageFor(o))
 }
 
 // isReviewable reports whether an order is in a state a reviewer can act on.
@@ -507,19 +531,67 @@ func writeBulkApproveAudit(txRepo *repositories.Repositories, actor Actor, appro
 func cancelActionError(a SellerCancelAction) error {
 	switch a {
 	case SellerActionCancel:
-		return apperr.Conflict("This order is still in review; cancel it directly instead")
+		return apperr.Conflict("Đơn chưa vào sản xuất — huỷ trực tiếp thay vì gửi yêu cầu")
 	case SellerActionRequest:
-		return apperr.Conflict("This order is approved; submit a cancellation request instead")
-	case SellerActionOpsOnly:
-		return apperr.Conflict("This order is already in production; please contact Ops to cancel")
-	case SellerActionRefundClaim:
-		return apperr.Conflict("This order is already packed/shipped; cancellation is not allowed (handle as refund/claim)")
+		return apperr.Conflict("Đơn đã vào sản xuất — cần gửi yêu cầu huỷ để vận hành duyệt")
 	default:
-		return apperr.Conflict("This order can no longer be cancelled")
+		return apperr.Conflict("Đơn này không thể huỷ nữa")
 	}
 }
 
-// SellerCancel lets a seller directly cancel an order that is still in review.
+// stageLabel is the Vietnamese wording of a cancellation stage, used in the ops
+// note and audit trail so a reader sees where the order was without decoding an
+// enum.
+func stageLabel(s models.CancelStage) string {
+	switch s {
+	case models.CancelStageInProduction:
+		return "đang sản xuất"
+	case models.CancelStagePacked:
+		return "đã đóng gói/bàn giao"
+	case models.CancelStageShipped:
+		return "đã gửi đi"
+	default:
+		return "chưa vào sản xuất"
+	}
+}
+
+// cascadeOrderCancellation propagates a settled order-level cancellation down to
+// the order's remaining live lines and re-derives the status of every batch that
+// lost work.
+//
+// Without it the order is only cosmetically cancelled: design, batching, QC and
+// packing all decide what is "work" from the ITEM's cancellation status, so its
+// products would keep moving through the factory after the seller was told the
+// order was cancelled. Call it after the order row itself has been written, with
+// order.CancellationStatus already at its terminal value.
+func cascadeOrderCancellation(repo *repositories.Repositories, actor Actor, order *models.Order, at time.Time, note string) error {
+	// Read the affected batches BEFORE the lines are marked cancelled — the lookup
+	// joins through them.
+	batchIDs, err := repo.Batch.BatchIDsForOrder(order.ID)
+	if err != nil {
+		return err
+	}
+	if _, err := repo.OrderItem.CancelActiveForOrder(order.ID, repositories.ItemCancelPatch{
+		Status:       order.CancellationStatus,
+		Reason:       order.CancellationReason,
+		ResolvedByID: actor.IDPtr(),
+		ResolvedAt:   at,
+		Note:         note,
+		Stage:        order.CancelStage,
+		Billable:     order.CancelBillable,
+	}); err != nil {
+		return err
+	}
+	// A batch that just lost parts may now be fully printed/cut/QC'd; re-derive it
+	// so the production board doesn't hold it open on work nobody will do.
+	for _, id := range batchIDs {
+		_ = recomputeBatchStatus(repo, id, actor)
+	}
+	return nil
+}
+
+// SellerCancel lets a seller cancel an order outright — allowed only while
+// nothing has been produced (see sellerCancelAction). It is immediate and free.
 func (s *ReviewService) SellerCancel(actor Actor, sellerID, orderID uint, reason string) (*models.Order, error) {
 	order, err := s.getSellerOrder(sellerID, orderID)
 	if err != nil {
@@ -537,32 +609,46 @@ func (s *ReviewService) SellerCancel(actor Actor, sellerID, orderID uint, reason
 	order.CancellationReason = strings.TrimSpace(reason)
 	order.CancellationResolvedByID = actor.IDPtr()
 	order.CancellationResolvedAt = &now
+	// A direct seller cancel only exists before production, so it is never billed.
+	order.CancelStage = models.CancelStagePreProduction
+	order.CancelBillable = false
 	if err := s.repo.Order.Update(order); err != nil {
 		return nil, apperr.Internal("could not cancel order").Wrap(err)
 	}
+	if err := cascadeOrderCancellation(s.repo, actor, order, now, "Seller huỷ cả đơn"); err != nil {
+		return nil, apperr.Internal("could not cancel order items").Wrap(err)
+	}
 	_ = recordStatus(s.repo, models.EntityOrder, order.ID, string(from), string(models.ReviewCancelled), actor, "seller cancelled")
-	s.audit.Log(actor, "ORDER_SELLER_CANCEL", "order", &order.ID, "Seller cancelled order "+order.InternalCode, nil)
+	s.audit.Log(actor, "ORDER_SELLER_CANCEL", "order", &order.ID, "Seller cancelled order "+order.InternalCode,
+		models.JSONMap{"stage": string(order.CancelStage), "billable": false})
 	return s.getOrder(order.ID)
 }
 
-// SellerRequestCancellation submits a cancellation request for an approved order
-// that is not yet in production. It raises a required-attention note for ops.
+// SellerRequestCancellation submits a cancellation request for an order the
+// seller may no longer cancel on their own — production has started, so Ops/Admin
+// decide and the order stays billable. It raises a required-attention note so the
+// request lands in the ops inbox rather than waiting to be noticed.
 func (s *ReviewService) SellerRequestCancellation(actor Actor, sellerID, orderID uint, reason string) (*models.Order, error) {
 	order, err := s.getSellerOrder(sellerID, orderID)
 	if err != nil {
 		return nil, err
 	}
 	if order.CancellationStatus == models.CancellationRequested {
-		return nil, apperr.Conflict("A cancellation request is already pending for this order")
+		return nil, apperr.Conflict("Đơn này đã có một yêu cầu huỷ đang chờ xử lý")
 	}
 	if sellerCancelActionForOrder(order) != SellerActionRequest {
 		return nil, cancelActionError(sellerCancelActionForOrder(order))
 	}
 	now := time.Now()
+	stage := orderCancelStageFor(order)
 	order.CancellationStatus = models.CancellationRequested
 	order.CancellationRequestedByID = actor.IDPtr()
 	order.CancellationRequestedAt = &now
 	order.CancellationReason = strings.TrimSpace(reason)
+	// The stage is frozen here, not at approval time: the seller acted on this
+	// state, and production keeps moving while the request waits in the queue.
+	order.CancelStage = stage
+	order.CancelBillable = stage.Billable()
 	// Clear any previous resolution so a re-request starts clean.
 	order.CancellationResolvedByID = nil
 	order.CancellationResolvedAt = nil
@@ -571,9 +657,13 @@ func (s *ReviewService) SellerRequestCancellation(actor Actor, sellerID, orderID
 		return nil, apperr.Internal("could not submit cancellation request").Wrap(err)
 	}
 	// Surface the request as a required-attention note in the ops inbox.
+	billingLine := ""
+	if order.CancelBillable {
+		billingLine = " ĐƠN ĐÃ VÀO SẢN XUẤT — nếu duyệt huỷ thì vẫn tính tiền khách."
+	}
 	_ = s.repo.Note.Create(&models.Note{
 		Title:               "Yêu cầu huỷ đơn " + order.InternalCode,
-		Body:                "Seller yêu cầu huỷ đơn. Lý do: " + order.CancellationReason,
+		Body:                "Seller yêu cầu huỷ đơn (" + stageLabel(stage) + "). Lý do: " + order.CancellationReason + "." + billingLine,
 		ReasonCode:          "CANCEL_REQUEST",
 		Severity:            models.SeverityHigh,
 		Status:              models.NoteOpen,
@@ -583,7 +673,8 @@ func (s *ReviewService) SellerRequestCancellation(actor Actor, sellerID, orderID
 		OwnerRole:           models.RoleOps,
 		CreatedByID:         actor.IDPtr(),
 	})
-	s.audit.Log(actor, "ORDER_CANCEL_REQUEST", "order", &order.ID, "Seller requested cancellation of "+order.InternalCode, nil)
+	s.audit.Log(actor, "ORDER_CANCEL_REQUEST", "order", &order.ID, "Seller requested cancellation of "+order.InternalCode,
+		models.JSONMap{"stage": string(stage), "billable": order.CancelBillable})
 	return s.getOrder(order.ID)
 }
 
@@ -591,16 +682,27 @@ func itemCancelled(status models.CancellationStatus) bool {
 	return status == models.CancellationSeller || status == models.CancellationApproved
 }
 
-// SellerCancelItem cancels exactly one line item while its parent order is still
-// in review. The parent order is cancelled only after its last active item goes.
-func (s *ReviewService) SellerCancelItem(actor Actor, sellerID, orderID, itemID uint, reason string) (*models.Order, error) {
-	order, err := s.getSellerOrder(sellerID, orderID)
-	if err != nil {
-		return nil, err
+// itemCancelStage snapshots how far ONE line has progressed. It is judged on the
+// line's own work, not the order's: a product still sitting at PENDING outside
+// every batch costs nothing to drop even when its siblings are already on the
+// machine, so the seller can still pull it themselves. Packing and shipping are
+// order-level facts and apply to every line in the order.
+func itemCancelStage(order *models.Order, it *models.OrderItem) models.CancelStage {
+	switch order.SellerStatus {
+	case models.SellerStatusShipped, models.SellerStatusDelivered:
+		return models.CancelStageShipped
+	case models.SellerStatusPacked, models.SellerStatusHandedOff:
+		return models.CancelStagePacked
 	}
-	if sellerCancelActionForOrder(order) != SellerActionCancel {
-		return nil, cancelActionError(sellerCancelActionForOrder(order))
+	if it.InternalStatus != models.StatusPending || len(it.BatchItems) > 0 {
+		return models.CancelStageInProduction
 	}
+	return models.CancelStagePreProduction
+}
+
+// loadSellerItem loads one line and proves it belongs to the given order and that
+// no cancellation is already running on it.
+func (s *ReviewService) loadSellerItem(orderID, itemID uint) (*models.OrderItem, error) {
 	item, err := s.repo.OrderItem.FindByID(itemID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -612,73 +714,128 @@ func (s *ReviewService) SellerCancelItem(actor Actor, sellerID, orderID, itemID 
 		return nil, apperr.NotFound("Order item not found in this order")
 	}
 	if item.CancellationStatus == models.CancellationRequested || itemCancelled(item.CancellationStatus) {
-		return nil, apperr.Conflict("This order item already has a cancellation")
+		return nil, apperr.Conflict("Sản phẩm này đã có yêu cầu huỷ hoặc đã bị huỷ")
+	}
+	return item, nil
+}
+
+// closeOrderIfAllItemsCancelled cancels the parent order once its last live line
+// is gone, so an emptied order doesn't linger as "in production" with nothing in
+// it. Inherits the billing decision from the lines that were cancelled.
+func (s *ReviewService) closeOrderIfAllItemsCancelled(actor Actor, orderID uint, status models.CancellationStatus, at time.Time) error {
+	refreshed, err := s.getOrder(orderID)
+	if err != nil {
+		return err
+	}
+	if refreshed.ReviewStatus == models.ReviewCancelled || len(refreshed.Items) == 0 {
+		return nil
+	}
+	billable := false
+	for i := range refreshed.Items {
+		if !itemCancelled(refreshed.Items[i].CancellationStatus) {
+			return nil
+		}
+		if refreshed.Items[i].CancelBillable {
+			billable = true
+		}
+	}
+	from := refreshed.ReviewStatus
+	refreshed.ReviewStatus = models.ReviewCancelled
+	refreshed.CancellationStatus = status
+	refreshed.CancellationResolvedByID = actor.IDPtr()
+	refreshed.CancellationResolvedAt = &at
+	refreshed.CancellationResolutionNote = "Tất cả sản phẩm trong đơn đã bị huỷ"
+	refreshed.CancelBillable = billable
+	if refreshed.CancelStage == models.CancelStageNone {
+		refreshed.CancelStage = models.CancelStagePreProduction
+		if billable {
+			refreshed.CancelStage = models.CancelStageInProduction
+		}
+	}
+	if err := s.repo.Order.Update(refreshed); err != nil {
+		return apperr.Internal("could not close empty order").Wrap(err)
+	}
+	_ = recordStatus(s.repo, models.EntityOrder, refreshed.ID, string(from), string(models.ReviewCancelled), actor, "all items cancelled")
+	return nil
+}
+
+// SellerCancelItem cancels exactly one line item outright — allowed only while
+// that line has not been produced. The parent order is cancelled only after its
+// last active item goes.
+func (s *ReviewService) SellerCancelItem(actor Actor, sellerID, orderID, itemID uint, reason string) (*models.Order, error) {
+	order, err := s.getSellerOrder(sellerID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	item, err := s.loadSellerItem(orderID, itemID)
+	if err != nil {
+		return nil, err
+	}
+	// Judged on the line's own progress, so an untouched product in a partly
+	// produced order can still be dropped without an ops round trip.
+	action := sellerCancelAction(order.ReviewStatus, order.CancellationStatus, itemCancelStage(order, item))
+	if action != SellerActionCancel {
+		return nil, cancelActionError(action)
 	}
 	now := time.Now()
 	item.CancellationStatus = models.CancellationSeller
 	item.CancellationRequestedByID, item.CancellationResolvedByID = actor.IDPtr(), actor.IDPtr()
 	item.CancellationRequestedAt, item.CancellationResolvedAt = &now, &now
 	item.CancellationReason = strings.TrimSpace(reason)
+	item.CancelStage, item.CancelBillable = models.CancelStagePreProduction, false
 	if err := s.repo.OrderItem.Update(item); err != nil {
 		return nil, apperr.Internal("could not cancel order item").Wrap(err)
 	}
-
-	refreshed, err := s.getOrder(orderID)
-	if err != nil {
+	if err := s.closeOrderIfAllItemsCancelled(actor, orderID, models.CancellationSeller, now); err != nil {
 		return nil, err
-	}
-	allCancelled := len(refreshed.Items) > 0
-	for i := range refreshed.Items {
-		if !itemCancelled(refreshed.Items[i].CancellationStatus) {
-			allCancelled = false
-			break
-		}
-	}
-	if allCancelled {
-		refreshed.ReviewStatus = models.ReviewCancelled
-		refreshed.CancellationStatus = models.CancellationSeller
-		refreshed.CancellationResolvedAt = &now
-		if err := s.repo.Order.Update(refreshed); err != nil {
-			return nil, apperr.Internal("could not close empty order").Wrap(err)
-		}
 	}
 	s.audit.Log(actor, "ORDER_ITEM_SELLER_CANCEL", "order_item", &item.ID, "Seller cancelled item "+item.InternalCode, nil)
 	return s.getOrder(orderID)
 }
 
-// SellerRequestItemCancellation requests removal of one item without changing
-// the parent order or its sibling items until Ops resolves the request.
+// SellerRequestItemCancellation requests removal of one already-produced item
+// without changing the parent order or its sibling items until Ops resolves it.
 func (s *ReviewService) SellerRequestItemCancellation(actor Actor, sellerID, orderID, itemID uint, reason string) (*models.Order, error) {
 	order, err := s.getSellerOrder(sellerID, orderID)
 	if err != nil {
 		return nil, err
 	}
-	if sellerCancelActionForOrder(order) != SellerActionRequest {
-		return nil, cancelActionError(sellerCancelActionForOrder(order))
-	}
-	item, err := s.repo.OrderItem.FindByID(itemID)
+	item, err := s.loadSellerItem(orderID, itemID)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, apperr.NotFound("Order item not found")
-		}
-		return nil, apperr.Internal("lookup item failed").Wrap(err)
+		return nil, err
 	}
-	if item.OrderID != orderID {
-		return nil, apperr.NotFound("Order item not found in this order")
-	}
-	if item.CancellationStatus == models.CancellationRequested || itemCancelled(item.CancellationStatus) {
-		return nil, apperr.Conflict("This order item already has a cancellation")
+	stage := itemCancelStage(order, item)
+	action := sellerCancelAction(order.ReviewStatus, order.CancellationStatus, stage)
+	if action != SellerActionRequest {
+		return nil, cancelActionError(action)
 	}
 	now := time.Now()
 	item.CancellationStatus = models.CancellationRequested
 	item.CancellationRequestedByID, item.CancellationRequestedAt = actor.IDPtr(), &now
 	item.CancellationReason = strings.TrimSpace(reason)
 	item.CancellationResolvedByID, item.CancellationResolvedAt, item.CancellationResolutionNote = nil, nil, ""
+	item.CancelStage, item.CancelBillable = stage, stage.Billable()
 	if err := s.repo.OrderItem.Update(item); err != nil {
 		return nil, apperr.Internal("could not request order item cancellation").Wrap(err)
 	}
-	_ = s.repo.Note.Create(&models.Note{Title: "Yêu cầu huỷ sản phẩm " + item.InternalCode, Body: "Seller yêu cầu huỷ sản phẩm. Lý do: " + item.CancellationReason, ReasonCode: "ITEM_CANCEL_REQUEST", Severity: models.SeverityHigh, Status: models.NoteOpen, IsRequiredAttention: true, EntityType: models.EntityOrderItem, EntityID: &item.ID, OwnerRole: models.RoleOps, CreatedByID: actor.IDPtr()})
-	s.audit.Log(actor, "ORDER_ITEM_CANCEL_REQUEST", "order_item", &item.ID, "Seller requested cancellation of "+item.InternalCode, nil)
+	billingLine := ""
+	if item.CancelBillable {
+		billingLine = " SẢN PHẨM ĐÃ VÀO SẢN XUẤT — nếu duyệt huỷ thì vẫn tính tiền khách."
+	}
+	_ = s.repo.Note.Create(&models.Note{
+		Title:               "Yêu cầu huỷ sản phẩm " + item.InternalCode,
+		Body:                "Seller yêu cầu huỷ sản phẩm (" + stageLabel(stage) + "). Lý do: " + item.CancellationReason + "." + billingLine,
+		ReasonCode:          "ITEM_CANCEL_REQUEST",
+		Severity:            models.SeverityHigh,
+		Status:              models.NoteOpen,
+		IsRequiredAttention: true,
+		EntityType:          models.EntityOrderItem,
+		EntityID:            &item.ID,
+		OwnerRole:           models.RoleOps,
+		CreatedByID:         actor.IDPtr(),
+	})
+	s.audit.Log(actor, "ORDER_ITEM_CANCEL_REQUEST", "order_item", &item.ID, "Seller requested cancellation of "+item.InternalCode,
+		models.JSONMap{"stage": string(stage), "billable": item.CancelBillable})
 	return s.getOrder(orderID)
 }
 
@@ -688,7 +845,10 @@ func (s *ReviewService) ListItemCancellationRequests(p repositories.Page) ([]mod
 	return s.repo.OrderItem.ListCancellationRequests(p.Normalize())
 }
 
-func (s *ReviewService) ResolveItemCancellation(actor Actor, itemID uint, approve bool, note string) (*models.OrderItem, error) {
+// ResolveItemCancellation approves or rejects a pending per-item cancellation.
+// billable overrides the charge recorded when the request was made (nil = keep
+// it), so Ops can waive the cost of an in-production line case by case.
+func (s *ReviewService) ResolveItemCancellation(actor Actor, itemID uint, approve bool, note string, billable *bool) (*models.OrderItem, error) {
 	item, err := s.repo.OrderItem.FindByID(itemID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -697,44 +857,50 @@ func (s *ReviewService) ResolveItemCancellation(actor Actor, itemID uint, approv
 		return nil, apperr.Internal("lookup item failed").Wrap(err)
 	}
 	if item.CancellationStatus != models.CancellationRequested {
-		return nil, apperr.Conflict("No pending cancellation request for this order item")
+		return nil, apperr.Conflict("Sản phẩm này không có yêu cầu huỷ nào đang chờ")
+	}
+	if err := s.guardResolveStage(actor, item.CancelStage); err != nil {
+		return nil, err
 	}
 	now := time.Now()
 	if approve {
 		item.CancellationStatus = models.CancellationApproved
 	} else {
 		item.CancellationStatus = models.CancellationRejected
+		// A refused request leaves nothing to invoice on top of the normal order.
+		item.CancelBillable = false
+	}
+	if approve && billable != nil {
+		item.CancelBillable = *billable
 	}
 	item.CancellationResolvedByID, item.CancellationResolvedAt = actor.IDPtr(), &now
 	item.CancellationResolutionNote = strings.TrimSpace(note)
 	if err := s.repo.OrderItem.Update(item); err != nil {
 		return nil, apperr.Internal("could not resolve order item cancellation").Wrap(err)
 	}
+	resolution := "Đã từ chối yêu cầu huỷ sản phẩm"
 	if approve {
-		order, loadErr := s.getOrder(item.OrderID)
-		if loadErr != nil {
-			return nil, loadErr
-		}
-		allCancelled := len(order.Items) > 0
-		for i := range order.Items {
-			if !itemCancelled(order.Items[i].CancellationStatus) {
-				allCancelled = false
-				break
+		resolution = "Đã duyệt huỷ sản phẩm"
+	}
+	s.closeCancelRequestNote(actor, models.EntityOrderItem, item.ID, "ITEM_CANCEL_REQUEST", resolution, now)
+	if approve {
+		// The line is out of production now: re-derive the batches it was in so they
+		// aren't held open waiting on a part nobody will make.
+		if batchIDs, bErr := s.repo.Batch.BatchIDsForOrderItem(item.ID); bErr == nil {
+			for _, id := range batchIDs {
+				_ = recomputeBatchStatus(s.repo, id, actor)
 			}
 		}
-		if allCancelled {
-			order.ReviewStatus, order.CancellationStatus = models.ReviewCancelled, models.CancellationApproved
-			order.CancellationResolvedAt = &now
-			if err := s.repo.Order.Update(order); err != nil {
-				return nil, apperr.Internal("could not close empty order").Wrap(err)
-			}
+		if err := s.closeOrderIfAllItemsCancelled(actor, item.OrderID, models.CancellationApproved, now); err != nil {
+			return nil, err
 		}
 	}
 	action := "CANCEL_ITEM_REJECT"
 	if approve {
 		action = "CANCEL_ITEM_APPROVE"
 	}
-	s.audit.Log(actor, action, "order_item", &item.ID, "Resolved cancellation of "+item.InternalCode, nil)
+	s.audit.Log(actor, action, "order_item", &item.ID, "Resolved cancellation of "+item.InternalCode,
+		models.JSONMap{"stage": string(item.CancelStage), "billable": item.CancelBillable})
 	return s.repo.OrderItem.FindByID(item.ID)
 }
 
@@ -752,15 +918,67 @@ func (s *ReviewService) ListCancellationRequests(f repositories.OrderFilter) ([]
 	return rows, total, nil
 }
 
+// closeCancelRequestNote clears the required-attention note the request raised.
+// The inbox is only useful if settled items leave it, and a cancellation the ops
+// team has already decided on is settled either way — approved or refused.
+func (s *ReviewService) closeCancelRequestNote(actor Actor, entity models.EntityType, entityID uint, reasonCode, resolution string, at time.Time) {
+	_, _ = s.repo.Note.ResolveOpenForEntityReason(entity, entityID, reasonCode, actor.IDPtr(), resolution, at)
+}
+
+// guardResolveStage restricts who may sign off a cancellation. Ops handle the
+// everyday case (an order still on the shop floor); once the goods are packed or
+// out the door, writing the order off is a commercial decision, so it mirrors the
+// manual-cancel rule and asks for ADMIN/OWNER.
+func (s *ReviewService) guardResolveStage(actor Actor, stage models.CancelStage) error {
+	if stage != models.CancelStagePacked && stage != models.CancelStageShipped {
+		return nil
+	}
+	if actor.Role == models.RoleOwner || actor.Role == models.RoleAdmin {
+		return nil
+	}
+	return apperr.Forbidden("Đơn đã đóng gói/gửi đi — chỉ Admin/Owner được duyệt huỷ")
+}
+
+// ListResolvedCancellations lists cancellations that are already settled — the
+// history behind the pending queue.
+//
+// It exists because a settled cancellation otherwise has nowhere to be seen: it
+// leaves the pending queue, and cancelling an order cancels every line in it, so
+// it drops out of the item-level order list too. That matters most for the ones
+// that are still charged (cancel_billable), which are exactly the rows somebody
+// has to invoice. billable narrows to those; nil lists everything settled.
+func (s *ReviewService) ListResolvedCancellations(f repositories.OrderFilter, billable *bool) ([]models.Order, int64, error) {
+	f.Page = f.Page.Normalize()
+	f.CancellationStatuses = []string{
+		string(models.CancellationApproved),
+		string(models.CancellationSeller),
+		string(models.CancellationRejected),
+	}
+	f.CancelBillable = billable
+	rows, total, err := s.repo.Order.List(f)
+	if err != nil {
+		return rows, total, err
+	}
+	if err := annotateStoreOrderDupSlice(s.repo, rows); err != nil {
+		return rows, total, err
+	}
+	return rows, total, nil
+}
+
 // ApproveCancellation approves a pending cancellation request and cancels the
-// order (removing it from the production flow).
-func (s *ReviewService) ApproveCancellation(actor Actor, orderID uint, note string) (*models.Order, error) {
+// order, pulling it and every one of its lines out of the production flow.
+// billable overrides the charge decided when the request was made (nil = keep
+// it): the default is "đã sản xuất thì vẫn tính tiền", and Ops/Admin may waive it.
+func (s *ReviewService) ApproveCancellation(actor Actor, orderID uint, note string, billable *bool) (*models.Order, error) {
 	order, err := s.getOrder(orderID)
 	if err != nil {
 		return nil, err
 	}
 	if order.CancellationStatus != models.CancellationRequested {
-		return nil, apperr.Conflict("No pending cancellation request for this order")
+		return nil, apperr.Conflict("Đơn này không có yêu cầu huỷ nào đang chờ")
+	}
+	if err := s.guardResolveStage(actor, order.CancelStage); err != nil {
+		return nil, err
 	}
 	now := time.Now()
 	from := order.ReviewStatus
@@ -769,32 +987,44 @@ func (s *ReviewService) ApproveCancellation(actor Actor, orderID uint, note stri
 	order.CancellationResolvedAt = &now
 	order.CancellationResolutionNote = strings.TrimSpace(note)
 	order.ReviewStatus = models.ReviewCancelled
+	if billable != nil {
+		order.CancelBillable = *billable
+	}
 	if err := s.repo.Order.Update(order); err != nil {
 		return nil, apperr.Internal("could not approve cancellation").Wrap(err)
 	}
+	if err := cascadeOrderCancellation(s.repo, actor, order, now, "Huỷ đơn được duyệt"); err != nil {
+		return nil, apperr.Internal("could not cancel order items").Wrap(err)
+	}
+	s.closeCancelRequestNote(actor, models.EntityOrder, order.ID, "CANCEL_REQUEST", "Đã duyệt huỷ đơn", now)
 	_ = recordStatus(s.repo, models.EntityOrder, order.ID, string(from), string(models.ReviewCancelled), actor, "cancellation approved")
-	s.audit.Log(actor, "CANCEL_APPROVE", "order", &order.ID, "Approved cancellation of "+order.InternalCode, nil)
+	s.audit.Log(actor, "CANCEL_APPROVE", "order", &order.ID, "Approved cancellation of "+order.InternalCode,
+		models.JSONMap{"stage": string(order.CancelStage), "billable": order.CancelBillable})
 	return s.getOrder(order.ID)
 }
 
 // RejectCancellation denies a pending cancellation request; the order continues
-// on its normal flow.
+// on its normal flow and is billed as an ordinary order.
 func (s *ReviewService) RejectCancellation(actor Actor, orderID uint, note string) (*models.Order, error) {
 	order, err := s.getOrder(orderID)
 	if err != nil {
 		return nil, err
 	}
 	if order.CancellationStatus != models.CancellationRequested {
-		return nil, apperr.Conflict("No pending cancellation request for this order")
+		return nil, apperr.Conflict("Đơn này không có yêu cầu huỷ nào đang chờ")
 	}
 	now := time.Now()
 	order.CancellationStatus = models.CancellationRejected
 	order.CancellationResolvedByID = actor.IDPtr()
 	order.CancellationResolvedAt = &now
 	order.CancellationResolutionNote = strings.TrimSpace(note)
+	// Nothing was cancelled, so there is no cancellation charge to carry.
+	order.CancelBillable = false
 	if err := s.repo.Order.Update(order); err != nil {
 		return nil, apperr.Internal("could not reject cancellation").Wrap(err)
 	}
-	s.audit.Log(actor, "CANCEL_REJECT", "order", &order.ID, "Rejected cancellation of "+order.InternalCode, nil)
+	s.closeCancelRequestNote(actor, models.EntityOrder, order.ID, "CANCEL_REQUEST", "Đã từ chối yêu cầu huỷ", now)
+	s.audit.Log(actor, "CANCEL_REJECT", "order", &order.ID, "Rejected cancellation of "+order.InternalCode,
+		models.JSONMap{"stage": string(order.CancelStage)})
 	return s.getOrder(order.ID)
 }

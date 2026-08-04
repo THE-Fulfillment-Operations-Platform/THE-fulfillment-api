@@ -30,18 +30,23 @@ type TrackingSnapshot struct {
 }
 
 // UpdateTrackingInput sets an order's tracking fields manually.
+//
+// No carrier field: THE is the shipping company on every order, so there is
+// nothing to type in. A tracking_carrier in the request body is ignored rather
+// than stored.
 type UpdateTrackingInput struct {
 	TrackingNumber *string `json:"tracking_number"`
 	TrackingStatus *string `json:"tracking_status"`
-	Carrier        *string `json:"tracking_carrier"`
 	TrackingURL    *string `json:"tracking_url"`
 }
 
-// trackingRoles may edit tracking: internal managers plus the packing/shipping
-// stations that physically hand orders to a carrier.
+// trackingRoles may edit tracking: internal managers, the packing/shipping
+// stations that dispatch parcels, and customer support — CS is who receives the
+// tracking number and matches it to a store order.
 func canEditTracking(role models.Role) bool {
 	switch role {
-	case models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RolePacking, models.RoleShipping:
+	case models.RoleOwner, models.RoleAdmin, models.RoleOps,
+		models.RolePacking, models.RoleShipping, models.RoleCS:
 		return true
 	}
 	return false
@@ -62,15 +67,35 @@ func (s *OrderService) UpdateTracking(actor Actor, id uint, in UpdateTrackingInp
 
 	fields := map[string]interface{}{}
 	changes := models.JSONMap{}
+	// previousNumber drives everything that has to happen when a parcel is
+	// REPLACED rather than merely filled in: the carrier state on the order
+	// describes the old parcel and must not survive, and the old number is still
+	// tagged with this store order id on the provider.
+	previousNumber := strings.TrimSpace(order.TrackingNumber)
+	numberChanged := false
 	if in.TrackingNumber != nil {
 		v := strings.TrimSpace(*in.TrackingNumber)
 		fields["tracking_number"] = v
 		changes["tracking_number"] = []string{order.TrackingNumber, v}
-	}
-	if in.Carrier != nil {
-		v := strings.TrimSpace(*in.Carrier)
-		fields["tracking_carrier"] = v
-		changes["tracking_carrier"] = []string{order.TrackingCarrier, v}
+		numberChanged = v != previousNumber
+
+		// A different parcel means the mirrored carrier state belongs to something
+		// that is no longer being shipped. Leaving it would show the OLD parcel's
+		// "Delivered"/"In Transit" against the new number until the first sync
+		// lands — the worst kind of wrong, because it looks authoritative.
+		if numberChanged {
+			fields["tracking_status"] = models.TrackingPending
+			if v == "" {
+				fields["tracking_status"] = models.TrackingNone
+			}
+			fields["tracking_detail"] = ""
+			fields["tracking_location"] = ""
+			fields["tracking_raw_status"] = ""
+			fields["tracking_delivered_at"] = nil
+			fields["tracking_synced_at"] = nil
+			fields["tracking_sync_error"] = ""
+			changes["tracking_status"] = []string{string(order.TrackingStatus), string(models.TrackingPending)}
+		}
 	}
 	if in.TrackingURL != nil {
 		v := strings.TrimSpace(*in.TrackingURL)
@@ -100,5 +125,20 @@ func (s *OrderService) UpdateTracking(actor Actor, id uint, in UpdateTrackingInp
 		return nil, apperr.Internal("could not update tracking").Wrap(err)
 	}
 	s.audit.Log(actor, "ORDER_TRACKING_UPDATE", "order", &order.ID, "Updated tracking for "+order.InternalCode, changes)
-	return s.GetOrder(order.ID)
+
+	updated, err := s.GetOrder(order.ID)
+	if err != nil {
+		return nil, err
+	}
+	// A manually entered number is registered with the provider (tagged with the
+	// store order id) so its journey starts being collected. Only when the number
+	// actually changed: re-registering on every carrier/URL edit would be noise.
+	if numberChanged {
+		// Release the previous parcel first. It still carries this order's tag on
+		// the provider, and two parcels answering to one store order id is exactly
+		// the ambiguity the reverse lookup refuses to guess through.
+		s.tracking.ReleaseNumberAsync(order, previousNumber)
+		s.tracking.RegisterOrderAsync(updated)
+	}
+	return updated, nil
 }

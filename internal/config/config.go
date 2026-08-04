@@ -84,6 +84,25 @@ type Config struct {
 	PurgeEnabled       bool
 	PurgeRetentionDays int
 	PurgeInterval      time.Duration
+
+	// Tracking provider (24hTrack). Empty credentials disable the integration
+	// entirely: tracking then stays a manual field, exactly as before.
+	Track24hEnabled  bool
+	Track24hBaseURL  string
+	Track24hEmail    string
+	Track24hPassword string
+	// Track24hTag prefixes the description we write on the provider so our
+	// shipments are distinguishable from anything else in the same account, and so
+	// a store order id can be searched for without matching unrelated text.
+	Track24hTag string
+	// Track24hSyncInterval is how often the background sync runs; BatchSize caps
+	// how many parcels one run refreshes (the provider rate-limits per minute).
+	Track24hSyncInterval time.Duration
+	Track24hBatchSize    int
+	// Track24hResolve turns on the reverse lookup: for an order that has no
+	// tracking number yet, ask the provider whether a parcel was registered under
+	// this store order id. Only useful once shipments are tagged that way.
+	Track24hResolve bool
 }
 
 // Load reads configuration from a .env file (if present) and the process
@@ -147,6 +166,35 @@ func Load() *Config {
 		PurgeEnabled:       getEnvAsBool("PURGE_ENABLED", true),
 		PurgeRetentionDays: getEnvAsInt("PURGE_RETENTION_DAYS", 30),
 		PurgeInterval:      time.Duration(getEnvAsInt("PURGE_INTERVAL_HOURS", 24)) * time.Hour,
+
+		Track24hEnabled:  getEnvAsBool("TRACK24H_ENABLED", false),
+		Track24hBaseURL:  getEnv("TRACK24H_BASE_URL", "https://api.24htrack.com"),
+		Track24hEmail:    getEnv("TRACK24H_EMAIL", ""),
+		Track24hPassword: getEnv("TRACK24H_PASSWORD", ""),
+		Track24hTag:      getEnv("TRACK24H_TAG", "FFM"),
+		// 20 minutes is a deliberate floor on chattiness: carriers scan a parcel a
+		// handful of times a day, so polling faster buys nothing and spends the
+		// provider's per-minute budget that a large batch needs.
+		Track24hSyncInterval: time.Duration(getEnvAsInt("TRACK24H_SYNC_INTERVAL_MINUTES", 20)) * time.Minute,
+		// Each parcel costs up to 2 provider calls (detail + timeline). 120 parcels
+		// therefore fits one run comfortably inside the 200 requests/minute limit
+		// once the client's own inter-call floor is applied.
+		Track24hBatchSize: getEnvAsInt("TRACK24H_BATCH_SIZE", 120),
+		Track24hResolve:   getEnvAsBool("TRACK24H_RESOLVE", true),
+	}
+
+	// Credentials are what actually make the integration work; a TRACK24H_ENABLED
+	// with no login would just log a failure every cycle.
+	if cfg.Track24hEnabled && (cfg.Track24hEmail == "" || cfg.Track24hPassword == "") {
+		log.Println("config: TRACK24H_ENABLED=true but TRACK24H_EMAIL/TRACK24H_PASSWORD are empty; tracking sync stays off")
+		cfg.Track24hEnabled = false
+	}
+	if cfg.Track24hSyncInterval < time.Minute {
+		log.Printf("config: TRACK24H_SYNC_INTERVAL_MINUTES too small; using 20m")
+		cfg.Track24hSyncInterval = 20 * time.Minute
+	}
+	if cfg.Track24hBatchSize <= 0 {
+		cfg.Track24hBatchSize = 120
 	}
 
 	// Guard the purge window: a non-positive retention would hard-delete every
