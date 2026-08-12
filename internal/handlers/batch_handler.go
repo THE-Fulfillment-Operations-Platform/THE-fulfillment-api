@@ -37,6 +37,9 @@ func (h *Handlers) ListBatches(c *gin.Context) {
 		DateFrom:      timeQueryPtr(c, "date_from"),
 		DateTo:        timeQueryPtr(c, "date_to"),
 		ParentBatchID: uintQueryPtr(c, "parent_batch_id"),
+		// ?code= — mã nội bộ đơn ("100047") hoặc mã tem item ("100047_1/1"):
+		// trả về (các) batch đang sản xuất đơn đó.
+		Code: c.Query("code"),
 		// ?open=1 — chỉ batch còn việc (bảng sản xuất dùng), bỏ batch đã đóng vì
 		// toàn bộ hàng bị huỷ ở QC.
 		ExcludeClosed: c.Query("open") == "1" || c.Query("open") == "true",

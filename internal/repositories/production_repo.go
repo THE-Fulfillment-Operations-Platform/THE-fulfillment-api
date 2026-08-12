@@ -1,6 +1,7 @@
 package repositories
 
 import (
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -26,6 +27,12 @@ type BatchFilter struct {
 	// in such a batch — while the batch list keeps showing them (greyed, with the
 	// reason) so the history stays auditable.
 	ExcludeClosed bool
+	// Code scopes the list to the batches producing one order: it matches the
+	// order's internal code ("100047") or one item's tem code ("100047_1/1") —
+	// exact match, these codes are system-generated. Items live in child/flat
+	// batches, so when Code is set the default hide-children rule is lifted and
+	// the actual batch holding the product is listed.
+	Code string
 }
 
 type BatchRepository struct{ db *gorm.DB }
@@ -68,7 +75,8 @@ func (r *BatchRepository) FindByID(id uint) (*models.Batch, error) {
 		// …and in each has-many's SELECT, instead of one round trip apiece.
 		Preload("Links", func(db *gorm.DB) *gorm.DB { return db.Joins("UpdatedBy").Order("kind asc") }).
 		Preload("Items", func(db *gorm.DB) *gorm.DB {
-			return activeBatchItems(db).Joins("OrderItem.Order").Joins("Material")
+			// Seller rides along for the QR label print (tem in tên seller).
+			return activeBatchItems(db).Joins("OrderItem.Order").Joins("OrderItem.Order.Seller").Joins("Material")
 		}).
 		// A parent batch preloads its children (with each child's active items so the
 		// detail view can show per-child item counts). Children/flat batches have none,
@@ -192,11 +200,19 @@ func (r *BatchRepository) baseQuery(f BatchFilter) *gorm.DB {
 	if f.ExcludeClosed {
 		q = q.Where("closed_at IS NULL")
 	}
+	if code := strings.TrimSpace(f.Code); code != "" {
+		q = q.Where("batches.id IN (?)", r.db.Model(&models.BatchItem{}).
+			Select("batch_items.batch_id").
+			Joins("JOIN order_items ON order_items.id = batch_items.order_item_id").
+			Joins("JOIN orders ON orders.id = order_items.order_id").
+			Where("orders.internal_code = ? OR order_items.internal_code = ?", code, code))
+	}
 	// Child-scoping: with a parent id, list only that parent's children; otherwise
-	// hide children entirely so the default list shows parent + flat batches only.
+	// hide children so the default list shows parent + flat batches only — except
+	// when searching by code, where the hit IS a child/flat batch and must show.
 	if f.ParentBatchID != nil {
 		q = q.Where("parent_batch_id = ?", *f.ParentBatchID)
-	} else {
+	} else if f.Code == "" {
 		q = q.Where("parent_batch_id IS NULL")
 	}
 	return q
