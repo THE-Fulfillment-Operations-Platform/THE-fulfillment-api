@@ -41,6 +41,12 @@ var (
 	roleProdOps    = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleProduction, models.RoleDesigner}
 	roleQCOps      = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleQC}
 	rolePackOps = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RolePacking}
+	// Roles that may hand finished goods to THE — mirrors canShipToCarrier in the
+	// service. SHIPPING belongs here (it is literally their desk); CS does not.
+	roleShipCarrier = []models.Role{
+		models.RoleOwner, models.RoleAdmin, models.RoleOps,
+		models.RolePacking, models.RoleShipping,
+	}
 	// Roles that may record a tracking number. CS is here because attaching the
 	// carrier's tracking number to a store order IS their job — they are the ones
 	// who receive it, and the shipping desk only sees parcels it dispatched itself.
@@ -185,10 +191,12 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		orders.PUT("/:id", middleware.RequireRoles(roleOpsAdmin...), h.UpdateOrder)
 		orders.POST("/:id/cancel", middleware.RequireRoles(roleOpsAdmin...), h.CancelOrder)
 		orders.DELETE("/:id", middleware.RequireRoles(roleAdminOwner...), h.DeleteOrder)
-		// Send QC-finished orders to THE in one action. This is the step that ends
-		// the factory flow and starts the shipping one; the packing-scan route
-		// below still exists for stations that use it.
-		orders.POST("/ship-to-carrier", middleware.RequireRoles(rolePackOps...), h.ShipOrdersToCarrier)
+		// Send QC-finished orders to THE. This is the step that ends the factory
+		// flow and starts the shipping one; the packing-scan route below still
+		// exists for stations that use it. ship-scan is the station flow (scan one
+		// parcel, it ships); ship-to-carrier is the bulk fallback by order ids.
+		orders.POST("/ship-to-carrier", middleware.RequireRoles(roleShipCarrier...), h.ShipOrdersToCarrier)
+		orders.POST("/ship-scan", middleware.RequireRoles(roleShipCarrier...), h.ShipScannedOrder)
 		// Tracking: ops + the packing/shipping stations may set it.
 		orders.PATCH("/:id/tracking", middleware.RequireRoles(roleShipOps...), h.UpdateOrderTracking)
 		// The shipment journey is read-only operational information — every

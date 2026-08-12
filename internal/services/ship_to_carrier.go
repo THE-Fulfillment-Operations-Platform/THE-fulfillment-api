@@ -2,6 +2,7 @@ package services
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -104,6 +105,75 @@ func (s *PackingService) ShipOrdersToCarrier(actor Actor, orderIDs []uint) (*Shi
 		s.tracking.RegisterOrderAsync(o)
 	}
 	return out, nil
+}
+
+// ScannedShip is the outcome of one scan at the ship station: which order the
+// code named and the handoff it produced. One scan, one order, one answer —
+// there is no shipped/skipped split here because a scan that cannot ship is an
+// error the operator must see immediately, not a row in a report.
+type ScannedShip struct {
+	OrderID      uint   `json:"order_id"`
+	InternalCode string `json:"internal_code"`
+	StoreOrderID string `json:"store_order_id"`
+	SellerName   string `json:"seller_name,omitempty"`
+	HandoffCode  string `json:"handoff_code"`
+}
+
+// ShipScannedOrder ships exactly one order, identified by whatever the ship
+// station's scanner just read, applying the same qualification rules as the
+// bulk action. This turns "tick boxes, press send" into "scan the parcel" — the
+// scan itself is the confirmation.
+func (s *PackingService) ShipScannedOrder(actor Actor, code string) (*ScannedShip, error) {
+	if !canShipToCarrier(actor.Role) {
+		return nil, apperr.Forbidden("Bạn không có quyền gửi hàng cho THE")
+	}
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return nil, apperr.BadRequest("Hãy quét hoặc nhập mã nội bộ của đơn")
+	}
+
+	order, err := s.orderByScanCode(code)
+	if err != nil {
+		return nil, err
+	}
+	if reason := shipBlockReason(order); reason != "" {
+		// 409, not 400: the code was valid and named a real order — it is the
+		// order's state that refuses the scan.
+		return nil, apperr.Conflict(reason)
+	}
+
+	handoff, err := s.shipOne(actor, order)
+	if err != nil {
+		return nil, err
+	}
+	s.tracking.RegisterOrderAsync(order)
+	return &ScannedShip{
+		OrderID:      order.ID,
+		InternalCode: order.InternalCode,
+		StoreOrderID: order.StoreOrderID,
+		SellerName:   order.Seller.Name,
+		HandoffCode:  handoff.Code,
+	}, nil
+}
+
+// orderByScanCode resolves what the scanner read into an order. The QR on the
+// order sheet carries the order's internal code ("100048"); the tem on each
+// product carries the item code ("100048_1/3"). Both name exactly one order, so
+// both are accepted — the operator scans whichever label is on top.
+func (s *PackingService) orderByScanCode(code string) (*models.Order, error) {
+	id, found, err := s.repo.Order.IDByInternalCode(code)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		if id, found, err = s.repo.OrderItem.OrderIDByCode(code); err != nil {
+			return nil, err
+		}
+	}
+	if !found {
+		return nil, apperr.NotFound("Không tìm thấy đơn nào khớp mã vừa quét")
+	}
+	return s.repo.Order.FindByID(id)
 }
 
 // shipBlockReason explains, in the operator's language, why an order cannot go

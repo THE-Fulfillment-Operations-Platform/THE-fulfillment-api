@@ -72,8 +72,12 @@ type QCScanResult struct {
 	ProductName   string `json:"product_name"`
 	VariantCode   string `json:"variant_code"`
 	Quantity      int    `json:"quantity"`
-	MaterialName  string `json:"material_name"`  // Loại VL
-	QCDescription string `json:"qc_description"` // Mô tả SP để QC
+	MaterialName  string `json:"material_name"` // Loại VL
+	// MaterialDescription is the spec text of the material(s) the item is produced
+	// in (e.g. "Gỗ 5mm 3 lớp - kích thước 4 inch in UV dán vào nhau") — shown next
+	// to the product name so QC can check size/material against the physical item.
+	MaterialDescription string `json:"material_description"`
+	QCDescription       string `json:"qc_description"` // Mô tả SP để QC
 	// SKUDescription is the catalog product description for the SKU — richer, more
 	// stable product spec text for QC to check against (falls back to nothing when
 	// the SKU has none). SKUProductName is the catalog product name.
@@ -124,6 +128,7 @@ func (s *QCService) Scan(actor Actor, ref ScanRef) (*QCScanResult, error) {
 	// Loại VL: the material(s) this item is produced in. Prefer the batch parts
 	// (the concrete production material); fall back to the SKU's mapped materials.
 	res.MaterialName = itemMaterialNames(item)
+	res.MaterialDescription = itemMaterialDescriptions(item)
 	for _, bi := range item.BatchItems {
 		b := QCScanBatch{BatchItemID: bi.ID, Status: bi.Status}
 		if bi.Batch != nil {
@@ -143,27 +148,41 @@ func (s *QCService) Scan(actor Actor, ref ScanRef) (*QCScanResult, error) {
 // otherwise the SKU's mapped materials. Requires BatchItems.Material and/or
 // SKU.Materials.Material to be preloaded.
 func itemMaterialNames(item *models.OrderItem) string {
+	return strings.Join(itemMaterialValues(item, func(m *models.Material) string { return m.Name }), ", ")
+}
+
+// itemMaterialDescriptions is the same over the materials' spec descriptions.
+// Combos may span several materials, so entries are joined with "; " to keep
+// each description readable as one unit.
+func itemMaterialDescriptions(item *models.OrderItem) string {
+	return strings.Join(itemMaterialValues(item, func(m *models.Material) string { return m.Description }), "; ")
+}
+
+// itemMaterialValues collects one field over the distinct materials an item is
+// produced in — the batch parts' materials first (the concrete production
+// material); if those yield nothing, the SKU's mapped materials.
+func itemMaterialValues(item *models.OrderItem, field func(*models.Material) string) []string {
 	seen := map[string]bool{}
-	var names []string
-	add := func(name string) {
-		name = strings.TrimSpace(name)
-		if name == "" || seen[name] {
+	var vals []string
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" || seen[v] {
 			return
 		}
-		seen[name] = true
-		names = append(names, name)
+		seen[v] = true
+		vals = append(vals, v)
 	}
 	for _, bi := range item.BatchItems {
 		if bi.Material != nil {
-			add(bi.Material.Name)
+			add(field(bi.Material))
 		}
 	}
-	if len(names) == 0 && item.SKU != nil {
+	if len(vals) == 0 && item.SKU != nil {
 		for _, sm := range item.SKU.Materials {
-			add(sm.Material.Name)
+			add(field(&sm.Material))
 		}
 	}
-	return strings.Join(names, ", ")
+	return vals
 }
 
 // QCDecisionInput confirms a QC outcome for an item.

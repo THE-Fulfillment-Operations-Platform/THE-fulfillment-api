@@ -79,6 +79,24 @@ func (h *Handlers) ShipOrdersToCarrier(c *gin.Context) {
 	response.OK(c, res)
 }
 
+// ShipScannedOrder ships one order straight from a scan at the ship station —
+// the scanned code (order internal code or item tem code) is the confirmation.
+// POST /api/orders/ship-scan  { code }
+func (h *Handlers) ShipScannedOrder(c *gin.Context) {
+	var in struct {
+		Code string `json:"code" binding:"required"`
+	}
+	if !bindJSON(c, &in) {
+		return
+	}
+	res, err := h.svc.Packing.ShipScannedOrder(actor(c), in.Code)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, res)
+}
+
 // MarkHandoffShipped records carrier + tracking and moves a handed-off parcel to
 // SHIPPED. POST /api/handoffs/:id/ship
 func (h *Handlers) MarkHandoffShipped(c *gin.Context) {

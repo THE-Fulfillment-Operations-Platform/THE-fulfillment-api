@@ -175,6 +175,21 @@ func (r *OrderRepository) OwnerSellerID(id uint) (sellerID uint, found bool, err
 	return out[0], true, nil
 }
 
+// IDByInternalCode resolves an order's internal (scan) code to its id — the ship
+// station reads a QR, not a database id. Exact match on purpose: internal codes
+// are system-generated and unique, so anything fuzzier only invites shipping the
+// wrong order. Returns found=false when no order carries the code.
+func (r *OrderRepository) IDByInternalCode(code string) (id uint, found bool, err error) {
+	var out []uint
+	if err = r.db.Model(&models.Order{}).Where("internal_code = ?", code).Pluck("id", &out).Error; err != nil {
+		return 0, false, err
+	}
+	if len(out) == 0 {
+		return 0, false, nil
+	}
+	return out[0], true, nil
+}
+
 // FindByIDsForReview loads several orders with only their line items preloaded
 // (no Seller / SKU / batch-item preloads). The bulk review path needs just the
 // order + item columns its validation reads, so it skips the heavy per-order
@@ -588,6 +603,21 @@ func (r *OrderItemRepository) FindByCode(code string) (*models.OrderItem, error)
 		return nil, err
 	}
 	return &it, nil
+}
+
+// OrderIDByCode resolves an item's tem code to the order that owns it, and
+// nothing more. The ship station scans whole orders; when the operator scans an
+// item tem instead, the item itself is irrelevant — only which order it belongs
+// to matters, so this is a single pluck instead of FindByCode's preload chain.
+func (r *OrderItemRepository) OrderIDByCode(code string) (orderID uint, found bool, err error) {
+	var out []uint
+	if err = r.db.Model(&models.OrderItem{}).Where("internal_code = ?", code).Pluck("order_id", &out).Error; err != nil {
+		return 0, false, err
+	}
+	if len(out) == 0 {
+		return 0, false, nil
+	}
+	return out[0], true, nil
 }
 
 // FindForBatching bulk-loads items with exactly the associations batch creation

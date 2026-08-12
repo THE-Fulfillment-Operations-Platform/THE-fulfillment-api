@@ -213,3 +213,87 @@ func TestShipOrdersToCarrier_RefusesEmptyOrder(t *testing.T) {
 		t.Fatalf("skip reason = %+v", res.Skipped)
 	}
 }
+
+// The ship-station flow: scanning the QR on a finished order IS the send action.
+// The sheet carries the order code, the tem carries the item code — both ship
+// the same order.
+func TestShipScannedOrder_ShipsByOrderOrItemCode(t *testing.T) {
+	db := newHandoffDB(t)
+	svc := newPackingService(db, newSync(t, db, newFakeProvider()))
+
+	byOrder := seedOrderForShipping(t, db, "100001", models.StatusQCPassed)
+	byItem := seedOrderForShipping(t, db, "100002", models.StatusQCPassed, models.StatusQCPassed)
+
+	// Scanners pad whitespace around the payload often enough to trim for.
+	res, err := svc.ShipScannedOrder(opsActor(), " 100001 ")
+	if err != nil {
+		t.Fatalf("ShipScannedOrder(order code): %v", err)
+	}
+	if res.OrderID != byOrder.ID || !strings.HasPrefix(res.HandoffCode, "THE-HO-") {
+		t.Fatalf("scan result = %+v, want order %d with a THE-HO code", res, byOrder.ID)
+	}
+
+	// seedOrderForShipping names items "<code>_1", "<code>_2", …
+	res, err = svc.ShipScannedOrder(opsActor(), "100002_2")
+	if err != nil {
+		t.Fatalf("ShipScannedOrder(item code): %v", err)
+	}
+	if res.OrderID != byItem.ID {
+		t.Fatalf("item scan shipped order %d, want %d", res.OrderID, byItem.ID)
+	}
+
+	for _, id := range []uint{byOrder.ID, byItem.ID} {
+		var got models.Order
+		db.First(&got, id)
+		if got.SellerStatus != models.SellerStatusHandedOff {
+			t.Errorf("order %d = %s, want HANDED_OFF", id, got.SellerStatus)
+		}
+	}
+}
+
+// A scan that cannot ship must answer with the reason, and a second scan of the
+// same parcel — the most common slip at a scan station — must say "already sent"
+// instead of creating a second handoff.
+func TestShipScannedOrder_RefusesWithReason(t *testing.T) {
+	db := newHandoffDB(t)
+	svc := newPackingService(db, newSync(t, db, newFakeProvider()))
+
+	seedOrderForShipping(t, db, "100001", models.StatusQCPassed, models.StatusCut)
+	ready := seedOrderForShipping(t, db, "100002", models.StatusQCPassed)
+
+	if _, err := svc.ShipScannedOrder(opsActor(), "100001"); err == nil || !strings.Contains(err.Error(), "chưa QC") {
+		t.Errorf("half-done order shipped or wrong reason: %v", err)
+	}
+
+	if _, err := svc.ShipScannedOrder(opsActor(), "100002"); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	if _, err := svc.ShipScannedOrder(opsActor(), "100002"); err == nil || !strings.Contains(err.Error(), "đã gửi") {
+		t.Errorf("double scan shipped again or wrong reason: %v", err)
+	}
+	var handoffs int64
+	db.Model(&models.Handoff{}).Where("order_id = ?", ready.ID).Count(&handoffs)
+	if handoffs != 1 {
+		t.Fatalf("%d handoff rows after double scan, want 1", handoffs)
+	}
+
+	if _, err := svc.ShipScannedOrder(opsActor(), "999999"); err == nil || !strings.Contains(err.Error(), "Không tìm thấy") {
+		t.Errorf("unknown code: %v", err)
+	}
+	if _, err := svc.ShipScannedOrder(opsActor(), "   "); err == nil {
+		t.Error("blank scan was accepted")
+	}
+}
+
+// Same gate as the bulk action: the scanner does not widen who may ship.
+func TestShipScannedOrder_RoleGuard(t *testing.T) {
+	db := newHandoffDB(t)
+	svc := newPackingService(db, newSync(t, db, newFakeProvider()))
+	seedOrderForShipping(t, db, "100001", models.StatusQCPassed)
+
+	for _, role := range []models.Role{models.RoleQC, models.RoleProduction, models.RoleDesigner, models.RoleSeller, models.RoleCS} {
+		if _, err := svc.ShipScannedOrder(Actor{ID: 2, Role: role}, "100001"); err == nil {
+			t.Errorf("%s was allowed to ship by scan", role)
+		}
+	}
+}
