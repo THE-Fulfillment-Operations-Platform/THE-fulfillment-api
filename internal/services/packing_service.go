@@ -335,6 +335,9 @@ func (s *PackingService) CreateHandoff(actor Actor, in HandoffInput) (*models.Ha
 
 		old := string(order.SellerStatus)
 		order.SellerStatus = models.SellerStatusHandedOff
+		if order.HandedOverAt == nil {
+			order.HandedOverAt = &now
+		}
 		if err := txRepo.Order.Update(order); err != nil {
 			return err
 		}
@@ -422,6 +425,12 @@ func (s *PackingService) MarkShipped(actor Actor, handoffID uint, in MarkShipped
 				if order.SellerStatus != models.SellerStatusShipped {
 					old := string(order.SellerStatus)
 					order.SellerStatus = models.SellerStatusShipped
+					// A dispatch implies the parcel left the factory; only legacy
+					// orders that predate HandedOverAt still miss the stamp here.
+					if order.HandedOverAt == nil {
+						handedAt := time.Now()
+						order.HandedOverAt = &handedAt
+					}
 					if err := txRepo.Order.Update(order); err != nil {
 						return err
 					}

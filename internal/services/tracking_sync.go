@@ -412,6 +412,17 @@ func (s *TrackingSyncService) advanceSellerStatus(o *models.Order, t models.Trac
 		return
 	}
 	o.SellerStatus = next
+	// The carrier moving the parcel proves it left the factory; stamp the
+	// factory-exit moment for orders that never got it from a handoff (the
+	// write is a no-op when handed_over_at is already set).
+	if o.HandedOverAt == nil && next.HandedOver() {
+		handedAt := time.Now()
+		if err := s.repo.Order.StampHandedOverAt(o.ID, handedAt); err != nil {
+			log.Printf("tracking24h: stamp handed_over_at for %s failed: %v", o.InternalCode, err)
+		} else {
+			o.HandedOverAt = &handedAt
+		}
+	}
 	// Actor is zero (system): no human witnessed this, the carrier reported it.
 	// The seller's order history renders that as "Hệ thống".
 	_ = recordStatus(s.repo, models.EntityOrder, o.ID, string(from), string(next), Actor{},

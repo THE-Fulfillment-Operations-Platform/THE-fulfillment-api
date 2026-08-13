@@ -83,6 +83,12 @@ type OrderFilter struct {
 	// factory's, true = already sent to the carrier. The journey screen lists
 	// exactly HandedOver=true. nil = don't care.
 	HandedOver *bool
+	// HandedOverFrom/To bound the factory-exit moment (orders.handed_over_at) —
+	// the journey screen's "xuất xưởng theo ngày" filter. Half-open [from, to):
+	// the client sends the start of the day AFTER the last selected day, so no
+	// midnight-boundary row is counted twice or dropped.
+	HandedOverFrom *time.Time
+	HandedOverTo   *time.Time
 }
 
 type OrderRepository struct{ db *gorm.DB }
@@ -173,6 +179,93 @@ func (r *OrderRepository) OwnerSellerID(id uint) (sellerID uint, found bool, err
 		return 0, false, nil
 	}
 	return out[0], true, nil
+}
+
+// StampHandedOverAt records the factory-exit moment, once: only a NULL
+// handed_over_at is written, so a replayed carrier scan or a second handoff can
+// never move the original date. Callers that already hold the row inside a
+// transaction set the struct field instead; this is for the column-scoped paths
+// (the tracking sync) that must not clobber concurrent edits.
+func (r *OrderRepository) StampHandedOverAt(orderID uint, at time.Time) error {
+	return r.db.Model(&models.Order{}).
+		Where("id = ? AND handed_over_at IS NULL", orderID).
+		Update("handed_over_at", at).Error
+}
+
+// OrderCodeRef is the light projection the tracking-import matcher works on:
+// just enough to identify an order, show it to the operator and decide
+// assign / overwrite. Loading full orders (six preloads each) for a
+// thousand-row file would answer the same questions a hundred times slower.
+type OrderCodeRef struct {
+	ID             uint                `json:"id"`
+	InternalCode   string              `json:"internal_code"`
+	StoreOrderID   string              `json:"store_order_id"`
+	ShippingName   string              `json:"shipping_name"`
+	TrackingNumber string              `json:"tracking_number"`
+	SellerStatus   models.SellerStatus `json:"seller_status"`
+	HandedOverAt   *time.Time          `json:"handed_over_at"`
+}
+
+const orderCodeRefColumns = "orders.id, orders.internal_code, orders.store_order_id, " +
+	"orders.shipping_name, orders.tracking_number, orders.seller_status, orders.handed_over_at"
+
+func (r *OrderRepository) refsWhere(cond string, args ...interface{}) ([]OrderCodeRef, error) {
+	var rows []OrderCodeRef
+	err := r.db.Model(&models.Order{}).Select(orderCodeRefColumns).
+		Where(cond, args...).Find(&rows).Error
+	return rows, err
+}
+
+// RefsByInternalCodes / RefsByStoreOrderIDs / RefsByTrackingNumbers bulk-resolve
+// the identifiers a tracking file may quote — one query per identifier kind for
+// the whole file instead of a probe per row.
+func (r *OrderRepository) RefsByInternalCodes(codes []string) ([]OrderCodeRef, error) {
+	if len(codes) == 0 {
+		return nil, nil
+	}
+	return r.refsWhere("orders.internal_code IN ?", codes)
+}
+
+func (r *OrderRepository) RefsByStoreOrderIDs(ids []string) ([]OrderCodeRef, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return r.refsWhere("orders.store_order_id IN ?", ids)
+}
+
+func (r *OrderRepository) RefsByTrackingNumbers(numbers []string) ([]OrderCodeRef, error) {
+	if len(numbers) == 0 {
+		return nil, nil
+	}
+	return r.refsWhere("orders.tracking_number IN ?", numbers)
+}
+
+// HandedOverWithoutTracking lists the orders that left the factory in
+// [from, to) and still carry no tracking number — the work list an uploaded
+// tracking file is supposed to cover. Returns up to limit refs (newest first)
+// plus the exact total, so the caller can say "N missing" even when the list
+// itself is capped.
+func (r *OrderRepository) HandedOverWithoutTracking(from, to *time.Time, limit int) ([]OrderCodeRef, int64, error) {
+	scoped := func() *gorm.DB {
+		q := r.db.Model(&models.Order{}).
+			Where("orders.seller_status IN ?", models.HandedOverStatuses).
+			Where("orders.tracking_number = ''")
+		if from != nil {
+			q = q.Where("orders.handed_over_at >= ?", *from)
+		}
+		if to != nil {
+			q = q.Where("orders.handed_over_at < ?", *to)
+		}
+		return q
+	}
+	var total int64
+	if err := scoped().Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var rows []OrderCodeRef
+	err := scoped().Select(orderCodeRefColumns).
+		Order("orders.id desc").Limit(limit).Find(&rows).Error
+	return rows, total, err
 }
 
 // IDByInternalCode resolves an order's internal (scan) code to its id — the ship
@@ -379,6 +472,12 @@ func (r *OrderRepository) baseQuery(f OrderFilter) *gorm.DB {
 		} else {
 			q = q.Where("orders.seller_status NOT IN ?", models.HandedOverStatuses)
 		}
+	}
+	if f.HandedOverFrom != nil {
+		q = q.Where("orders.handed_over_at >= ?", *f.HandedOverFrom)
+	}
+	if f.HandedOverTo != nil {
+		q = q.Where("orders.handed_over_at < ?", *f.HandedOverTo)
 	}
 	// The single-box customer-support search. Everything here is something a
 	// customer can quote down the phone, so one term has to try them all — the

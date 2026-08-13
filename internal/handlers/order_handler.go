@@ -36,6 +36,8 @@ func (h *Handlers) ListOrders(c *gin.Context) {
 		TrackingStatus: c.Query("tracking_status"),
 		HasTracking:    boolQueryPtr(c, "has_tracking"),
 		HandedOver:     boolQueryPtr(c, "handed_over"),
+		HandedOverFrom: timeQueryPtr(c, "handed_over_from"),
+		HandedOverTo:   timeQueryPtr(c, "handed_over_to"),
 	}
 	rows, total, err := h.svc.Order.ListOrders(f)
 	if err != nil {

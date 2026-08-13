@@ -218,6 +218,9 @@ paths:
         - { name: shipping_phone, in: query, schema: { type: string } }
         - { name: tracking_status, in: query, schema: { type: string } }
         - { name: has_tracking, in: query, schema: { type: boolean }, description: "false = hàng đợi CS chưa có mã vận đơn" }
+        - { name: handed_over, in: query, schema: { type: boolean }, description: "true = đơn đã gửi cho THE (màn Hành trình)" }
+        - { name: handed_over_from, in: query, schema: { type: string }, description: "Lọc theo thời điểm xuất xưởng (RFC3339 hoặc YYYY-MM-DD), >=" }
+        - { name: handed_over_to, in: query, schema: { type: string }, description: "Cận trên NỬA MỞ (<) — client gửi đầu ngày kế tiếp" }
         - { name: date_from, in: query, schema: { type: string } }
         - { name: date_to, in: query, schema: { type: string } }
         - { name: page, in: query, schema: { type: integer } }
@@ -260,6 +263,55 @@ paths:
                   type: string
                   enum: [NONE, PENDING, PRE_TRANSIT, IN_TRANSIT, OUT_FOR_DELIVERY, PICK_UP, DELIVERED, UNDELIVERED, EXCEPTION, EXPIRED, CANCELLED]
       responses: { '200': { description: OK } }
+  /api/orders/tracking/import/template.xlsx:
+    get:
+      tags: [Tracking]
+      summary: File mẫu gắn mã vận đơn hàng loạt (2 cột OrderID, Mã vận đơn)
+      responses: { '200': { description: .xlsx attachment } }
+  /api/orders/tracking/import:
+    post:
+      tags: [Tracking]
+      summary: Preview gắn mã vận đơn từ file Excel/CSV (không ghi gì)
+      description: >
+        Đối chiếu từng dòng file với hệ thống. Cột OrderID nhận cả mã đơn shop
+        lẫn mã nội bộ; dòng nào không chắc chắn (không tìm thấy, mã shop trùng
+        nhiều đơn, hai mã vận đơn cho một đơn, một mã dán vào nhiều đơn, mã đã
+        gắn cho đơn khác) trở thành issue thay vì đoán. Gửi kèm
+        handed_over_from/to (khoảng ngày xuất xưởng đang lọc) để nhận thêm
+        scope_total/scope_missing — số đơn trong khoảng đó file chưa phủ.
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                handed_over_from: { type: string }
+                handed_over_to: { type: string }
+      responses:
+        '200': { description: "{ summary, matches[], issues[], scope_missing[] } — scope_total/scope_missing = -1 khi không gửi khoảng ngày" }
+  /api/orders/tracking/import/commit:
+    post:
+      tags: [Tracking]
+      summary: Ghi các gán mã đã xác nhận từ preview (partial success)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [assignments]
+              properties:
+                assignments:
+                  type: array
+                  items:
+                    type: object
+                    required: [order_id, tracking_number]
+                    properties:
+                      order_id: { type: integer }
+                      tracking_number: { type: string }
+      responses:
+        '200': { description: "{ updated, failed: [{order_id, reason}] } — mỗi đơn đi qua đúng luồng PATCH tracking (audit + đăng ký 24hTrack)" }
   /api/orders/{id}/tracking/events:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
     get:

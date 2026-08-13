@@ -61,8 +61,56 @@ func AutoMigrate(db *gorm.DB) error {
 	if err := backfillOrderDailySeq(db); err != nil {
 		return err
 	}
+	if err := backfillOrderHandedOverAt(db); err != nil {
+		return err
+	}
 	if err := purgeTransportPartnerData(db); err != nil {
 		return err
+	}
+	return nil
+}
+
+// backfillOrderHandedOverAt stamps handed_over_at on legacy handed-over orders
+// that predate the column. The true moment lives in status_histories (both
+// handoff paths record the HANDED_OFF transition), so the earliest handed-over
+// transition per order is used; orders with no history row (created before
+// recordStatus, or advanced by hand in the database) fall back to updated_at so
+// every handed-over order has SOME date and never vanishes from the journey
+// screen's date filter. Idempotent: only NULL handed_over_at rows are touched,
+// and it is a no-op once every handed-over order carries a stamp.
+// Postgres-only like the other backfills; the sqlite test harness starts empty.
+func backfillOrderHandedOverAt(db *gorm.DB) error {
+	if db.Dialector.Name() != "postgres" {
+		return nil
+	}
+	var pending int64
+	if err := db.Model(&models.Order{}).
+		Where("handed_over_at IS NULL AND seller_status IN ?", models.HandedOverStatuses).
+		Count(&pending).Error; err != nil {
+		return fmt.Errorf("database: count orders needing handed_over_at: %w", err)
+	}
+	if pending == 0 {
+		return nil
+	}
+	fromHistory := `
+		UPDATE orders o
+		   SET handed_over_at = h.t
+		  FROM (
+			SELECT entity_id AS id, MIN(created_at) AS t
+			  FROM status_histories
+			 WHERE entity_type = 'ORDER' AND to_status IN ('HANDED_OFF', 'SHIPPED', 'DELIVERED')
+			 GROUP BY entity_id
+		  ) h
+		 WHERE o.id = h.id AND o.handed_over_at IS NULL`
+	if err := db.Exec(fromHistory).Error; err != nil {
+		return fmt.Errorf("database: backfill handed_over_at from history: %w", err)
+	}
+	fallback := `
+		UPDATE orders
+		   SET handed_over_at = updated_at
+		 WHERE handed_over_at IS NULL AND seller_status IN ('HANDED_OFF', 'SHIPPED', 'DELIVERED')`
+	if err := db.Exec(fallback).Error; err != nil {
+		return fmt.Errorf("database: backfill handed_over_at fallback: %w", err)
 	}
 	return nil
 }
@@ -183,6 +231,9 @@ func ensurePerformanceIndexes(db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_orders_daily_seq ON orders (order_date, daily_seq) WHERE deleted_at IS NULL`,
 		// Tracking-number lookups (order list badge + future provider sync).
 		`CREATE INDEX IF NOT EXISTS idx_orders_tracking_number ON orders (tracking_number) WHERE deleted_at IS NULL AND tracking_number <> ''`,
+		// Journey screen "xuất xưởng theo ngày": handed_over_at range scans. Partial
+		// on NOT NULL — orders still in the factory have no date and are never asked.
+		`CREATE INDEX IF NOT EXISTS idx_orders_handed_over_at ON orders (handed_over_at DESC) WHERE deleted_at IS NULL AND handed_over_at IS NOT NULL`,
 		// Item list filtered by internal_status (design/QC/packing views).
 		`CREATE INDEX IF NOT EXISTS idx_order_items_status_page ON order_items (internal_status, id DESC) WHERE deleted_at IS NULL`,
 		// Item cancellation-request queue: status filter + ORDER BY requested_at.

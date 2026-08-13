@@ -232,6 +232,9 @@ func (s *PackingService) shipOne(actor Actor, order *models.Order) (*models.Hand
 
 		old := string(order.SellerStatus)
 		order.SellerStatus = models.SellerStatusHandedOff
+		if order.HandedOverAt == nil {
+			order.HandedOverAt = &now
+		}
 		if err := txRepo.Order.Update(order); err != nil {
 			return err
 		}

@@ -79,7 +79,16 @@ type Order struct {
 	StoreOrderRef string `json:"-" gorm:"size:120;index"`
 
 	SellerStatus SellerStatus `json:"seller_status" gorm:"size:20;not null;index;default:'PRODUCTION'"`
-	ImportJobID  *uint        `json:"import_job_id" gorm:"index"`
+
+	// HandedOverAt is the moment the order first left the factory for THE — the
+	// HANDED_OFF transition ("xuất xưởng"). Stamped once and never moved: a later
+	// carrier scan, a second handoff or a replayed status must not rewrite when
+	// the parcel actually went out the door. The journey screen's date filter
+	// reads this column (partial index in ensurePerformanceIndexes); legacy
+	// orders are backfilled from status_histories in migrate.go.
+	HandedOverAt *time.Time `json:"handed_over_at"`
+
+	ImportJobID *uint `json:"import_job_id" gorm:"index"`
 	CreatedByID  *uint        `json:"created_by_id"`
 
 	// OrderDate + DailySeq implement "STT trong ngày" (per-day order number). Both

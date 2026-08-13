@@ -199,6 +199,12 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		orders.POST("/ship-scan", middleware.RequireRoles(roleShipCarrier...), h.ShipScannedOrder)
 		// Tracking: ops + the packing/shipping stations may set it.
 		orders.PATCH("/:id/tracking", middleware.RequireRoles(roleShipOps...), h.UpdateOrderTracking)
+		// Bulk tracking assignment from the CS Excel: template → preview (dry run,
+		// nothing written) → commit (only the confirmed assignments). Same roles as
+		// the single-order edit — this is the same act, many rows at once.
+		orders.GET("/tracking/import/template.xlsx", middleware.RequireRoles(roleShipOps...), h.DownloadTrackingImportTemplate)
+		orders.POST("/tracking/import", middleware.RequireRoles(roleShipOps...), h.PreviewTrackingImport)
+		orders.POST("/tracking/import/commit", middleware.RequireRoles(roleShipOps...), h.CommitTrackingImport)
 		// The shipment journey is read-only operational information — every
 		// internal role that can open an order may see where its parcel is.
 		orders.GET("/:id/tracking/events", middleware.RequireRoles(roleOrderRead...), h.GetOrderTracking)
