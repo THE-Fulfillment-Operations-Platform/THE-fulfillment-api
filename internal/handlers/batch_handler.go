@@ -132,6 +132,22 @@ func (h *Handlers) SetBatchLink(c *gin.Context) {
 	response.OK(c, link)
 }
 
+// DeleteBatch removes a not-yet-produced batch (for a split parent: the whole
+// child tree), releasing its items back to the batching pool. Batches already
+// printed/cut/QC'd are refused — that is the scrap/close flow's territory.
+// DELETE /api/batches/:id
+func (h *Handlers) DeleteBatch(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	if err := h.svc.Batch.Delete(actor(c), id); err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, gin.H{"deleted": true})
+}
+
 // UpdateBatchStatus moves a batch through Pending/Đã in/Đã cắt/Đã QC.
 // PATCH /api/batches/:id/status
 func (h *Handlers) UpdateBatchStatus(c *gin.Context) {

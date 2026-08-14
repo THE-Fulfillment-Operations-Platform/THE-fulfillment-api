@@ -40,7 +40,7 @@ var (
 	roleDesignOps  = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleDesigner}
 	roleProdOps    = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleProduction, models.RoleDesigner}
 	roleQCOps      = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleQC}
-	rolePackOps = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RolePacking}
+	rolePackOps    = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RolePacking}
 	// Roles that may hand finished goods to THE — mirrors canShipToCarrier in the
 	// service. SHIPPING belongs here (it is literally their desk); CS does not.
 	roleShipCarrier = []models.Role{
@@ -284,6 +284,10 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		batches.GET("/:id/assets.zip", middleware.RequireRoles(roleInternal...), h.DownloadBatchAssetsZip)
 		batches.POST("", middleware.RequireRoles(roleDesignOps...), h.CreateBatch)
 		batches.PATCH("/:id/links", middleware.RequireRoles(roleDesignOps...), h.SetBatchLink)
+		// Delete mirrors create's roles: the team that groups batches un-groups a
+		// mistaken one. The service only ever deletes a batch production has not
+		// touched, so this is "undo create", not data destruction.
+		batches.DELETE("/:id", middleware.RequireRoles(roleDesignOps...), h.DeleteBatch)
 		batches.PATCH("/:id/status", middleware.RequireRoles(roleProdOps...), h.UpdateBatchStatus)
 	}
 

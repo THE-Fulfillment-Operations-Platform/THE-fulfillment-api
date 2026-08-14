@@ -402,6 +402,17 @@ paths:
   /api/batches/{id}:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
     get: { tags: [Batches], summary: Batch detail (item, SKU, mockup, file, status), responses: { '200': { description: OK } } }
+    delete:
+      tags: [Batches]
+      summary: Xoá batch chưa sản xuất, trả sản phẩm về hàng chờ gom batch
+      description: >-
+        Chỉ xoá được batch còn PENDING toàn bộ (chưa in/cắt, chưa QC, chưa có
+        hàng huỷ). Batch cha (chia theo định mức) xoá cả cụm con; batch con
+        không xoá riêng lẻ. Batch đã vào sản xuất trả 422 — hàng lỗi/bỏ xử lý
+        qua flow QC scrap. Sản phẩm được thả về màn gom batch để gom lại.
+      responses:
+        '200': { description: Đã xoá }
+        '422': { description: Batch đã vào sản xuất / batch con / đã đóng }
   /api/batches/{id}/assets.zip:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
     get:

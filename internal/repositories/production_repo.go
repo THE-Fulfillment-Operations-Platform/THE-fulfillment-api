@@ -544,6 +544,55 @@ func (r *BatchRepository) ExistingActiveItemMaterial(orderItemIDs []uint) (map[u
 	return out, nil
 }
 
+// ---------- Batch delete ----------
+
+// StartedPartCount counts parts across the given batches that production has
+// already touched — status beyond PENDING, or written off at QC. The delete
+// guard refuses while this is non-zero: a deleted batch must never take the
+// record of produced (or scrapped) physical goods with it. Cancelled lines are
+// counted too — their part can only have advanced if production ran.
+func (r *BatchRepository) StartedPartCount(batchIDs []uint) (int64, error) {
+	var n int64
+	err := r.db.Model(&models.BatchItem{}).
+		Where("batch_id IN ? AND (status <> ? OR scrapped_at IS NOT NULL)", batchIDs, models.StatusPending).
+		Count(&n).Error
+	return n, err
+}
+
+// OrderItemIDsForBatches returns the distinct order items scheduled into any of
+// the given batches. Collect it BEFORE HardDeleteBatchItems — afterwards the
+// mapping is gone and the caller can no longer learn which items to roll up.
+func (r *BatchRepository) OrderItemIDsForBatches(batchIDs []uint) ([]uint, error) {
+	var ids []uint
+	err := r.db.Model(&models.BatchItem{}).
+		Distinct("order_item_id").
+		Where("batch_id IN ?", batchIDs).
+		Pluck("order_item_id", &ids).Error
+	return ids, err
+}
+
+// HardDeleteBatchItems removes the batches' parts for real (Unscoped), not via
+// soft delete. idx_item_material_attempt has no deleted_at predicate, so a
+// soft-deleted row keeps occupying the (item, material, attempt) slot while
+// NextAttempts — which never sees soft-deleted rows — hands the next batch the
+// same attempt number: re-batching the item would then die on a duplicate key.
+func (r *BatchRepository) HardDeleteBatchItems(batchIDs []uint) error {
+	return r.db.Unscoped().Where("batch_id IN ?", batchIDs).Delete(&models.BatchItem{}).Error
+}
+
+// SoftDeleteLinks removes the batches' print/cut links. Soft delete is safe
+// here: idx_batch_link_kind is partial on deleted_at IS NULL.
+func (r *BatchRepository) SoftDeleteLinks(batchIDs []uint) error {
+	return r.db.Where("batch_id IN ?", batchIDs).Delete(&models.BatchLink{}).Error
+}
+
+// SoftDeleteBatches removes the batch headers. Soft delete keeps the row (and
+// its code) findable for audit; codes derive from the ID sequence, so a deleted
+// code is never reissued and the unique index never collides.
+func (r *BatchRepository) SoftDeleteBatches(ids []uint) error {
+	return r.db.Where("id IN ?", ids).Delete(&models.Batch{}).Error
+}
+
 // ---------- Status history ----------
 
 type StatusHistoryRepository struct{ db *gorm.DB }

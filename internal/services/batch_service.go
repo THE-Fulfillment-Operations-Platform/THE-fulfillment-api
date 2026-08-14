@@ -442,6 +442,121 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 	return s.Get(batch.ID)
 }
 
+// Delete removes a batch that production has not touched yet, releasing its
+// items back to the batching pool (they reappear on the create-batch screen and
+// can be re-grouped). Deleting a split parent removes the whole child tree in
+// one go; a child is never deleted on its own — the split is quota-derived, so
+// removing one child would leave the parent's ChildCount and sequence lying.
+//
+// The guard is deliberately narrow: every batch in the tree must still be
+// PENDING (and not closed), and every part untouched (PENDING, not scrapped).
+// A batch that was printed or cut represents physical goods and spent material —
+// that is the scrap/close flow's job, not delete's. Any tem QR printed for the
+// deleted batch becomes waste paper; the replacement batch prints its own.
+func (s *BatchService) Delete(actor Actor, batchID uint) error {
+	batch, err := s.repo.Batch.FindLite(batchID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apperr.NotFound("Batch not found")
+		}
+		return apperr.Internal("lookup failed").Wrap(err)
+	}
+	if batch.ParentBatchID != nil {
+		return apperr.Unprocessable("Đây là batch con trong cụm chia theo định mức — không xoá riêng lẻ. Hãy xoá batch cha để xoá cả cụm.")
+	}
+
+	var itemIDs []uint
+	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
+		txRepo := repositories.New(tx)
+
+		ids := []uint{batch.ID}
+		if batch.IsParent {
+			children, err := txRepo.Batch.ChildBatchesFor(batch.ID)
+			if err != nil {
+				return err
+			}
+			for _, c := range children {
+				ids = append(ids, c.ID)
+			}
+		}
+
+		// Re-read inside the transaction: the board may have advanced the batch
+		// between the screen render and the click, and the header alone can lag
+		// (a PENDING batch whose part a QC action already moved), so the guard
+		// checks both the headers and every part.
+		rows, err := txRepo.Batch.FindLiteMany(ids)
+		if err != nil {
+			return err
+		}
+		for _, b := range rows {
+			if b.Status != models.StatusPending {
+				return apperr.Unprocessable("Batch " + b.Code + " đã vào sản xuất (đang ở '" + string(b.Status) + "') — chỉ xoá được batch chưa sản xuất. Hàng in lỗi/bỏ đi xử lý qua QC (scrap), không qua xoá batch.")
+			}
+			if b.ClosedAt != nil {
+				return apperr.Unprocessable("Batch " + b.Code + " đã đóng — được giữ làm lịch sử sản xuất, không xoá.")
+			}
+		}
+		started, err := txRepo.Batch.StartedPartCount(ids)
+		if err != nil {
+			return err
+		}
+		if started > 0 {
+			return apperr.Unprocessable("Batch có phần đã được sản xuất hoặc đã huỷ tại QC — chỉ xoá được batch chưa sản xuất.")
+		}
+
+		itemIDs, err = txRepo.Batch.OrderItemIDsForBatches(ids)
+		if err != nil {
+			return err
+		}
+
+		// Un-stamp the batch's shared print/cut file from its items BEFORE the
+		// parts go away (the item set is derived from batch_items). Otherwise the
+		// stale URL survives on the item and the production export's item-level
+		// fallback would offer the deleted batch's file to the next batch.
+		for _, id := range ids {
+			links, err := txRepo.Batch.LinksForBatch(id)
+			if err != nil {
+				return err
+			}
+			for _, link := range links {
+				column := "print_file_url"
+				if link.Kind == models.BatchLinkCut {
+					column = "cut_file_url"
+				}
+				if _, err := txRepo.OrderItem.ClearProductionFileForBatch(id, column, link.URL); err != nil {
+					return err
+				}
+			}
+		}
+
+		// Parts are hard-deleted (idx_item_material_attempt has no deleted_at
+		// predicate — see HardDeleteBatchItems); headers and links soft-delete so
+		// the batch stays traceable. Status history is append-only and stays.
+		if err := txRepo.Batch.HardDeleteBatchItems(ids); err != nil {
+			return err
+		}
+		if err := txRepo.Batch.SoftDeleteLinks(ids); err != nil {
+			return err
+		}
+		return txRepo.Batch.SoftDeleteBatches(ids)
+	})
+	if err != nil {
+		if ae, ok := apperr.As(err); ok {
+			return ae
+		}
+		return apperr.Internal("could not delete batch").Wrap(err)
+	}
+
+	// The released items derive their status from whatever parts remain in other
+	// batches — none left means back to PENDING and the batching pool.
+	_, _ = recomputeOrderItemStatuses(s.repo, itemIDs, actor)
+
+	s.audit.Log(actor, "BATCH_DELETE", "batch", &batch.ID,
+		fmt.Sprintf("Deleted batch %s", batch.Code),
+		models.JSONMap{"released_item_ids": itemIDs, "children": batch.ChildCount})
+	return nil
+}
+
 // ---------- Batch links (print / cut) ----------
 
 // SetBatchLinkInput sets (or replaces) a batch's print or cut link.

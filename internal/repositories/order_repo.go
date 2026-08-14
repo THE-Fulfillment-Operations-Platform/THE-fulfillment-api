@@ -1011,6 +1011,23 @@ func (r *OrderItemRepository) SetProductionFileForBatch(batchID uint, column, ur
 	return res.RowsAffected, res.Error
 }
 
+// ClearProductionFileForBatch is the delete-side inverse of
+// SetProductionFileForBatch: it blanks the column on the batch's items, but only
+// where the value still IS this batch's link — an item since re-stamped by
+// another batch keeps that batch's file. Left in place, the stale URL would
+// resurface via the item-level fallback in the production export and the next
+// batch could be produced from the deleted batch's file. Must run while the
+// batch's parts still exist (the item set comes from batch_items). `column` is
+// caller-supplied and must stay a fixed literal, never user input.
+func (r *OrderItemRepository) ClearProductionFileForBatch(batchID uint, column, url string) (int64, error) {
+	res := r.db.Model(&models.OrderItem{}).
+		Where("id IN (?)",
+			r.db.Model(&models.BatchItem{}).Select("order_item_id").Where("batch_id = ?", batchID)).
+		Where(column+" = ?", url).
+		Update(column, "")
+	return res.RowsAffected, res.Error
+}
+
 // MaterialBucket groups design-ready, not-yet-batched item parts by material so
 // the "material buckets" panel on the create-batch screen can be built.
 type MaterialBucket struct {
