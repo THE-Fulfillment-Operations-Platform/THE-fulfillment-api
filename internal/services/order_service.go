@@ -147,8 +147,8 @@ func (s *OrderService) GetItem(id uint) (*models.OrderItem, error) {
 
 // ActionCounts returns the sidebar badge numbers (orders to review, cancellation
 // requests, notes needing attention) in one query — see repositories.ActionCounts.
-func (s *OrderService) ActionCounts() (repositories.ActionCounts, error) {
-	return s.repo.ActionCounts()
+func (s *OrderService) ActionCounts(role models.Role) (repositories.ActionCounts, error) {
+	return s.repo.ActionCounts(role)
 }
 
 // ---------- Design queue ----------

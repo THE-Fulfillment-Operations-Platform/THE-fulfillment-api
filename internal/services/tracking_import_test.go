@@ -2,6 +2,7 @@ package services
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +87,35 @@ func TestTrackingImport_ParseHeaderAliases(t *testing.T) {
 	}
 	if _, err := ParseTrackingCSV(strings.NewReader("Foo,Bar\n1,2\n")); err == nil {
 		t.Fatal("unrecognisable headers must be rejected, not guessed")
+	}
+}
+
+// Every list in the preview must marshal as a JSON array, never null. A nil Go
+// slice becomes `null`, and the client reads these with .length/.filter — one
+// null crashed the whole preview screen (including its confirm button), so the
+// operator saw a correct API response in devtools and nothing on screen.
+func TestTrackingImport_PreviewListsAreNeverNullJSON(t *testing.T) {
+	db, svc := newTrackingImportFixture(t)
+	seedImportOrder(t, db, "100001", "SO-A", "", nil)
+
+	// A file whose every line matches: no issues, and no date range → the two
+	// lists that used to come back nil.
+	preview, err := svc.PreviewTrackingImport(Actor{ID: 1, Role: models.RoleCS},
+		[]TrackingImportRow{{Row: 1, OrderKey: "SO-A", TrackingNumber: "TN-A"}}, nil, nil)
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if len(preview.Issues) != 0 || len(preview.ScopeMissing) != 0 {
+		t.Fatalf("fixture should produce empty lists, got %+v", preview.Summary)
+	}
+	blob, err := json.Marshal(preview)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, field := range []string{"matches", "issues", "scope_missing"} {
+		if bytes.Contains(blob, []byte(`"`+field+`":null`)) {
+			t.Errorf("%s marshalled as null — the client reads it as an array: %s", field, blob)
+		}
 	}
 }
 

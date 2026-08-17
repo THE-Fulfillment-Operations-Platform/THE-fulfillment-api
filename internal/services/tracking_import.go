@@ -305,8 +305,11 @@ func (s *OrderService) PreviewTrackingImport(actor Actor, rows []TrackingImportR
 		refByID[ref.ID] = ref
 	}
 
-	var matches []TrackingImportMatch
-	var issues []TrackingImportIssue
+	// Non-nil from the start: a nil slice marshals to JSON `null`, and the client
+	// reads these as arrays (`.length`, `.filter`) — a null crashes the preview
+	// screen instead of showing "0 dòng lỗi".
+	matches := make([]TrackingImportMatch, 0, len(rows))
+	issues := make([]TrackingImportIssue, 0)
 	issue := func(row TrackingImportRow, code, reason string) {
 		issues = append(issues, TrackingImportIssue{
 			Row: row.Row, OrderKey: row.OrderKey, TrackingNumber: row.TrackingNumber,
@@ -475,7 +478,11 @@ func (s *OrderService) PreviewTrackingImport(actor Actor, rows []TrackingImportR
 	// exact anyway — coverage is counted over the matches themselves (only an
 	// ASSIGN match can sit in scope, since scope means "no tracking yet"), so
 	// the math stays right even when the fetched list is truncated.
-	preview := &TrackingImportPreview{Matches: matches, Issues: issues}
+	// ScopeMissing stays an empty array (never null) when no date range was sent:
+	// "not compared" is carried by summary.scope_total = -1, not by a missing list.
+	preview := &TrackingImportPreview{
+		Matches: matches, Issues: issues, ScopeMissing: []repositories.OrderCodeRef{},
+	}
 	if scopeFrom != nil || scopeTo != nil {
 		refs, total, err := s.repo.Order.HandedOverWithoutTracking(scopeFrom, scopeTo, trackingImportScopeCap)
 		if err != nil {

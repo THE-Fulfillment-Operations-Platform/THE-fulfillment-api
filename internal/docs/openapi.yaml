@@ -546,17 +546,41 @@ paths:
     get:
       tags: [Notes]
       summary: Danh sách note / required attention
+      description: >-
+        Role CS chỉ thấy note có owner_role = CS (việc khách báo về đơn), không
+        thấy note của khâu sản xuất — note hệ thống tự sinh đều mang role phải xử
+        lý: thiếu file design → DESIGNER, lỗi QC → PRODUCTION, yêu cầu huỷ → OPS.
+        Phạm vi lấy từ role đã xác thực, không nhận từ query.
       parameters:
         - { name: status, in: query, schema: { type: string } }
         - { name: severity, in: query, schema: { type: string } }
         - { name: required_attention, in: query, schema: { type: boolean } }
       responses: { '200': { description: OK } }
-    post: { tags: [Notes], summary: Tạo note, responses: { '201': { description: Created } } }
+    post:
+      tags: [Notes]
+      summary: Tạo note
+      description: CS tạo note mà không chọn phụ trách thì tự gán owner_role = CS.
+      responses: { '201': { description: Created } }
   /api/notes/{id}:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
-    get: { tags: [Notes], summary: Chi tiết note, responses: { '200': { description: OK } } }
-    put: { tags: [Notes], summary: Cập nhật note, responses: { '200': { description: OK } } }
-    delete: { tags: [Notes], summary: Xóa note, responses: { '200': { description: OK } } }
+    get:
+      tags: [Notes]
+      summary: Chi tiết note
+      responses:
+        '200': { description: OK }
+        '403': { description: CS mở note ngoài phạm vi CS }
+    put:
+      tags: [Notes]
+      summary: Cập nhật note
+      responses:
+        '200': { description: OK }
+        '403': { description: CS sửa note ngoài phạm vi CS }
+    delete:
+      tags: [Notes]
+      summary: Xóa note
+      responses:
+        '200': { description: OK }
+        '403': { description: CS xoá note ngoài phạm vi CS }
   /api/seller/orders:
     get:
       tags: [Seller View]

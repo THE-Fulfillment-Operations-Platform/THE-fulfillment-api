@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +21,11 @@ import (
 // the real contract — the { code, data } envelope, the description LIKE filter,
 // and register-updates-description — to drive the sync service end to end.
 type fakeProvider struct {
+	// mu guards the three maps below. The service pushes to the provider from
+	// fire-and-forget goroutines (RegisterOrderAsync, ReleaseNumberAsync), so two
+	// requests can land in serve() at once — unsynchronised map writes are a fatal
+	// runtime throw, which surfaced as a rare random failure of the whole package.
+	mu      sync.Mutex
 	parcels map[string]*fakeParcel // by tracking number
 	events  map[string][]tracking24h.Event
 	calls   map[string]int // endpoint → hit count, to assert we don't over-poll
@@ -51,6 +57,9 @@ func (f *fakeProvider) start(t *testing.T) *tracking24h.Client {
 }
 
 func (f *fakeProvider) serve(w http.ResponseWriter, r *http.Request) {
+	// One handler at a time: every branch below reads and writes the shared maps.
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	path := r.URL.Path
 	writeJSON := func(v any) {
 		w.Header().Set("Content-Type", "application/json")
@@ -144,6 +153,15 @@ func newTrackingDB(t *testing.T) *gorm.DB {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
+	}
+	// Pin the pool to ONE connection. Every ":memory:" connection is its own
+	// empty database, so the moment database/sql opens a second one — which it
+	// does as soon as two queries overlap — that query hits a schema-less DB and
+	// fails with "no such table". The tracking service pushes to the provider
+	// from fire-and-forget goroutines, so overlapping queries are routine here;
+	// this was a rare, random failure of the whole package.
+	if sqlDB, err := db.DB(); err == nil {
+		sqlDB.SetMaxOpenConns(1)
 	}
 	// StatusHistory: a sync that moves the order forward records the transition,
 	// so without this table every tracking test logs a failed insert and the

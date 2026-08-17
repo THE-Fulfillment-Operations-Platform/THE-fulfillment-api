@@ -32,6 +32,31 @@ func (r *ImportRepository) FindByID(id uint) (*models.ImportJob, error) {
 	return &j, nil
 }
 
+// FindForCommit loads a job WITHOUT its per-row validation errors. The commit
+// path reads the job header and its stored rows and nothing else; a file that
+// failed validation on hundreds of rows would otherwise haul every one of those
+// error rows across the wire before a single order is created.
+func (r *ImportRepository) FindForCommit(id uint) (*models.ImportJob, error) {
+	var j models.ImportJob
+	if err := r.db.First(&j, id).Error; err != nil {
+		return nil, err
+	}
+	return &j, nil
+}
+
+// MarkCommitted records the outcome of a commit by writing only the two columns
+// that changed. Update/Save would write the whole row, and an import job's row
+// carries RawRows — the JSONB copy of every line of the uploaded file — so
+// saving the struct means shipping the entire file back to the database just to
+// change a status word.
+func (r *ImportRepository) MarkCommitted(id uint, createdCount int) error {
+	return r.db.Model(&models.ImportJob{}).Where("id = ?", id).
+		Updates(map[string]any{
+			"status":        models.ImportCommitted,
+			"created_count": createdCount,
+		}).Error
+}
+
 func (r *ImportRepository) List(p Page) ([]models.ImportJob, int64, error) {
 	var rows []models.ImportJob
 	var total int64

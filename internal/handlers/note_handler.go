@@ -40,7 +40,7 @@ func (h *Handlers) ListNotes(c *gin.Context) {
 		EntityID:          uintQueryPtr(c, "entity_id"),
 		RequiredAttention: ra,
 	}
-	rows, total, err := h.svc.Note.List(f)
+	rows, total, err := h.svc.Note.List(actor(c), f)
 	if err != nil {
 		response.Fail(c, err)
 		return
@@ -54,7 +54,7 @@ func (h *Handlers) GetNote(c *gin.Context) {
 	if !ok {
 		return
 	}
-	n, err := h.svc.Note.Get(id)
+	n, err := h.svc.Note.Get(actor(c), id)
 	if err != nil {
 		response.Fail(c, err)
 		return

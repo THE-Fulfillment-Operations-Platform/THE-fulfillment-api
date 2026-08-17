@@ -57,10 +57,19 @@ func TestImport_ScalesToThousandsOfOrders(t *testing.T) {
 	if job.CreatedCount != orders {
 		t.Fatalf("created %d orders, want %d", job.CreatedCount, orders)
 	}
-	// 1 job read + 1 SKU lookup + 1 sequence reservation + batched inserts/updates
-	// for orders, codes, items and assets (200 per batch) + 1 job save. Nowhere
-	// near the ~5000 an order-at-a-time commit would issue.
-	if stmts > 40 {
+	// 1 job read + 1 SKU lookup + 1 sequence reservation + batched inserts for
+	// orders, items and assets + 1 code stamp + 1 job save. What this guards is
+	// that writes are BATCHED — an order-at-a-time commit would issue ~5000
+	// statements here.
+	//
+	// The bound is not tighter because batches are sized by parameter budget
+	// (insertBatchSize), not by a flat row count: orders are a 51-column table, so
+	// they go out ~39 rows at a time to keep each statement small enough for the
+	// database to parse quickly. Fewer, wider statements measured far slower
+	// against the remote database than more, narrower ones — so a LOW statement
+	// count is not the goal, and driving this number down by widening batches
+	// would undo the fix.
+	if stmts > 100 {
 		t.Fatalf("committing %d orders issued %d statements, want batched writes", orders, stmts)
 	}
 

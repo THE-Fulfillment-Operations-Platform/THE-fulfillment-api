@@ -6,14 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xuri/excelize/v2"
 	"golang.org/x/text/unicode/norm"
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 
 	"the-fulfillment/backend/internal/apperr"
 	"the-fulfillment/backend/internal/models"
@@ -511,13 +514,23 @@ func (s *ImportService) Preview(actor Actor, sellerID uint, source, filename str
 // Commit turns a PREVIEW import job's stored valid rows into orders + items.
 // Rows sharing a StoreOrderID become one order with many items.
 func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, error) {
-	job, err := s.repo.Import.FindByID(jobID)
+	// Per-phase timings, logged as one line at the end. A commit that runs long
+	// is otherwise a black box: the phases below cost wildly different amounts
+	// depending on the file (a wide orders insert vs. thousands of item rows),
+	// and guessing which one is the problem is how the wrong thing gets tuned.
+	timer := newPhaseTimer()
+
+	// Deliberately NOT FindByID: that preloads every stored validation error, and
+	// a file that failed on hundreds of rows would drag all of them across the
+	// wire for a path that only needs the job header and its rows.
+	job, err := s.repo.Import.FindForCommit(jobID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, apperr.NotFound("Import job not found")
 		}
 		return nil, apperr.Internal("lookup failed").Wrap(err)
 	}
+	timer.mark("read-job")
 	if job.Status != models.ImportPreview {
 		return nil, apperr.Conflict("Import job is not in PREVIEW state")
 	}
@@ -533,7 +546,7 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 	}
 	if len(rows) == 0 {
 		job.Status = models.ImportCommitted
-		_ = s.repo.Import.Update(job)
+		_ = s.repo.Import.MarkCommitted(job.ID, 0)
 		return job, nil
 	}
 
@@ -561,6 +574,7 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 	if err != nil {
 		return nil, apperr.Internal("could not look up SKUs").Wrap(err)
 	}
+	timer.mark("sku-lookup")
 
 	created := 0
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
@@ -624,15 +638,18 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 			order.InternalCode = fmt.Sprintf("TMP-%d-%d", job.ID, i)
 			orders = append(orders, order)
 		}
-		if err := txRepo.Order.CreateMany(orders, importInsertBatch); err != nil {
+		if err := txRepo.Order.CreateMany(orders, insertBatchSize(tx, &models.Order{})); err != nil {
 			return err
 		}
+		timer.mark("insert-orders")
 
 		// The internal code is derived from the DB-assigned id, so it can only be
-		// stamped after the insert — one UPDATE per batch, not one per order.
-		if err := stampInternalCodes(tx, orders); err != nil {
+		// stamped after the insert — but the database computes it itself, in one
+		// statement for the whole file.
+		if err := stampInternalCodes(tx, job.ID, orders); err != nil {
 			return err
 		}
+		timer.mark("stamp-codes")
 
 		items := make([]models.OrderItem, 0, len(rows))
 		for i, key := range orderKeys {
@@ -670,10 +687,11 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 			}
 		}
 		if len(items) > 0 {
-			if err := tx.CreateInBatches(&items, importInsertBatch).Error; err != nil {
+			if err := tx.CreateInBatches(&items, insertBatchSize(tx, &models.OrderItem{})).Error; err != nil {
 				return err
 			}
 		}
+		timer.mark("insert-items")
 
 		// Assets and required-attention notes need the item ids, so they follow —
 		// again as two bulk inserts for the whole file rather than per order.
@@ -721,24 +739,36 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 			}
 		}
 		if len(assets) > 0 {
-			if err := tx.CreateInBatches(&assets, importInsertBatch).Error; err != nil {
+			if err := tx.CreateInBatches(&assets, insertBatchSize(tx, &models.ItemAsset{})).Error; err != nil {
 				return err
 			}
 		}
 		if len(notes) > 0 {
-			if err := tx.CreateInBatches(&notes, importInsertBatch).Error; err != nil {
+			if err := tx.CreateInBatches(&notes, insertBatchSize(tx, &models.Note{})).Error; err != nil {
 				return err
 			}
 		}
+		timer.mark("insert-assets-notes")
 		created = len(orders)
 
 		job.Status = models.ImportCommitted
 		job.CreatedCount = created
-		return tx.Save(job).Error
+		// Only the two columns that changed. tx.Save(job) would rewrite the whole
+		// row — including RawRows, the JSONB blob holding every row of the uploaded
+		// file — sending the entire file back to the database to record a status.
+		if err := txRepo.Import.MarkCommitted(job.ID, created); err != nil {
+			return err
+		}
+		timer.mark("save-job")
+		return nil
 	})
 	if err != nil {
+		// Time the failure too: a commit that dies slowly says something different
+		// about where it died than one that dies immediately.
+		log.Printf("import commit job=%d FAILED rows=%d %s: %v", job.ID, len(rows), timer.summary(), err)
 		return nil, apperr.Internal("could not commit import").Wrap(err)
 	}
+	log.Printf("import commit job=%d orders=%d rows=%d %s", job.ID, created, len(rows), timer.summary())
 
 	s.audit.Log(actor, "IMPORT_COMMIT", "import_job", &job.ID,
 		fmt.Sprintf("Committed import: created %d orders", created), nil)
@@ -773,7 +803,7 @@ func maxInt(a, b int) int {
 // "100035"), derived from the order's DB id so it is globally unique, monotonic,
 // and independent of the (freely repeating) StoreOrderID.
 func internalBaseCode(orderID uint) string {
-	return strconv.Itoa(100000 + int(orderID))
+	return strconv.Itoa(internalCodeBase + int(orderID))
 }
 
 // itemInternalCode formats a workshop-style item code — "100035_1/5" — as
@@ -796,35 +826,94 @@ func isValidHTTPURL(v string) bool {
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
-// importInsertBatch is how many rows ride in one INSERT during a commit.
-const importInsertBatch = 200
+// phaseTimer records how long each stage of a long operation took, so the log
+// line at the end says WHERE the time went instead of only how much there was.
+type phaseTimer struct {
+	start  time.Time
+	last   time.Time
+	phases []string
+}
 
-// stampInternalCodes writes the id-derived order code onto orders that were just
-// inserted. The code can only be computed after the insert (it comes from the DB
-// id), so it goes out as one UPDATE … CASE per batch rather than an UPDATE per
-// order — the difference between a handful of statements and one per order.
-func stampInternalCodes(tx *gorm.DB, orders []models.Order) error {
-	for start := 0; start < len(orders); start += importInsertBatch {
-		end := start + importInsertBatch
-		if end > len(orders) {
-			end = len(orders)
-		}
-		chunk := orders[start:end]
-		var sb strings.Builder
-		args := make([]interface{}, 0, len(chunk)*2+len(chunk))
-		sb.WriteString("UPDATE orders SET internal_code = CASE id")
-		ids := make([]uint, 0, len(chunk))
-		for i := range chunk {
-			sb.WriteString(" WHEN ? THEN ?")
-			args = append(args, chunk[i].ID, internalBaseCode(chunk[i].ID))
-			ids = append(ids, chunk[i].ID)
-			chunk[i].InternalCode = internalBaseCode(chunk[i].ID)
-		}
-		sb.WriteString(" END WHERE id IN ?")
-		args = append(args, ids)
-		if err := tx.Exec(sb.String(), args...).Error; err != nil {
-			return err
-		}
+func newPhaseTimer() *phaseTimer {
+	now := time.Now()
+	return &phaseTimer{start: now, last: now}
+}
+
+// mark closes the phase that ended here and opens the next one.
+func (t *phaseTimer) mark(name string) {
+	now := time.Now()
+	t.phases = append(t.phases, fmt.Sprintf("%s=%dms", name, now.Sub(t.last).Milliseconds()))
+	t.last = now
+}
+
+// summary renders "total=1234ms read-job=12ms insert-orders=900ms …".
+func (t *phaseTimer) summary() string {
+	return fmt.Sprintf("total=%dms %s", time.Since(t.start).Milliseconds(), strings.Join(t.phases, " "))
+}
+
+// maxStmtParams caps how many bind parameters a single INSERT may carry.
+//
+// The commit's cost is not the NUMBER of statements — that has been batched for
+// a while — but their SHAPE. A parameterised statement costs the database
+// roughly in proportion to its parameter count (parse + plan), and the same
+// count has to cross the wire. Orders are a 51-column table, so the old flat
+// batch of 200 rows produced a ~10,000-placeholder INSERT: exactly the shape
+// StatusHistoryRepository.CreateBulk already warns about, where a
+// 7,000-placeholder statement measured ~1.4s against the remote database.
+//
+// Sizing each batch from the model's own width keeps every statement in the same
+// modest range whatever the table, trading a few more round trips (cheap, and
+// pipelined on one connection) for statements the database can parse quickly.
+const maxStmtParams = 2000
+
+// insertSchemaCache is GORM's own schema cache shape, kept package-level so a
+// model is reflected over once per process rather than once per import.
+var insertSchemaCache sync.Map
+
+// insertBatchSize returns how many rows of `model` fit in one INSERT within the
+// parameter budget. Unknown models fall back to a conservative batch.
+func insertBatchSize(db *gorm.DB, model any) int {
+	s, err := schema.Parse(model, &insertSchemaCache, db.NamingStrategy)
+	if err != nil || len(s.DBNames) == 0 {
+		return 40
+	}
+	n := maxStmtParams / len(s.DBNames)
+	if n < 1 {
+		return 1
+	}
+	if n > 200 {
+		return 200
+	}
+	return n
+}
+
+// internalCodeBase is the offset that turns a DB id into the workshop's 6-digit
+// order code (id 35 → "100035").
+const internalCodeBase = 100000
+
+// stampInternalCodes writes the id-derived order code onto the orders this job
+// just inserted.
+//
+// The code can only be computed after the insert (it comes from the DB id) — but
+// it does not have to be computed in Go: "100000 + id" is arithmetic the
+// database can do for itself. So one statement carrying ONE parameter now covers
+// the whole file, however many orders it holds, replacing an UPDATE … CASE that
+// sent two parameters per order in chunks. It is scoped by import_job_id (an
+// indexed column) and by the TMP- placeholder, so it can never reach an order
+// from another import and re-running it is a no-op.
+func stampInternalCodes(tx *gorm.DB, jobID uint, orders []models.Order) error {
+	if len(orders) == 0 {
+		return nil
+	}
+	sql := fmt.Sprintf(
+		`UPDATE orders SET internal_code = CAST(%d + id AS TEXT)
+		 WHERE import_job_id = ? AND internal_code LIKE 'TMP-%%'`, internalCodeBase)
+	if err := tx.Exec(sql, jobID).Error; err != nil {
+		return err
+	}
+	// Mirror the stamp onto the in-memory rows so the caller holds committed truth.
+	for i := range orders {
+		orders[i].InternalCode = internalBaseCode(orders[i].ID)
 	}
 	return nil
 }

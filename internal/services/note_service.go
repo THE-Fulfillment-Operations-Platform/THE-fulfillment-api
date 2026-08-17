@@ -39,9 +39,43 @@ type NoteInput struct {
 	Resolution          string              `json:"resolution"`
 }
 
+// noteScopeFor returns the owner role a caller is confined to, or "" for the
+// internal roles, who see every queue.
+//
+// Customer support's "Ghi chú / Cần xử lý" is a different list from everyone
+// else's: it is what a customer reported against an order, not the factory's
+// work. Every note the pipeline raises already names the role that must act on
+// it — missing artwork → DESIGNER, QC defect → PRODUCTION, cancellation request
+// → OPS — so confining CS to notes owned by CS is exactly that line. It is
+// derived from the authenticated actor and never from a request field, or the
+// scope would be a suggestion rather than a rule.
+func noteScopeFor(actor Actor) string {
+	if actor.Role == models.RoleCS {
+		return string(models.RoleCS)
+	}
+	return ""
+}
+
+// assertNoteInScope refuses a caller reaching a note outside their queue by id —
+// without it the scoping would only hide rows from the list, and typing the id
+// straight into the URL would still open a workshop job.
+func assertNoteInScope(actor Actor, n *models.Note) error {
+	scope := noteScopeFor(actor)
+	if scope == "" || string(n.OwnerRole) == scope {
+		return nil
+	}
+	return apperr.Forbidden("Ghi chú này thuộc khâu sản xuất/vận hành — CS chỉ xử lý ghi chú được giao cho CS.")
+}
+
 func (s *NoteService) Create(actor Actor, in NoteInput) (*models.Note, error) {
 	if strings.TrimSpace(in.Title) == "" {
 		return nil, apperr.BadRequest("Tiêu đề ghi chú là bắt buộc")
+	}
+	// A CS user filing a customer report without picking "Phụ trách" would
+	// otherwise create a note owned by nobody — and then not see it again, since
+	// their own list is scoped to CS-owned notes.
+	if in.OwnerRole == "" && actor.Role == models.RoleCS {
+		in.OwnerRole = models.RoleCS
 	}
 	severity := in.Severity
 	if severity == "" {
@@ -67,7 +101,7 @@ func (s *NoteService) Create(actor Actor, in NoteInput) (*models.Note, error) {
 	return n, nil
 }
 
-func (s *NoteService) Get(id uint) (*models.Note, error) {
+func (s *NoteService) Get(actor Actor, id uint) (*models.Note, error) {
 	n, err := s.repo.Note.FindByID(id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -75,16 +109,20 @@ func (s *NoteService) Get(id uint) (*models.Note, error) {
 		}
 		return nil, apperr.Internal("lookup failed").Wrap(err)
 	}
+	if err := assertNoteInScope(actor, n); err != nil {
+		return nil, err
+	}
 	return n, nil
 }
 
-func (s *NoteService) List(f repositories.NoteFilter) ([]models.Note, int64, error) {
+func (s *NoteService) List(actor Actor, f repositories.NoteFilter) ([]models.Note, int64, error) {
 	f.Page = f.Page.Normalize()
+	f.OwnerRole = noteScopeFor(actor)
 	return s.repo.Note.List(f)
 }
 
 func (s *NoteService) Update(actor Actor, id uint, in NoteInput) (*models.Note, error) {
-	n, err := s.Get(id)
+	n, err := s.Get(actor, id)
 	if err != nil {
 		return nil, err
 	}
@@ -154,8 +192,14 @@ func (s *NoteService) DeleteNotes(actor Actor, ids []uint) (*NoteDeleteResult, e
 		return nil, apperr.Internal("lookup failed").Wrap(err)
 	}
 	exists := make(map[uint]bool, len(found))
-	for _, n := range found {
-		exists[n.ID] = true
+	for i := range found {
+		// Refuse the whole request rather than quietly dropping the notes the
+		// caller may not touch: a delete that reports success having skipped half
+		// the selection is worse than one that says no.
+		if err := assertNoteInScope(actor, &found[i]); err != nil {
+			return nil, err
+		}
+		exists[found[i].ID] = true
 	}
 
 	res := &NoteDeleteResult{DeletedIDs: []uint{}, MissingIDs: []uint{}}
@@ -191,6 +235,10 @@ func (s *NoteService) DeleteNotes(actor Actor, ids []uint) (*NoteDeleteResult, e
 func (s *NoteService) DeleteNotesMatching(actor Actor, f repositories.NoteFilter) (int64, error) {
 	// Pagination is meaningless here — the action covers the whole match.
 	f.Page = repositories.Page{}
+	// The match is scoped the same way the list is, so "xoá tất cả" can only ever
+	// cover what the caller was actually looking at. Without this, a CS user
+	// ticking "chọn tất cả" would wipe the workshop's queue.
+	f.OwnerRole = noteScopeFor(actor)
 	n, err := s.repo.Note.DeleteByFilter(f)
 	if err != nil {
 		return 0, apperr.Internal("could not delete notes").Wrap(err)
@@ -227,8 +275,9 @@ func describeNoteFilter(f repositories.NoteFilter) string {
 
 // CountNotesMatching reports the size of a filter's match, so the UI can offer
 // (and confirm) "select all N" with the real number rather than a page count.
-func (s *NoteService) CountNotesMatching(f repositories.NoteFilter) (int64, error) {
+func (s *NoteService) CountNotesMatching(actor Actor, f repositories.NoteFilter) (int64, error) {
 	f.Page = repositories.Page{}
+	f.OwnerRole = noteScopeFor(actor)
 	n, err := s.repo.Note.CountByFilter(f)
 	if err != nil {
 		return 0, apperr.Internal("lookup failed").Wrap(err)

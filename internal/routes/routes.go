@@ -260,8 +260,11 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		items.GET("/:id", middleware.RequireRoles(roleInternal...), h.GetItem)
 		items.PATCH("/:id/design", middleware.RequireRoles(roleDesignOps...), h.UpdateItemDesign)
 	}
-	// Sidebar badges — one request for all three counters.
-	authd.GET("/action-counts", middleware.RequireRoles(roleInternal...), h.ActionCounts)
+	// Sidebar badges — one request for all counters the caller's sidebar shows.
+	// roleOrderRead, not roleInternal: CS carries the notes badge, and refusing
+	// them here meant their sidebar poll 403'd every 30 seconds for the whole
+	// session (silently — the badge treats any failure as "keep the old number").
+	authd.GET("/action-counts", middleware.RequireRoles(roleOrderRead...), h.ActionCounts)
 
 	design := authd.Group("/design-queue", middleware.RequireRoles(roleDesignOps...))
 	{

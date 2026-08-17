@@ -104,6 +104,12 @@ type NoteFilter struct {
 	EntityType        string
 	EntityID          *uint
 	RequiredAttention *bool
+	// OwnerRole scopes the list to one role's queue. It is what keeps customer
+	// support out of the factory's work: every note the pipeline raises carries
+	// the role that must act on it (missing artwork → DESIGNER, QC defect →
+	// PRODUCTION, cancellation request → OPS), and CS is confined to its own.
+	// Set by the server from the caller's role, never from the query string.
+	OwnerRole string
 }
 
 type NoteRepository struct{ db *gorm.DB }
@@ -206,6 +212,9 @@ func (r *NoteRepository) baseQuery(f NoteFilter) *gorm.DB {
 	if f.RequiredAttention != nil {
 		q = q.Where("is_required_attention = ?", *f.RequiredAttention)
 	}
+	if f.OwnerRole != "" {
+		q = q.Where("owner_role = ?", f.OwnerRole)
+	}
 	return q
 }
 
@@ -257,12 +266,33 @@ type ActionCounts struct {
 	Notes         int64 `json:"notes"`         // notes flagged for attention
 }
 
-// ActionCounts returns all three badge numbers in ONE round-trip. The sidebar
-// used to poll four list endpoints, each of which ran a COUNT and a SELECT and
-// held its own pooled connection — four HTTP requests and eight statements just
-// to draw three little numbers, repeated on every tab focus.
-func (r *Repositories) ActionCounts() (ActionCounts, error) {
+// ActionCounts returns the badge numbers this role is actually shown, in ONE
+// round-trip. The sidebar used to poll four list endpoints, each of which ran a
+// COUNT and a SELECT and held its own pooled connection — four HTTP requests and
+// eight statements just to draw three little numbers, repeated on every tab focus.
+//
+// The counts are role-scoped because the sidebar is: CS carries the notes item
+// ("Ghi chú / Cần xử lý") but neither the review queue nor the cancellation
+// queue, so counting those for them would be work done to produce a number no
+// screen displays and no CS user may act on.
+//
+// CS's notes number is narrower still. Their queue is what a customer reported
+// against an order — NOT the factory's work. Every note the pipeline raises
+// names the role that must act on it (missing artwork → DESIGNER, QC defect →
+// PRODUCTION, cancellation request → OPS), so counting notes owned by CS is
+// exactly the line between "an order was flagged" and "the workshop has a
+// problem". A badge counting the latter would send CS looking at jobs they
+// cannot act on and must not touch.
+func (r *Repositories) ActionCounts(role models.Role) (ActionCounts, error) {
 	var c ActionCounts
+	if role == models.RoleCS {
+		err := r.DB.Raw(`
+			SELECT (SELECT COUNT(*) FROM notes
+			          WHERE deleted_at IS NULL AND is_required_attention = true
+			            AND owner_role = ?) AS notes`, models.RoleCS).
+			Scan(&c).Error
+		return c, err
+	}
 	err := r.DB.Raw(`
 		SELECT
 			(SELECT COUNT(*) FROM orders

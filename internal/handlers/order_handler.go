@@ -226,7 +226,7 @@ func (h *Handlers) GetItem(c *gin.Context) {
 // four list endpoints the sidebar used to poll.
 // GET /api/action-counts
 func (h *Handlers) ActionCounts(c *gin.Context) {
-	counts, err := h.svc.Order.ActionCounts()
+	counts, err := h.svc.Order.ActionCounts(actor(c).Role)
 	if err != nil {
 		response.Fail(c, err)
 		return
