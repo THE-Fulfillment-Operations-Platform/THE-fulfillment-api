@@ -31,10 +31,11 @@ func isInternalManager(role models.Role) bool {
 // EditOrderItemInput edits one existing line item. Nil fields are left unchanged.
 type EditOrderItemInput struct {
 	ID            uint    `json:"id" binding:"required"`
-	SKUCode       *string `json:"sku_code"`
-	Quantity      *int    `json:"quantity"`
-	ProductName   *string `json:"product_name"`
-	VariantCode   *string `json:"variant_code"`
+	SKUCode  *string `json:"sku_code"`
+	Quantity *int    `json:"quantity"`
+	// No ProductName / VariantCode: the name now comes from the SKU in master
+	// data, so editing it here would let one order disagree with the catalogue.
+	// Change the SKU (or the SKU's name in Master Data) instead.
 	DesignURL     *string `json:"design_url"`
 	BackDesignURL *string `json:"back_design_url"`
 	EngraveText   *string `json:"engrave_text"`
@@ -46,7 +47,6 @@ type EditOrderItemInput struct {
 type UpdateOrderInput struct {
 	StoreOrderID     *string              `json:"store_order_id"`
 	StoreName        *string              `json:"store_name"`
-	ShippingMethod   *string              `json:"shipping_method"`
 	ShippingName     *string              `json:"shipping_name"`
 	ShippingAddress1 *string              `json:"shipping_address1"`
 	ShippingAddress2 *string              `json:"shipping_address2"`
@@ -55,8 +55,6 @@ type UpdateOrderInput struct {
 	ShippingProvince *string              `json:"shipping_province"`
 	ShippingCountry  *string              `json:"shipping_country"`
 	ShippingPhone    *string              `json:"shipping_phone"`
-	ShippingEmail    *string              `json:"shipping_email"`
-	IOSS             *string              `json:"ioss"`
 	Note             *string              `json:"note"`
 	Items            []EditOrderItemInput `json:"items"`
 }
@@ -114,7 +112,6 @@ func (s *OrderService) updateOrderCore(actor Actor, order *models.Order, in Upda
 			order.StoreOrderRef = order.StoreOrderID
 		}
 		applyStr(changes, "store_name", &order.StoreName, in.StoreName)
-		applyStr(changes, "shipping_method", &order.ShippingMethod, in.ShippingMethod)
 		applyStr(changes, "shipping_name", &order.ShippingName, in.ShippingName)
 		applyStr(changes, "shipping_address1", &order.ShippingAddress1, in.ShippingAddress1)
 		applyStr(changes, "shipping_address2", &order.ShippingAddress2, in.ShippingAddress2)
@@ -123,8 +120,6 @@ func (s *OrderService) updateOrderCore(actor Actor, order *models.Order, in Upda
 		applyStr(changes, "shipping_province", &order.ShippingProvince, in.ShippingProvince)
 		applyStr(changes, "shipping_country", &order.ShippingCountry, in.ShippingCountry)
 		applyStr(changes, "shipping_phone", &order.ShippingPhone, in.ShippingPhone)
-		applyStr(changes, "shipping_email", &order.ShippingEmail, in.ShippingEmail)
-		applyStr(changes, "ioss", &order.IOSS, in.IOSS)
 		applyStr(changes, "note", &order.Note, in.Note)
 		if err := txRepo.Order.Update(order); err != nil {
 			return err
@@ -154,8 +149,6 @@ func (s *OrderService) updateOrderCore(actor Actor, order *models.Order, in Upda
 				itemChanges["quantity"] = []int{item.Quantity, *iu.Quantity}
 				item.Quantity = *iu.Quantity
 			}
-			applyStr(itemChanges, "product_name", &item.ProductName, iu.ProductName)
-			applyStr(itemChanges, "variant_code", &item.VariantCode, iu.VariantCode)
 			applyStr(itemChanges, "design_url", &item.DesignURL, iu.DesignURL)
 			applyStr(itemChanges, "back_design_url", &item.BackDesignURL, iu.BackDesignURL)
 			applyStr(itemChanges, "engrave_text", &item.EngraveText, iu.EngraveText)

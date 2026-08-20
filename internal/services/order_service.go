@@ -48,7 +48,30 @@ func (s *OrderService) GetOrder(id uint) (*models.Order, error) {
 		}
 		return nil, apperr.Internal("lookup failed").Wrap(err)
 	}
+	FillItemProductNames(o.Items)
 	return o, nil
+}
+
+// skuProductName is what a line is called: the SKU's master-data product name,
+// falling back to its catalogue name. Empty when the SKU is unknown — callers
+// render the SKU code instead, which is what the screens already do.
+func skuProductName(sku *models.SKU) string {
+	if sku == nil {
+		return ""
+	}
+	if n := strings.TrimSpace(sku.ProductName); n != "" {
+		return n
+	}
+	return strings.TrimSpace(sku.Name)
+}
+
+// FillItemProductNames stamps the derived product name onto items whose SKU has
+// been preloaded. OrderItem.ProductName is gorm:"-" (see the model), so without
+// this the field is simply empty; every caller that preloads SKU should call it.
+func FillItemProductNames(items []models.OrderItem) {
+	for i := range items {
+		items[i].ProductName = skuProductName(items[i].SKU)
+	}
 }
 
 // GetOperationalOrder is the internal work view. It deliberately hides
@@ -420,9 +443,9 @@ func (s *OrderService) DesignReadyItemsForMaterial(materialID uint, page reposit
 // thin convenience for manually keying a single order (e.g. CS hot-fix). It does
 // NOT run the full file-level dedup/validation pipeline.
 type DirectItemInput struct {
-	SKUCode     string `json:"sku_code" binding:"required"`
-	ProductName string `json:"product_name"`
-	VariantCode string `json:"variant_code"`
+	SKUCode string `json:"sku_code" binding:"required"`
+	// The product's name is the SKU's, from master data — not something a caller
+	// supplies per line. See models.OrderItem.ProductName.
 	Quantity    int    `json:"quantity"`
 	ImageCode   string `json:"image_code"`
 	MockupURL   string `json:"mockup_url"`
@@ -434,7 +457,6 @@ type DirectOrderInput struct {
 	StoreOrderID     string            `json:"store_order_id" binding:"required"`
 	StoreName        string            `json:"store_name"`
 	Account          string            `json:"account"`
-	ShippingMethod   string            `json:"shipping_method"`
 	ShippingName     string            `json:"shipping_name" binding:"required"`
 	ShippingAddress1 string            `json:"shipping_address1" binding:"required"`
 	ShippingAddress2 string            `json:"shipping_address2"`
@@ -443,8 +465,6 @@ type DirectOrderInput struct {
 	ShippingProvince string            `json:"shipping_province"`
 	ShippingCountry  string            `json:"shipping_country" binding:"required"`
 	ShippingPhone    string            `json:"shipping_phone"`
-	ShippingEmail    string            `json:"shipping_email"`
-	IOSS             string            `json:"ioss"`
 	Note             string            `json:"note"`
 	Items            []DirectItemInput `json:"items" binding:"required,min=1"`
 }
@@ -467,11 +487,11 @@ func (s *OrderService) CreateOrderDirect(actor Actor, in DirectOrderInput) (*mod
 		}
 		order = &models.Order{
 			StoreOrderID: in.StoreOrderID, StoreOrderRef: in.StoreOrderID, SellerID: in.SellerID,
-			StoreName: in.StoreName, Account: in.Account, ShippingMethod: in.ShippingMethod, ShippingName: in.ShippingName,
+			StoreName: in.StoreName, Account: in.Account, ShippingName: in.ShippingName,
 			ShippingAddress1: in.ShippingAddress1, ShippingAddress2: in.ShippingAddress2,
 			ShippingCity: in.ShippingCity, ShippingZip: in.ShippingZip, ShippingProvince: in.ShippingProvince,
-			ShippingCountry: in.ShippingCountry, ShippingPhone: in.ShippingPhone, ShippingEmail: in.ShippingEmail,
-			IOSS: in.IOSS, Note: in.Note, SellerStatus: models.SellerStatusProduction,
+			ShippingCountry: in.ShippingCountry, ShippingPhone: in.ShippingPhone,
+			Note: in.Note, SellerStatus: models.SellerStatusProduction,
 			OrderDate: orderDate, DailySeq: seq, TrackingStatus: models.TrackingNone,
 			// New orders enter operational review before production.
 			ReviewStatus: models.ReviewPending, CancellationStatus: models.CancellationNone,
@@ -497,7 +517,7 @@ func (s *OrderService) CreateOrderDirect(actor Actor, in DirectOrderInput) (*mod
 			}
 			item := &models.OrderItem{
 				OrderID: order.ID, LineNo: i + 1, InternalCode: itemInternalCode(order.ID, i+1, len(in.Items)),
-				SKUID: skuID, SKUCode: skuCode, ProductName: it.ProductName, VariantCode: it.VariantCode,
+				SKUID: skuID, SKUCode: skuCode,
 				Quantity: maxInt(it.Quantity, 1), ImageCode: it.ImageCode, MockupURL: it.MockupURL, EngraveText: it.EngraveText,
 				InternalStatus: models.StatusPending, DesignStatus: ds,
 			}
@@ -587,20 +607,14 @@ type SellerOrderView struct {
 	ShippingZip      string `json:"shipping_zip,omitempty"`
 	ShippingCountry  string `json:"shipping_country,omitempty"`
 	ShippingPhone    string `json:"shipping_phone,omitempty"`
-	ShippingEmail    string `json:"shipping_email,omitempty"`
-	IOSS             string `json:"ioss,omitempty"`
-	// ShippingMethod is what the seller ASKED for on the import row, not which
-	// company we handed the parcel to — that stays redacted.
-	ShippingMethod string `json:"shipping_method,omitempty"`
-	Note           string `json:"note,omitempty"`
+	Note             string `json:"note,omitempty"`
 }
 
 // SellerItemView only exposes product-level facts, not the factory pipeline.
 type SellerItemView struct {
 	ID                 uint                      `json:"id"`
 	SKUCode            string                    `json:"sku_code"`
-	ProductName        string                    `json:"product_name"`
-	VariantCode        string                    `json:"variant_code"`
+	ProductName        string                    `json:"product_name"` // from the SKU in master data
 	Quantity           int                       `json:"quantity"`
 	MockupURL          string                    `json:"mockup_url"`
 	CancellationStatus models.CancellationStatus `json:"cancellation_status"`
@@ -670,9 +684,6 @@ func toSellerView(o models.Order, withItems, inProduction bool) SellerOrderView 
 		v.ShippingZip = o.ShippingZip
 		v.ShippingCountry = o.ShippingCountry
 		v.ShippingPhone = o.ShippingPhone
-		v.ShippingEmail = o.ShippingEmail
-		v.IOSS = o.IOSS
-		v.ShippingMethod = o.ShippingMethod
 		v.Note = o.Note
 
 		for _, it := range o.Items {
@@ -685,7 +696,7 @@ func toSellerView(o models.Order, withItems, inProduction bool) SellerOrderView 
 			}
 			v.Items = append(v.Items, SellerItemView{
 				ID:      it.ID,
-				SKUCode: it.SKUCode, ProductName: it.ProductName, VariantCode: it.VariantCode,
+				SKUCode: it.SKUCode, ProductName: skuProductName(it.SKU),
 				Quantity: it.Quantity, MockupURL: it.MockupURL, CancellationStatus: it.CancellationStatus,
 				CanCancel:              itemAction == SellerActionCancel,
 				CanRequestCancellation: itemAction == SellerActionRequest,

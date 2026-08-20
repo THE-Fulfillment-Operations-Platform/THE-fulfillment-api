@@ -19,8 +19,6 @@ func shippingOrder() models.Order {
 		ShippingZip:      "55112",
 		ShippingCountry:  "US",
 		ShippingPhone:    "1122334455",
-		ShippingEmail:    "nghiatesst@gmail.com",
-		ShippingMethod:   "normal",
 		Note:             "Giữ nguyên kích thước như file",
 	}
 }
@@ -39,8 +37,6 @@ func TestToSellerView_DetailCarriesRecipient(t *testing.T) {
 		{"shipping_zip", v.ShippingZip, "55112"},
 		{"shipping_country", v.ShippingCountry, "US"},
 		{"shipping_phone", v.ShippingPhone, "1122334455"},
-		{"shipping_email", v.ShippingEmail, "nghiatesst@gmail.com"},
-		{"shipping_method", v.ShippingMethod, "normal"},
 		{"note", v.Note, "Giữ nguyên kích thước như file"},
 	} {
 		if c.got != c.want {
@@ -54,7 +50,7 @@ func TestToSellerView_DetailCarriesRecipient(t *testing.T) {
 func TestToSellerView_ListOmitsRecipient(t *testing.T) {
 	v := toSellerView(shippingOrder(), false, true)
 
-	if v.ShippingName != "" || v.ShippingAddress1 != "" || v.ShippingEmail != "" {
+	if v.ShippingName != "" || v.ShippingAddress1 != "" || v.ShippingPhone != "" {
 		t.Errorf("list view leaked recipient fields: %+v", v)
 	}
 	// omitempty must actually drop the keys, not send them as empty strings.
@@ -62,7 +58,7 @@ func TestToSellerView_ListOmitsRecipient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	for _, key := range []string{"shipping_name", "shipping_address1", "shipping_email", "note"} {
+	for _, key := range []string{"shipping_name", "shipping_address1", "shipping_phone", "note"} {
 		if strings.Contains(string(raw), `"`+key+`"`) {
 			t.Errorf("list payload still contains %q: %s", key, raw)
 		}

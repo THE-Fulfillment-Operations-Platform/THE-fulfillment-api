@@ -56,10 +56,10 @@ func TestImportRowJSONRoundTrip(t *testing.T) {
 // (image code) header.
 func TestRowsFromRecordsMapsSellerColumns(t *testing.T) {
 	records := [][]string{
-		{"StoreOrderID", "Account", "StoreName", "Quantity", "SKU", "Mã ảnh", "Design", "Mockup", "EngraveText", "ShippingName", "ShippingAddress1", "ShippingCountry", "IOSS", "Note"},
-		{"Etsy-1", "acc-01", "MyStore", "3", "WOOD-01", "IMG-77", "design-a", "https://m.example.com/1.png", "Love", "John Doe", "1 Main St", "US", "IM123", "rush"},
+		{"StoreOrderID", "Account", "StoreName", "Quantity", "SKU", "Mã ảnh", "Design", "Mockup", "EngraveText", "ShippingName", "ShippingAddress1", "ShippingCountry", "Note"},
+		{"Etsy-1", "acc-01", "MyStore", "3", "WOOD-01", "IMG-77", "design-a", "https://m.example.com/1.png", "Love", "John Doe", "1 Main St", "US", "rush"},
 	}
-	rows, err := rowsFromRecords("CSV", records)
+	rows, _, err := rowsFromRecords("CSV", records)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -77,7 +77,6 @@ func TestRowsFromRecordsMapsSellerColumns(t *testing.T) {
 		"Mockup":       {r.Mockup, "https://m.example.com/1.png"},
 		"EngraveText":  {r.EngraveText, "Love"},
 		"ShippingName": {r.ShippingName, "John Doe"},
-		"IOSS":         {r.IOSS, "IM123"},
 		"Note":         {r.Note, "rush"},
 	}
 	for name, c := range checks {

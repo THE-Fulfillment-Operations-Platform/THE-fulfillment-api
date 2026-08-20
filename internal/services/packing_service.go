@@ -294,7 +294,7 @@ func (s *PackingService) CreateHandoff(actor Actor, in HandoffInput) (*models.Ha
 		OrderCode: order.InternalCode, RecipientName: order.ShippingName,
 		Address1: order.ShippingAddress1, Address2: order.ShippingAddress2, City: order.ShippingCity,
 		Province: order.ShippingProvince, Zip: order.ShippingZip, Country: order.ShippingCountry,
-		Phone: order.ShippingPhone, WeightGrams: in.WeightGrams, ShippingMethod: order.ShippingMethod,
+		Phone: order.ShippingPhone, WeightGrams: in.WeightGrams,
 	})
 
 	var handoff *models.Handoff

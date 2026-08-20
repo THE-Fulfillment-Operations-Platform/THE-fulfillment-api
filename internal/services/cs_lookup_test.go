@@ -11,11 +11,13 @@ import (
 
 // seedCSOrder creates an order with the shipping details a seller uploads — the
 // exact fields customer support searches on and reads back to a customer.
-func seedCSOrder(t *testing.T, db *gorm.DB, code, storeOrder, name, phone, email, tracking string) *models.Order {
+// There is no email: the seller template dropped the column, so orders no longer
+// carry one and CS no longer searches by it.
+func seedCSOrder(t *testing.T, db *gorm.DB, code, storeOrder, name, phone, tracking string) *models.Order {
 	t.Helper()
 	o := &models.Order{
 		InternalCode: code, StoreOrderID: storeOrder, SellerID: 1,
-		ShippingName: name, ShippingPhone: phone, ShippingEmail: email,
+		ShippingName: name, ShippingPhone: phone,
 		ShippingAddress1: "1 Main St", ShippingCity: "Austin", ShippingCountry: "US",
 		ReviewStatus: models.ReviewApproved, SellerStatus: models.SellerStatusProduction,
 		TrackingNumber: tracking,
@@ -46,12 +48,12 @@ func codesOf(orders []models.Order) map[string]bool {
 }
 
 // The CS screen has ONE search box. Whatever the customer quotes — the store's
-// order id, our internal code, a tracking number, their name, phone or email —
-// has to land on the right order.
+// order id, our internal code, a tracking number, their name or phone — has to
+// land on the right order.
 func TestCSSearch_MatchesEveryIdentifierACustomerCanQuote(t *testing.T) {
 	db, svc := csFixture(t)
-	seedCSOrder(t, db, "100001", "ETSY-5541", "Jennifer Widmer", "4153616469", "jen@example.com", "9400111899223456789012")
-	seedCSOrder(t, db, "100002", "ETSY-9002", "Brett Martino", "4152975031", "brett@example.com", "1ZA2R2010328060414")
+	seedCSOrder(t, db, "100001", "ETSY-5541", "Jennifer Widmer", "4153616469", "9400111899223456789012")
+	seedCSOrder(t, db, "100002", "ETSY-9002", "Brett Martino", "4152975031", "1ZA2R2010328060414")
 
 	cases := map[string]string{
 		"store order id":  "ETSY-5541",
@@ -59,7 +61,6 @@ func TestCSSearch_MatchesEveryIdentifierACustomerCanQuote(t *testing.T) {
 		"tracking number": "9400111899223456789012",
 		"recipient name":  "Jennifer Widmer",
 		"phone":           "4153616469",
-		"email":           "jen@example.com",
 	}
 	for what, term := range cases {
 		t.Run(what, func(t *testing.T) {
@@ -81,7 +82,7 @@ func TestCSSearch_MatchesEveryIdentifierACustomerCanQuote(t *testing.T) {
 // order, otherwise they fall back to scrolling the list by hand.
 func TestCSSearch_IsCaseInsensitiveAndPartial(t *testing.T) {
 	db, svc := csFixture(t)
-	seedCSOrder(t, db, "100001", "ETSY-5541", "Jennifer Widmer", "4153616469", "jen@example.com", "")
+	seedCSOrder(t, db, "100001", "ETSY-5541", "Jennifer Widmer", "4153616469", "")
 
 	for _, term := range []string{"jennifer", "JENNIFER", "widmer", "etsy-55", "ETSY", "wid"} {
 		rows, _, err := svc.ListOrders(repositories.OrderFilter{Search: term})
@@ -94,13 +95,13 @@ func TestCSSearch_IsCaseInsensitiveAndPartial(t *testing.T) {
 	}
 }
 
-// The search ORs across six columns. If that group leaked into the surrounding
+// The search ORs across five columns. If that group leaked into the surrounding
 // AND chain, every other filter would silently widen — a seller-scoped search
 // would start returning other sellers' customers.
 func TestCSSearch_DoesNotWidenOtherFilters(t *testing.T) {
 	db, svc := csFixture(t)
-	mine := seedCSOrder(t, db, "100001", "ETSY-1", "Same Name", "111", "a@example.com", "")
-	other := seedCSOrder(t, db, "100002", "ETSY-2", "Same Name", "222", "b@example.com", "")
+	mine := seedCSOrder(t, db, "100001", "ETSY-1", "Same Name", "111", "")
+	other := seedCSOrder(t, db, "100002", "ETSY-2", "Same Name", "222", "")
 	db.Model(other).Update("seller_id", 2)
 
 	sellerID := mine.SellerID
@@ -116,9 +117,9 @@ func TestCSSearch_DoesNotWidenOtherFilters(t *testing.T) {
 // The CS work queue: which orders are still waiting for a tracking number.
 func TestCSFilter_HasTrackingSplitsTheQueue(t *testing.T) {
 	db, svc := csFixture(t)
-	seedCSOrder(t, db, "100001", "ETSY-1", "A", "1", "a@example.com", "9400111899223456789012")
-	seedCSOrder(t, db, "100002", "ETSY-2", "B", "2", "b@example.com", "")
-	seedCSOrder(t, db, "100003", "ETSY-3", "C", "3", "c@example.com", "")
+	seedCSOrder(t, db, "100001", "ETSY-1", "A", "1", "9400111899223456789012")
+	seedCSOrder(t, db, "100002", "ETSY-2", "B", "2", "")
+	seedCSOrder(t, db, "100003", "ETSY-3", "C", "3", "")
 
 	no := false
 	waiting, total, err := svc.ListOrders(repositories.OrderFilter{HasTracking: &no})
@@ -142,8 +143,8 @@ func TestCSFilter_HasTrackingSplitsTheQueue(t *testing.T) {
 // a name search must not be satisfied by a store order id that happens to match.
 func TestCSFilter_NarrowFieldsStayNarrow(t *testing.T) {
 	db, svc := csFixture(t)
-	seedCSOrder(t, db, "100001", "SMITH-1", "Jane Doe", "111", "jane@example.com", "")
-	seedCSOrder(t, db, "100002", "ETSY-2", "John Smith", "222", "john@example.com", "")
+	seedCSOrder(t, db, "100001", "SMITH-1", "Jane Doe", "111", "")
+	seedCSOrder(t, db, "100002", "ETSY-2", "John Smith", "222", "")
 
 	rows, _, err := svc.ListOrders(repositories.OrderFilter{ShippingName: "smith"})
 	if err != nil {
@@ -181,7 +182,7 @@ func TestCanEditTracking_IncludesCSOnly(t *testing.T) {
 func TestSellerTimeline_EnforcesOwnership(t *testing.T) {
 	db := newTrackingDB(t)
 	repo := repositories.New(db)
-	mine := seedCSOrder(t, db, "100001", "ETSY-1", "A", "1", "a@example.com", "940011")
+	mine := seedCSOrder(t, db, "100001", "ETSY-1", "A", "1", "940011")
 	sync := NewTrackingSyncService(repo, &AuditService{repo: repo}, nil, "FFM", true)
 
 	if err := repo.Tracking.SaveEvents([]models.OrderTrackingEvent{{

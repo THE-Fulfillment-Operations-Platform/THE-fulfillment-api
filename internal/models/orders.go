@@ -58,7 +58,9 @@ type Order struct {
 	// came from; kept as import metadata alongside StoreName.
 	Account string `json:"account" gorm:"size:120"`
 
-	ShippingMethod   string `json:"shipping_method" gorm:"size:80"`
+	// There is no ShippingMethod: the 2026-08 seller template dropped the column,
+	// and the field was only ever an echo of what the seller asked for. THE decides
+	// how a parcel travels, so a half-filled column on the order is worse than none.
 	ShippingName     string `json:"shipping_name" gorm:"size:160"`
 	ShippingAddress1 string `json:"shipping_address1" gorm:"size:255"`
 	ShippingAddress2 string `json:"shipping_address2" gorm:"size:255"`
@@ -67,9 +69,11 @@ type Order struct {
 	ShippingProvince string `json:"shipping_province" gorm:"size:120"`
 	ShippingCountry  string `json:"shipping_country" gorm:"size:80"`
 	ShippingPhone    string `json:"shipping_phone" gorm:"size:60"`
-	ShippingEmail    string `json:"shipping_email" gorm:"size:160"`
-	IOSS             string `json:"ioss" gorm:"size:60"`
-	Note             string `json:"note" gorm:"size:1000"`
+	// No ShippingEmail and no IOSS either — both left the seller template in the
+	// same pass. The legacy columns are NOT dropped from the database: orders
+	// imported before the change keep their values, they are simply no longer read
+	// or written. Dropping them would destroy history to save nothing.
+	Note string `json:"note" gorm:"size:1000"`
 
 	// StoreOrderRef mirrors StoreOrderID. It once backed a unique (seller,
 	// store_order) index, but a StoreOrderID is a repeatable reference label — the
@@ -89,7 +93,7 @@ type Order struct {
 	HandedOverAt *time.Time `json:"handed_over_at"`
 
 	ImportJobID *uint `json:"import_job_id" gorm:"index"`
-	CreatedByID  *uint        `json:"created_by_id"`
+	CreatedByID *uint `json:"created_by_id"`
 
 	// OrderDate + DailySeq implement "STT trong ngày" (per-day order number). Both
 	// are assigned atomically at creation via the daily_counters allocator, in the
@@ -178,11 +182,15 @@ type OrderItem struct {
 	InternalCode string `json:"internal_code" gorm:"uniqueIndex;size:64;not null"` // QR/tem for scanning
 	LineNo       int    `json:"line_no"`
 
-	SKUID       *uint  `json:"sku_id" gorm:"column:sku_id;index"`
-	SKU         *SKU   `json:"sku,omitempty" gorm:"foreignKey:SKUID"`
-	SKUCode     string `json:"sku_code" gorm:"size:48;index"`
-	ProductName string `json:"product_name" gorm:"size:200"`
-	VariantCode string `json:"variant_code" gorm:"size:80"`
+	SKUID   *uint  `json:"sku_id" gorm:"column:sku_id;index"`
+	SKU     *SKU   `json:"sku,omitempty" gorm:"foreignKey:SKUID"`
+	SKUCode string `json:"sku_code" gorm:"size:48;index"`
+	// ProductName is DERIVED, never stored (gorm:"-"): the product's name belongs
+	// to the SKU in master data, and the seller template no longer carries a name
+	// column at all. Services fill it in from the SKU so the API shape callers
+	// already depend on does not change. The legacy order_items.product_name column
+	// is left in the database untouched, simply unread.
+	ProductName string `json:"product_name" gorm:"-"`
 	Quantity    int    `json:"quantity" gorm:"not null;default:1"`
 
 	// DesignURL is the primary/front design (also the "SINGLE" side for one-sided

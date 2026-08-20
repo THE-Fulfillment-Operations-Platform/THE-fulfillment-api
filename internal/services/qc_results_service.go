@@ -125,6 +125,28 @@ func (s *QCService) QCResults(f repositories.QCResultFilter) ([]QCResultOrder, r
 		byOrder[o.ID] = &out[len(out)-1]
 	}
 
+	// One lookup for the whole page: product names live on the SKU in master data,
+	// not on the line (see models.OrderItem.ProductName). These rows come from a
+	// raw projection, so there is no SKU preload to read them off.
+	skuNames := map[string]string{}
+	if len(lines) > 0 {
+		seen := map[string]bool{}
+		codes := make([]string, 0, len(lines))
+		for i := range lines {
+			if c := lines[i].SKUCode; c != "" && !seen[c] {
+				seen[c] = true
+				codes = append(codes, c)
+			}
+		}
+		infos, infoErr := s.repo.SKU.InfoByCodes(codes)
+		if infoErr != nil {
+			return nil, summary, 0, apperr.Internal("could not load SKU names").Wrap(infoErr)
+		}
+		for code, info := range infos {
+			skuNames[code] = info.ProductName
+		}
+	}
+
 	for i := range lines {
 		line := &lines[i]
 		parent := byOrder[line.OrderID]
@@ -133,7 +155,7 @@ func (s *QCService) QCResults(f repositories.QCResultFilter) ([]QCResultOrder, r
 		}
 		item := QCResultItem{
 			ItemID: line.ID, InternalCode: line.InternalCode, SKUCode: line.SKUCode,
-			ProductName: line.ProductName, Quantity: line.Quantity,
+			ProductName: skuNames[line.SKUCode], Quantity: line.Quantity,
 			InternalStatus: line.InternalStatus, ReworkCount: line.ReworkCount,
 			MockupURL: line.MockupURL,
 		}

@@ -89,6 +89,29 @@ func (r *SellerRepository) Exists(id uint) (bool, error) {
 	return n > 0, err
 }
 
+// SellerIdentity is the minimum an import needs to cross-check the "Seller ID"
+// column against the seller it is importing for: the id and the code, nothing
+// else. FindByID would drag the seller's stores along for a string comparison.
+type SellerIdentity struct {
+	ID   uint
+	Code string
+	Name string
+}
+
+// IdentityByID loads just id/code/name. found=false means no such seller.
+func (r *SellerRepository) IdentityByID(id uint) (SellerIdentity, bool, error) {
+	var out []SellerIdentity
+	err := r.db.Model(&models.Seller{}).
+		Select("id", "code", "name").
+		Where("id = ?", id).
+		Limit(1).
+		Scan(&out).Error
+	if err != nil || len(out) == 0 {
+		return SellerIdentity{}, false, err
+	}
+	return out[0], true, nil
+}
+
 func (r *SellerRepository) FindByCode(code string) (*models.Seller, error) {
 	code = models.NormalizeCode(code)
 	var s models.Seller
@@ -476,10 +499,13 @@ func (r *SKURepository) List(p Page) ([]models.SKU, int64, error) {
 }
 
 // SKUInfo is the minimal SKU fact set the import validator and review checks
-// need: does the code exist, what's its id, and how many materials are mapped.
+// need: does the code exist, what's its id, how many materials are mapped, and
+// the master-data product name (the single source of truth for what a line is
+// called, now that order items no longer carry their own copy).
 type SKUInfo struct {
 	ID            uint
 	MaterialCount int64
+	ProductName   string
 }
 
 // InfoByCodes returns SKUInfo for every existing code in one query (LEFT JOIN
@@ -494,19 +520,21 @@ func (r *SKURepository) InfoByCodes(codes []string) (map[string]SKUInfo, error) 
 		ID            uint
 		Code          string
 		MaterialCount int64
+		ProductName   string
 	}
 	var rows []row
 	err := r.db.Model(&models.SKU{}).
-		Select("skus.id, skus.code, COUNT(sku_materials.id) AS material_count").
+		Select("skus.id, skus.code, COUNT(sku_materials.id) AS material_count, "+
+			"COALESCE(NULLIF(skus.product_name, ''), skus.name) AS product_name").
 		Joins("LEFT JOIN sku_materials ON sku_materials.sku_id = skus.id AND sku_materials.deleted_at IS NULL").
 		Where("skus.code IN ?", codes).
-		Group("skus.id, skus.code").
+		Group("skus.id, skus.code, skus.product_name, skus.name").
 		Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
 	for _, r := range rows {
-		out[r.Code] = SKUInfo{ID: r.ID, MaterialCount: r.MaterialCount}
+		out[r.Code] = SKUInfo{ID: r.ID, MaterialCount: r.MaterialCount, ProductName: r.ProductName}
 	}
 	return out, nil
 }

@@ -24,7 +24,7 @@ func TestDailySeq_AssignedAndIncrements(t *testing.T) {
 
 	prev, err := svc.Preview(actor, 1, "XLSX", "f.xlsx", []ImportRow{
 		row("D-1", "A"), row("D-2", "B"), row("D-3", "C"),
-	})
+	}, HeaderReport{})
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestBulkApprove_PartialSuccess(t *testing.T) {
 	rsvc := reviewSvc(db)
 	actor := Actor{ID: 1, Role: models.RoleOps}
 
-	prev, err := imp.Preview(actor, 1, "XLSX", "f.xlsx", []ImportRow{row("OK-1", "A"), row("OK-2", "B")})
+	prev, err := imp.Preview(actor, 1, "XLSX", "f.xlsx", []ImportRow{row("OK-1", "A"), row("OK-2", "B")}, HeaderReport{})
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestBulkApprove_WritesStatusHistory(t *testing.T) {
 	rsvc := reviewSvc(db)
 	actor := Actor{ID: 7, Role: models.RoleOps}
 
-	prev, err := imp.Preview(actor, 1, "XLSX", "f.xlsx", []ImportRow{row("H-1", "A"), row("H-2", "B")})
+	prev, err := imp.Preview(actor, 1, "XLSX", "f.xlsx", []ImportRow{row("H-1", "A"), row("H-2", "B")}, HeaderReport{})
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}

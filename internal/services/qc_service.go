@@ -69,8 +69,6 @@ type QCScanResult struct {
 	OrderCode     string `json:"order_code"`
 	StoreOrderID  string `json:"store_order_id"`
 	SKUCode       string `json:"sku_code"`
-	ProductName   string `json:"product_name"`
-	VariantCode   string `json:"variant_code"`
 	Quantity      int    `json:"quantity"`
 	MaterialName  string `json:"material_name"` // Loại VL
 	// MaterialDescription is the spec text of the material(s) the item is produced
@@ -110,7 +108,7 @@ func (s *QCService) Scan(actor Actor, ref ScanRef) (*QCScanResult, error) {
 	}
 	res := &QCScanResult{
 		ItemID: item.ID, ItemCode: item.InternalCode, SKUCode: item.SKUCode,
-		ProductName: item.ProductName, VariantCode: item.VariantCode, Quantity: item.Quantity,
+		Quantity: item.Quantity,
 		QCDescription: item.QCDescription, ImageCode: item.ImageCode,
 		EngraveText: item.EngraveText, DesignURL: item.DesignURL, BackDesignURL: item.BackDesignURL,
 		MockupURL:    item.MockupURL,
@@ -123,7 +121,7 @@ func (s *QCService) Scan(actor Actor, ref ScanRef) (*QCScanResult, error) {
 	}
 	if item.SKU != nil {
 		res.SKUDescription = item.SKU.Description
-		res.SKUProductName = item.SKU.ProductName
+		res.SKUProductName = skuProductName(item.SKU)
 	}
 	// Loại VL: the material(s) this item is produced in. Prefer the batch parts
 	// (the concrete production material); fall back to the SKU's mapped materials.

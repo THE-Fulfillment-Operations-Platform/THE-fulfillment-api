@@ -28,7 +28,7 @@ func TestImport_ScalesToThousandsOfOrders(t *testing.T) {
 		rows = append(rows, row("BULK-"+strconv.Itoa(i), "IMG"+strconv.Itoa(i)))
 	}
 
-	prev, err := svc.Preview(actor, 1, "XLSX", "bulk.xlsx", rows)
+	prev, err := svc.Preview(actor, 1, "XLSX", "bulk.xlsx", rows, HeaderReport{})
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}

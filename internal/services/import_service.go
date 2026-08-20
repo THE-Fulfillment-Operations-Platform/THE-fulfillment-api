@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,14 +49,31 @@ func (f *FlexInt) UnmarshalJSON(b []byte) error {
 }
 
 // ImportRow mirrors the seller's file columns (one row = one order item).
+//
+// The 2026-08 template renamed most columns to Vietnamese ("ORDER ID", "MÃ SKU",
+// "Địa chỉ nhận", …) and dropped ShippingMethod / ProductName / VariantCode /
+// IOSS / ShippingEmail. The field names here stay in the internal English
+// vocabulary — the mapping from whatever label a file happens to use lives in
+// headerToField, so old files keep importing unchanged.
 type ImportRow struct {
+	// SellerRef is the seller's own id/code from the "Seller ID" column. It never
+	// selects the seller — the importer already knows which seller it is importing
+	// for — it is only cross-checked against that seller so a file belonging to
+	// someone else cannot be committed onto the wrong account.
+	// The json tag is NOT cosmetic: Preview persists rows as JSON on the import
+	// job and Commit reads them back through UnmarshalJSON, which resolves keys
+	// through headerToField. A tag that does not normalize to a known header key
+	// silently loses the value between preview and commit.
+	SellerRef string `json:"Seller ID"`
+	// OrderDateRaw is the "DATE" column exactly as the file wrote it. Parsing is
+	// deferred to parseOrderDate so a bad value becomes a row-level validation
+	// error instead of a parse failure that kills the whole upload.
+	OrderDateRaw string `json:"OrderDate"`
+
 	StoreOrderID     string  `json:"StoreOrderID"`
 	Account          string  `json:"Account"`
 	StoreName        string  `json:"StoreName"`
-	ShippingMethod   string  `json:"ShippingMethod"`
 	Quantity         FlexInt `json:"Quantity"`
-	ProductName      string  `json:"ProductName"`
-	VariantCode      string  `json:"VariantCode"`
 	SKU              string  `json:"SKU"`
 	ImageCode        string  `json:"ImageCode"`   // "Mã ảnh"
 	Design           string  `json:"Design"`      // legacy single/front design column (kept compatible)
@@ -71,9 +89,20 @@ type ImportRow struct {
 	ShippingProvince string  `json:"ShippingProvince"`
 	ShippingCountry  string  `json:"ShippingCountry"`
 	ShippingPhone    string  `json:"ShippingPhone"`
-	ShippingEmail    string  `json:"ShippingEmail"`
-	IOSS             string  `json:"IOSS"`
-	Note             string  `json:"Note"`
+	// PhoneAlt backs the template's second phone column ("Phone"). The system keeps
+	// ONE recipient phone; this is only a fallback so a file that filled "Phone"
+	// and left "ShippingPhone" empty does not ship a parcel with no phone number.
+	PhoneAlt string `json:"Phone"`
+	Note     string `json:"Note"`
+}
+
+// RecipientPhone is the one phone number the order carries: "ShippingPhone" when
+// the file filled it, otherwise the "Phone" column.
+func (r ImportRow) RecipientPhone() string {
+	if v := strings.TrimSpace(r.ShippingPhone); v != "" {
+		return v
+	}
+	return strings.TrimSpace(r.PhoneAlt)
 }
 
 // UnmarshalJSON maps a JSON object onto an ImportRow through the same flexible
@@ -88,7 +117,7 @@ func (r *ImportRow) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	for k, v := range raw {
-		fn, ok := headerToField[normalizeHeader(k)]
+		fn, ok := headerToField[headerKey(k)]
 		if !ok {
 			continue
 		}
@@ -100,7 +129,7 @@ func (r *ImportRow) UnmarshalJSON(b []byte) error {
 			}
 			s = num.String()
 		}
-		fn(r, strings.TrimSpace(s))
+		fn.set(r, strings.TrimSpace(s))
 	}
 	return nil
 }
@@ -127,6 +156,9 @@ type PreviewResult struct {
 	// exists for the seller). They are still imported — the client highlights them
 	// so staff can eyeball a possible duplicate — and never gate the commit.
 	Warnings []models.ImportError `json:"warnings"`
+	// Headers is what the parser made of the file's header row, so the UI can say
+	// "these columns were ignored" instead of leaving it to be discovered later.
+	Headers HeaderReport `json:"headers"`
 }
 
 // csvHeaderMap normalizes a header cell into a canonical key. It NFC-normalizes
@@ -140,68 +172,223 @@ func normalizeHeader(h string) string {
 	return h
 }
 
-var headerToField = map[string]func(*ImportRow, string){
-	"storeorderid":   func(r *ImportRow, v string) { r.StoreOrderID = v },
-	"account":        func(r *ImportRow, v string) { r.Account = v },
-	"storename":      func(r *ImportRow, v string) { r.StoreName = v },
-	"shippingmethod": func(r *ImportRow, v string) { r.ShippingMethod = v },
-	"quantity":       func(r *ImportRow, v string) { n, _ := strconv.Atoi(strings.TrimSpace(v)); r.Quantity = FlexInt(n) },
-	"productname":    func(r *ImportRow, v string) { r.ProductName = v },
-	"variantcode":    func(r *ImportRow, v string) { r.VariantCode = v },
-	"sku":            func(r *ImportRow, v string) { r.SKU = v },
-	// "Mã ảnh" — normalized VN header (diacritics preserved), plus safe aliases.
-	"mãảnh":     func(r *ImportRow, v string) { r.ImageCode = v },
-	"maanh":     func(r *ImportRow, v string) { r.ImageCode = v },
-	"imagecode": func(r *ImportRow, v string) { r.ImageCode = v },
-	"design":    func(r *ImportRow, v string) { r.Design = v },
-	// Front/Back design aliases. "Front Design (Link)" and "Back Design (Link)" are
-	// the new template columns; the legacy single "Design" column keeps working as
-	// the front/single side, so old templates import unchanged.
-	"frontdesign":      func(r *ImportRow, v string) { r.FrontDesign = v },
-	"frontdesignlink":  func(r *ImportRow, v string) { r.FrontDesign = v },
-	"designfront":      func(r *ImportRow, v string) { r.FrontDesign = v },
-	"backdesign":       func(r *ImportRow, v string) { r.BackDesign = v },
-	"backdesignlink":   func(r *ImportRow, v string) { r.BackDesign = v },
-	"designback":       func(r *ImportRow, v string) { r.BackDesign = v },
-	"mockup":           func(r *ImportRow, v string) { r.Mockup = v },
-	"mockupurl":        func(r *ImportRow, v string) { r.Mockup = v },
-	"engravetext":      func(r *ImportRow, v string) { r.EngraveText = v },
-	"shippingname":     func(r *ImportRow, v string) { r.ShippingName = v },
-	"shippingaddress1": func(r *ImportRow, v string) { r.ShippingAddress1 = v },
-	"shippingaddress2": func(r *ImportRow, v string) { r.ShippingAddress2 = v },
-	"shippingcity":     func(r *ImportRow, v string) { r.ShippingCity = v },
-	"shippingzip":      func(r *ImportRow, v string) { r.ShippingZip = v },
-	"shippingprovince": func(r *ImportRow, v string) { r.ShippingProvince = v },
-	"shippingcountry":  func(r *ImportRow, v string) { r.ShippingCountry = v },
-	"shippingphone":    func(r *ImportRow, v string) { r.ShippingPhone = v },
-	"shippingemail":    func(r *ImportRow, v string) { r.ShippingEmail = v },
-	"ioss":             func(r *ImportRow, v string) { r.IOSS = v },
-	"note":             func(r *ImportRow, v string) { r.Note = v },
+// headerNoteNoise are parenthesised notes that carry no meaning for the mapping —
+// "Mã ảnh (nếu có)" is the same column as "Mã ảnh".
+var headerNoteNoise = map[string]bool{
+	"nếucó": true, "neuco": true, "nếucó?": true,
+	"ifhave": true, "ifany": true, "optional": true,
+	"tuỳchọn": true, "tuychon": true, "tùychọn": true,
+	"khôngbắtbuộc": true, "khongbatbuoc": true,
 }
 
-// orderImportTemplateHeaders are the exact column labels the parser recognises
-// (every entry normalizes to a headerToField key), in the canonical order sellers
-// fill them in. Keep this in sync with the front-end IMPORT_COLUMNS list.
+// headerKey turns a raw header cell into the lookup key for headerToField and
+// retiredHeaders. On top of normalizeHeader it drops a trailing parenthesised
+// note — but ONLY a note that is known filler.
+//
+// Stripping every parenthesis would be a data-corruption bug, not a convenience:
+// "Địa chỉ nhận (Phụ)" would collapse onto "Địa chỉ nhận" and address line 2
+// would silently overwrite line 1 on the shipping label.
+func headerKey(h string) string {
+	k := normalizeHeader(h)
+	if i := strings.LastIndexByte(k, '('); i > 0 && strings.HasSuffix(k, ")") {
+		if headerNoteNoise[k[i+1:len(k)-1]] {
+			return k[:i]
+		}
+	}
+	return k
+}
+
+// headerField is one recognised column: a stable field id (used to report which
+// required columns a file is missing) plus the setter that fills it in.
+type headerField struct {
+	id  string
+	set func(*ImportRow, string)
+}
+
+func hf(id string, set func(*ImportRow, string)) headerField { return headerField{id: id, set: set} }
+
+// Canonical field ids. Only the ones the validator can complain about need to be
+// named; the rest are labels for the missing-column report.
+const (
+	fSellerRef = "SellerRef"
+	fOrderDate = "OrderDate"
+	fStoreOrd  = "StoreOrderID"
+	fSKU       = "SKU"
+	fQuantity  = "Quantity"
+	fShipName  = "ShippingName"
+	fShipAddr1 = "ShippingAddress1"
+	fShipCntry = "ShippingCountry"
+)
+
+// headerToField maps a normalized header key onto the field it fills. It holds
+// BOTH the 2026-08 Vietnamese template labels and the older English ones, so a
+// seller still sitting on the previous file imports without being told to redo
+// their sheet. Diacritic-free aliases are listed too — some exporters strip them.
+var headerToField = map[string]headerField{
+	// --- Seller / store ---
+	"sellerid":  hf(fSellerRef, func(r *ImportRow, v string) { r.SellerRef = v }),
+	"mãseller":  hf(fSellerRef, func(r *ImportRow, v string) { r.SellerRef = v }),
+	"maseller":  hf(fSellerRef, func(r *ImportRow, v string) { r.SellerRef = v }),
+	"account":   hf("Account", func(r *ImportRow, v string) { r.Account = v }),
+	"shopname":  hf("StoreName", func(r *ImportRow, v string) { r.StoreName = v }),
+	"storename": hf("StoreName", func(r *ImportRow, v string) { r.StoreName = v }),
+
+	// --- Order level ---
+	// "DATE" is the seller's order date and becomes the order's business day
+	// (OrderDate + "STT trong ngày"). See parseOrderDate for the accepted formats.
+	"date":         hf(fOrderDate, func(r *ImportRow, v string) { r.OrderDateRaw = v }),
+	"ngày":         hf(fOrderDate, func(r *ImportRow, v string) { r.OrderDateRaw = v }),
+	"ngay":         hf(fOrderDate, func(r *ImportRow, v string) { r.OrderDateRaw = v }),
+	"ngàyđặt":      hf(fOrderDate, func(r *ImportRow, v string) { r.OrderDateRaw = v }),
+	"ngaydat":      hf(fOrderDate, func(r *ImportRow, v string) { r.OrderDateRaw = v }),
+	"orderdate":    hf(fOrderDate, func(r *ImportRow, v string) { r.OrderDateRaw = v }),
+	"orderid":      hf(fStoreOrd, func(r *ImportRow, v string) { r.StoreOrderID = v }),
+	"storeorderid": hf(fStoreOrd, func(r *ImportRow, v string) { r.StoreOrderID = v }),
+
+	// --- Recipient ---
+	"name":             hf(fShipName, func(r *ImportRow, v string) { r.ShippingName = v }),
+	"shippingname":     hf(fShipName, func(r *ImportRow, v string) { r.ShippingName = v }),
+	"tênngườinhận":     hf(fShipName, func(r *ImportRow, v string) { r.ShippingName = v }),
+	"tennguoinhan":     hf(fShipName, func(r *ImportRow, v string) { r.ShippingName = v }),
+	"địachỉnhận":       hf(fShipAddr1, func(r *ImportRow, v string) { r.ShippingAddress1 = v }),
+	"diachinhan":       hf(fShipAddr1, func(r *ImportRow, v string) { r.ShippingAddress1 = v }),
+	"shippingaddress1": hf(fShipAddr1, func(r *ImportRow, v string) { r.ShippingAddress1 = v }),
+	// The "(Phụ)" suffix is load-bearing — it is what separates address line 2 from
+	// line 1, which is why headerKey never strips a parenthesis it does not know.
+	"địachỉnhận(phụ)":  hf("ShippingAddress2", func(r *ImportRow, v string) { r.ShippingAddress2 = v }),
+	"diachinhan(phu)":  hf("ShippingAddress2", func(r *ImportRow, v string) { r.ShippingAddress2 = v }),
+	"shippingaddress2": hf("ShippingAddress2", func(r *ImportRow, v string) { r.ShippingAddress2 = v }),
+	"thànhphố":         hf("ShippingCity", func(r *ImportRow, v string) { r.ShippingCity = v }),
+	"thanhpho":         hf("ShippingCity", func(r *ImportRow, v string) { r.ShippingCity = v }),
+	"shippingcity":     hf("ShippingCity", func(r *ImportRow, v string) { r.ShippingCity = v }),
+	// "Mã vùng" sits between city and zip in the seller template, i.e. it is the
+	// state/province — NOT a telephone area code. Anything else would print a phone
+	// prefix onto the shipping label where the state belongs.
+	"mãvùng":           hf("ShippingProvince", func(r *ImportRow, v string) { r.ShippingProvince = v }),
+	"mavung":           hf("ShippingProvince", func(r *ImportRow, v string) { r.ShippingProvince = v }),
+	"shippingprovince": hf("ShippingProvince", func(r *ImportRow, v string) { r.ShippingProvince = v }),
+	"zipcode":          hf("ShippingZip", func(r *ImportRow, v string) { r.ShippingZip = v }),
+	"zip":              hf("ShippingZip", func(r *ImportRow, v string) { r.ShippingZip = v }),
+	"shippingzip":      hf("ShippingZip", func(r *ImportRow, v string) { r.ShippingZip = v }),
+	"quốcgia":          hf(fShipCntry, func(r *ImportRow, v string) { r.ShippingCountry = v }),
+	"quocgia":          hf(fShipCntry, func(r *ImportRow, v string) { r.ShippingCountry = v }),
+	"shippingcountry":  hf(fShipCntry, func(r *ImportRow, v string) { r.ShippingCountry = v }),
+	"shippingphone":    hf("ShippingPhone", func(r *ImportRow, v string) { r.ShippingPhone = v }),
+	// Second phone column. Kept as a fallback rather than dropped: the seller
+	// template puts "Phone" in the address block, so it is the one people actually
+	// fill in — discarding it would ship parcels with no contact number.
+	"phone":       hf("Phone", func(r *ImportRow, v string) { r.PhoneAlt = v }),
+	"sốđiệnthoại": hf("Phone", func(r *ImportRow, v string) { r.PhoneAlt = v }),
+	"sodienthoai": hf("Phone", func(r *ImportRow, v string) { r.PhoneAlt = v }),
+
+	// --- Product line ---
+	"mãsku":    hf(fSKU, func(r *ImportRow, v string) { r.SKU = v }),
+	"masku":    hf(fSKU, func(r *ImportRow, v string) { r.SKU = v }),
+	"sku":      hf(fSKU, func(r *ImportRow, v string) { r.SKU = v }),
+	"sốlượng":  hf(fQuantity, func(r *ImportRow, v string) { r.Quantity = FlexInt(atoiSafe(v)) }),
+	"soluong":  hf(fQuantity, func(r *ImportRow, v string) { r.Quantity = FlexInt(atoiSafe(v)) }),
+	"quantity": hf(fQuantity, func(r *ImportRow, v string) { r.Quantity = FlexInt(atoiSafe(v)) }),
+	// "Mã ảnh" — VN header (diacritics preserved), plus safe aliases. The template
+	// writes it as "Mã ảnh (nếu có)"; headerKey drops the known filler note.
+	"mãảnh":     hf("ImageCode", func(r *ImportRow, v string) { r.ImageCode = v }),
+	"maanh":     hf("ImageCode", func(r *ImportRow, v string) { r.ImageCode = v }),
+	"imagecode": hf("ImageCode", func(r *ImportRow, v string) { r.ImageCode = v }),
+	// Front/back design. "DESIGN ORDER" is the new front-side column; the legacy
+	// single "Design" column keeps working as the front/single side.
+	"designorder":     hf("FrontDesign", func(r *ImportRow, v string) { r.FrontDesign = v }),
+	"frontdesign":     hf("FrontDesign", func(r *ImportRow, v string) { r.FrontDesign = v }),
+	"frontdesignlink": hf("FrontDesign", func(r *ImportRow, v string) { r.FrontDesign = v }),
+	"designfront":     hf("FrontDesign", func(r *ImportRow, v string) { r.FrontDesign = v }),
+	"design":          hf("Design", func(r *ImportRow, v string) { r.Design = v }),
+	"designback":      hf("BackDesign", func(r *ImportRow, v string) { r.BackDesign = v }),
+	"backdesign":      hf("BackDesign", func(r *ImportRow, v string) { r.BackDesign = v }),
+	"backdesignlink":  hf("BackDesign", func(r *ImportRow, v string) { r.BackDesign = v }),
+	"mockup":          hf("Mockup", func(r *ImportRow, v string) { r.Mockup = v }),
+	"mockupurl":       hf("Mockup", func(r *ImportRow, v string) { r.Mockup = v }),
+	"engravetext":     hf("EngraveText", func(r *ImportRow, v string) { r.EngraveText = v }),
+	"note":            hf("Note", func(r *ImportRow, v string) { r.Note = v }),
+	"ghichú":          hf("Note", func(r *ImportRow, v string) { r.Note = v }),
+	"ghichu":          hf("Note", func(r *ImportRow, v string) { r.Note = v }),
+}
+
+func atoiSafe(v string) int {
+	n, _ := strconv.Atoi(strings.TrimSpace(v))
+	return n
+}
+
+// retiredHeaders are columns the system used to import and deliberately no longer
+// does. They are still recognised so a file that carries them gets told "this
+// column is no longer used" instead of having it reported as an unknown column —
+// and so nobody spends an afternoon wondering why IOSS stopped showing up.
+var retiredHeaders = map[string]string{
+	"shippingmethod": "ShippingMethod",
+	"productname":    "ProductName",
+	"variantcode":    "VariantCode",
+	"ioss":           "IOSS",
+	"shippingemail":  "ShippingEmail",
+	"email":          "Email",
+}
+
+// requiredHeaderFields are the columns a file MUST contain. Missing any of them
+// is a whole-file problem, not a per-row one: without ORDER ID or MÃ SKU every
+// single row would fail validation and the operator would be left reading a
+// thousand identical row errors instead of "you uploaded the wrong template".
+var requiredHeaderFields = []string{fStoreOrd, fSKU, fQuantity, fShipName, fShipAddr1, fShipCntry}
+
+// headerLabels name each field in the current template, for human-facing reports.
+var headerLabels = map[string]string{
+	fStoreOrd:  "ORDER ID",
+	fSKU:       "MÃ SKU",
+	fQuantity:  "SỐ LƯỢNG",
+	fShipName:  "name (tên người nhận)",
+	fShipAddr1: "Địa chỉ nhận",
+	fShipCntry: "Quốc Gia",
+	fOrderDate: "DATE",
+	fSellerRef: "Seller ID",
+}
+
+func headerLabel(id string) string {
+	if l, ok := headerLabels[id]; ok {
+		return l
+	}
+	return id
+}
+
+// orderImportTemplateHeaders are the exact column labels the template ships, in
+// the order the seller fills them in (the 2026-08 layout: seller/store, then the
+// recipient block, then the product line). Every entry must resolve through
+// headerKey — TestOrderImportTemplateXLSX_RoundTrips enforces that.
 var orderImportTemplateHeaders = []string{
-	"StoreOrderID", "Account", "StoreName", "ShippingMethod", "Quantity",
-	"ProductName", "VariantCode", "SKU", "Mã ảnh", "Front Design", "Back Design", "Mockup",
-	"EngraveText", "ShippingName", "ShippingAddress1", "ShippingAddress2",
-	"ShippingCity", "ShippingZip", "ShippingProvince", "ShippingCountry",
-	"ShippingPhone", "ShippingEmail", "IOSS", "Note",
+	"Seller ID", "Account", "Shop name", "DATE", "name",
+	"Địa chỉ nhận", "Địa chỉ nhận (Phụ)", "Thành phố", "Mã vùng", "Zipcode", "Quốc Gia",
+	"ORDER ID", "MÃ SKU", "Mã ảnh (nếu có)", "SỐ LƯỢNG",
+	"DESIGN ORDER", "designBack", "Mockup", "EngraveText (if have)",
+	"ShippingPhone", "Note",
 }
 
-// orderImportTemplateSample gives two example rows: a one-sided product (front
-// only, back blank) and a two-sided product (front + back), so sellers see how the
-// Back Design column is used.
+// orderImportTemplateSample gives two rows of ONE order (same ORDER ID = one
+// order, two products): a one-sided product (front only) and a two-sided one
+// (front + back), so sellers see both how items group and how designBack is used.
 var orderImportTemplateSample = [][]string{
-	{"Etsy-9001", "acc-001", "Etsy-Demo", "Standard", "1", "Personalized Wood Sign", "VAR-1", "WOOD-01", "IMG-9001", "https://designs.example.com/9001-front.png", "", "https://mockups.example.com/etsy-9001-1.png", "Hello", "John Doe", "12 Main St", "", "Austin", "73301", "TX", "US", "+1900000000", "john@example.com", "", "First order"},
-	{"Etsy-9001", "acc-001", "Etsy-Demo", "Standard", "2", "Mica Plate", "VAR-2", "MICA-02", "IMG-9002", "https://designs.example.com/9002-front.png", "https://designs.example.com/9002-back.png", "https://mockups.example.com/etsy-9001-2.png", "", "John Doe", "12 Main St", "", "Austin", "73301", "TX", "US", "+1900000000", "john@example.com", "", ""},
+	{"SELLER01", "acc-001", "Etsy-Demo", "2026-08-20", "John Doe", "12 Main St", "", "Austin", "TX", "73301", "US",
+		"Etsy-9001", "WOOD-01", "IMG-9001", "1",
+		"https://designs.example.com/9001-front.png", "", "https://mockups.example.com/etsy-9001-1.png", "Hello",
+		"+1900000000", "First order"},
+	{"SELLER01", "acc-001", "Etsy-Demo", "2026-08-20", "John Doe", "12 Main St", "", "Austin", "TX", "73301", "US",
+		"Etsy-9001", "MICA-02", "IMG-9002", "2",
+		"https://designs.example.com/9002-front.png", "https://designs.example.com/9002-back.png",
+		"https://mockups.example.com/etsy-9001-2.png", "",
+		"+1900000000", ""},
 }
 
 // orderImportTemplateWidths sets per-column Excel widths (in characters): wide for
-// the design/mockup URLs / addresses / email, compact for quantity / zip.
+// the design/mockup URLs and addresses, compact for quantity / zip.
 var orderImportTemplateWidths = []float64{
-	14, 12, 14, 14, 9, 24, 12, 14, 12, 40, 40, 40, 16, 16, 22, 16, 14, 10, 12, 12, 16, 24, 10, 20,
+	12, 12, 14, 12, 18,
+	26, 20, 14, 10, 10, 10,
+	14, 14, 14, 10,
+	40, 40, 40, 18,
+	16, 22,
 }
 
 // OrderImportTemplateXLSX renders the order-import template as a real .xlsx
@@ -217,51 +404,100 @@ func (s *ImportService) OrderImportTemplateXLSX() ([]byte, string, error) {
 	return data, "order-import-template.xlsx", nil
 }
 
+// HeaderReport is what the parser learned about a file's header row: which
+// required columns were absent, which columns are recognised-but-retired, and
+// which are not recognised at all.
+//
+// It exists because the old parser silently ignored every header it did not
+// know. A renamed template therefore produced "23 rows are missing StoreOrderID"
+// instead of "this file uses different column names" — the single most expensive
+// failure mode this import has, because nothing in the message points at the
+// actual cause.
+type HeaderReport struct {
+	Missing []string `json:"missing,omitempty"` // required columns not present (human labels)
+	Retired []string `json:"retired,omitempty"` // recognised but no longer imported
+	Unknown []string `json:"unknown,omitempty"` // not recognised at all (raw labels)
+	Present []string `json:"present,omitempty"` // field ids the header row actually carried
+}
+
+// Has reports whether the file carried a column for this field id.
+func (h HeaderReport) Has(fieldID string) bool {
+	for _, id := range h.Present {
+		if id == fieldID {
+			return true
+		}
+	}
+	return false
+}
+
 // ParseCSV reads a CSV stream into rows using a flexible header mapping.
-func ParseCSV(r io.Reader) ([]ImportRow, error) {
+func ParseCSV(r io.Reader) ([]ImportRow, HeaderReport, error) {
 	reader := csv.NewReader(r)
 	reader.FieldsPerRecord = -1
 	reader.TrimLeadingSpace = true
 
 	records, err := reader.ReadAll()
 	if err != nil {
-		return nil, apperr.BadRequest("could not parse CSV: " + err.Error())
+		return nil, HeaderReport{}, apperr.BadRequest("could not parse CSV: " + err.Error())
 	}
 	return rowsFromRecords("CSV", records)
 }
 
 // ParseXLSX reads the first worksheet of an .xlsx/.xlsm stream into rows using
 // the same flexible header mapping as ParseCSV (row 1 = header).
-func ParseXLSX(r io.Reader) ([]ImportRow, error) {
+func ParseXLSX(r io.Reader) ([]ImportRow, HeaderReport, error) {
 	f, err := excelize.OpenReader(r)
 	if err != nil {
-		return nil, apperr.BadRequest("could not parse XLSX: " + err.Error())
+		return nil, HeaderReport{}, apperr.BadRequest("could not parse XLSX: " + err.Error())
 	}
 	defer f.Close()
 
 	sheets := f.GetSheetList()
 	if len(sheets) == 0 {
-		return nil, apperr.BadRequest("XLSX has no worksheets")
+		return nil, HeaderReport{}, apperr.BadRequest("XLSX has no worksheets")
 	}
 	records, err := f.GetRows(sheets[0])
 	if err != nil {
-		return nil, apperr.BadRequest("could not read XLSX rows: " + err.Error())
+		return nil, HeaderReport{}, apperr.BadRequest("could not read XLSX rows: " + err.Error())
 	}
 	return rowsFromRecords("XLSX", records)
 }
 
-// rowsFromRecords maps a header-plus-data grid (from CSV or XLSX) into ImportRows.
+// rowsFromRecords maps a header-plus-data grid (from CSV or XLSX) into ImportRows
+// and reports what it made of the header row (see HeaderReport).
 // kind is only used to label parse errors ("CSV" / "XLSX").
-func rowsFromRecords(kind string, records [][]string) ([]ImportRow, error) {
+func rowsFromRecords(kind string, records [][]string) ([]ImportRow, HeaderReport, error) {
 	if len(records) < 2 {
-		return nil, apperr.BadRequest(kind + " must contain a header row and at least one data row")
+		return nil, HeaderReport{}, apperr.BadRequest(kind + " must contain a header row and at least one data row")
 	}
 
 	header := records[0]
 	setters := make([]func(*ImportRow, string), len(header))
+	seen := map[string]bool{}
+	var report HeaderReport
 	for i, h := range header {
-		if fn, ok := headerToField[normalizeHeader(h)]; ok {
-			setters[i] = fn
+		raw := strings.TrimSpace(h)
+		key := headerKey(h)
+		if key == "" {
+			continue // a blank spacer column is not a mistake
+		}
+		if fn, ok := headerToField[key]; ok {
+			setters[i] = fn.set
+			if !seen[fn.id] {
+				seen[fn.id] = true
+				report.Present = append(report.Present, fn.id)
+			}
+			continue
+		}
+		if label, ok := retiredHeaders[key]; ok {
+			report.Retired = appendDistinct(report.Retired, label)
+			continue
+		}
+		report.Unknown = appendDistinct(report.Unknown, raw)
+	}
+	for _, id := range requiredHeaderFields {
+		if !seen[id] {
+			report.Missing = append(report.Missing, headerLabel(id))
 		}
 	}
 
@@ -273,9 +509,34 @@ func rowsFromRecords(kind string, records [][]string) ([]ImportRow, error) {
 				setters[i](&row, strings.TrimSpace(cell))
 			}
 		}
+		if isBlankRow(row) {
+			continue // trailing empty rows are what Excel leaves behind, not data
+		}
 		rows = append(rows, row)
 	}
-	return rows, nil
+	return rows, report, nil
+}
+
+func appendDistinct(list []string, v string) []string {
+	for _, x := range list {
+		if strings.EqualFold(x, v) {
+			return list
+		}
+	}
+	return append(list, v)
+}
+
+// isBlankRow reports a row where every column the parser understood is empty.
+// Excel files routinely carry a tail of formatted-but-empty rows; importing them
+// would produce a screenful of "ORDER ID is required" errors for rows the seller
+// never typed anything into.
+func isBlankRow(r ImportRow) bool {
+	return strings.TrimSpace(r.StoreOrderID) == "" && strings.TrimSpace(r.SKU) == "" &&
+		int(r.Quantity) == 0 && strings.TrimSpace(r.ShippingName) == "" &&
+		strings.TrimSpace(r.ShippingAddress1) == "" && strings.TrimSpace(r.ShippingCountry) == "" &&
+		strings.TrimSpace(r.ImageCode) == "" && strings.TrimSpace(r.Mockup) == "" &&
+		strings.TrimSpace(r.FrontDesignValue()) == "" && strings.TrimSpace(r.Note) == "" &&
+		strings.TrimSpace(r.SellerRef) == "" && strings.TrimSpace(r.OrderDateRaw) == ""
 }
 
 // skuInfoForRows bulk-loads SKUInfo (id + mapped-material count) for every
@@ -335,8 +596,28 @@ func zipStateSwapped(zip, province string) bool {
 	return true
 }
 
+// sellerRefMatches reports whether the file's "Seller ID" cell refers to the
+// seller this import is running for. An empty cell always matches — the column
+// is a cross-check, not a selector. Accepts the seller code (diacritics/spacing
+// normalised), the numeric id, or the seller name.
+func sellerRefMatches(ref string, sel repositories.SellerIdentity) bool {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return true
+	}
+	if models.NormalizeCode(ref) == models.NormalizeCode(sel.Code) {
+		return true
+	}
+	if n, err := strconv.ParseUint(ref, 10, 64); err == nil && uint(n) == sel.ID {
+		return true
+	}
+	return strings.EqualFold(ref, strings.TrimSpace(sel.Name))
+}
+
 // skus is the pre-fetched SKUInfo map for the whole file (see skuInfoForRows).
-func (s *ImportService) validateRow(rowNumber int, row ImportRow, skus map[string]repositories.SKUInfo) *models.ImportError {
+// seller is the account the file is being imported into, used to cross-check the
+// "Seller ID" column.
+func (s *ImportService) validateRow(rowNumber int, row ImportRow, skus map[string]repositories.SKUInfo, seller repositories.SellerIdentity) *models.ImportError {
 	mkErr := func(field, code, msg, suggestion string) *models.ImportError {
 		return &models.ImportError{
 			RowNumber: rowNumber, StoreOrderID: row.StoreOrderID, SKU: row.SKU,
@@ -344,8 +625,22 @@ func (s *ImportService) validateRow(rowNumber int, row ImportRow, skus map[strin
 		}
 	}
 
+	// The file says it belongs to a different seller than the one selected. This
+	// blocks rather than warns: committing a file onto the wrong account creates
+	// real orders under a seller who never sold them, and the only way back is
+	// deleting orders that production may already have picked up.
+	if !sellerRefMatches(row.SellerRef, seller) {
+		return mkErr("Seller ID", "SELLER_MISMATCH",
+			"Seller ID trong file (\""+strings.TrimSpace(row.SellerRef)+"\") không khớp seller đang import ("+seller.Code+")",
+			"Chọn đúng seller ở ô \"Seller\" phía trên, hoặc sửa cột Seller ID trong file")
+	}
+	if _, _, err := ParseOrderDate(row.OrderDateRaw); err != nil {
+		return mkErr("DATE", "DATE_INVALID",
+			"Cột DATE không đọc được: \""+strings.TrimSpace(row.OrderDateRaw)+"\"",
+			"Dùng định dạng ngày/tháng/năm (20/08/2026) hoặc 2026-08-20")
+	}
 	if strings.TrimSpace(row.StoreOrderID) == "" {
-		return mkErr("StoreOrderID", "ORD_MISSING_ID", "StoreOrderID is required", "Provide the store order id")
+		return mkErr("StoreOrderID", "ORD_MISSING_ID", "ORDER ID is required", "Provide the store order id")
 	}
 	if int(row.Quantity) < 1 {
 		return mkErr("Quantity", "QTY_INVALID", "Quantity must be a positive integer", "Set quantity >= 1")
@@ -368,8 +663,8 @@ func (s *ImportService) validateRow(rowNumber int, row ImportRow, skus map[strin
 	// Basic shipping validation.
 	if strings.TrimSpace(row.ShippingName) == "" || strings.TrimSpace(row.ShippingAddress1) == "" ||
 		strings.TrimSpace(row.ShippingCountry) == "" {
-		return mkErr("ShippingAddress1", "ADDR_INVALID", "Shipping name, address1 and country are required",
-			"Correct and validate shipping address")
+		return mkErr("ShippingAddress1", "ADDR_INVALID", "Thiếu tên người nhận / Địa chỉ nhận / Quốc Gia",
+			"Điền đủ 3 cột: name, Địa chỉ nhận, Quốc Gia")
 	}
 	// Mockup URL: blocking only if present but malformed (missing mockup is handled
 	// as a non-blocking required-attention note at commit time).
@@ -410,11 +705,23 @@ func (s *ImportService) validateRow(rowNumber int, row ImportRow, skus map[strin
 // Preview validates every row, persists the valid rows on an ImportJob (status
 // PREVIEW) and returns the per-row errors. Nothing is created in the orders
 // tables yet — that happens on Commit.
-func (s *ImportService) Preview(actor Actor, sellerID uint, source, filename string, rows []ImportRow) (*PreviewResult, error) {
-	// Existence check only — FindByID would also preload the seller's stores, a
-	// second round-trip for data this path never reads.
-	if ok, err := s.repo.Seller.Exists(sellerID); err != nil || !ok {
+//
+// hdr carries what the parser made of the header row. A file missing a required
+// column is rejected here as a whole-file error: the alternative is one identical
+// row error per line, which tells the operator nothing about the actual problem.
+func (s *ImportService) Preview(actor Actor, sellerID uint, source, filename string, rows []ImportRow, hdr HeaderReport) (*PreviewResult, error) {
+	// One light lookup: existence check AND the code needed to cross-check the
+	// file's "Seller ID" column. FindByID would also preload the seller's stores.
+	seller, found, err := s.repo.Seller.IdentityByID(sellerID)
+	if err != nil || !found {
 		return nil, apperr.BadRequest("seller_id does not reference an existing seller")
+	}
+	if len(hdr.Missing) > 0 {
+		msg := "File sai template: thiếu cột " + strings.Join(hdr.Missing, ", ")
+		if len(hdr.Unknown) > 0 {
+			msg += ". Cột không nhận diện được: " + strings.Join(hdr.Unknown, ", ")
+		}
+		return nil, apperr.BadRequest(msg + ". Tải file mẫu mới ở nút \"Tải template\" rồi điền lại.")
 	}
 	if len(rows) == 0 {
 		return nil, apperr.BadRequest("no rows to import")
@@ -443,39 +750,134 @@ func (s *ImportService) Preview(actor Actor, sellerID uint, source, filename str
 	var warnings []models.ImportError
 	orderSet := map[string]bool{}
 
+	// Date agreed per order: rows sharing an ORDER ID become one order, which can
+	// only have one business day. First row wins; a disagreement is surfaced.
+	orderDates := map[string]string{}
+
+	today := AppDateString(time.Now())
+	oldestSane := AppDateString(time.Now().AddDate(0, 0, -365))
+
+	// A missing COLUMN is one fact about the file; a missing CELL is a fact about
+	// one row. Reporting the first as the second buries the operator in one
+	// identical warning per line and trains them to ignore the warning panel.
+	// The data check covers the JSON/paste path, which has no header row at all.
+	hasDateColumn := hdr.Has(fOrderDate)
+	hasPhoneColumn := hdr.Has("ShippingPhone") || hdr.Has("Phone")
+	for _, row := range rows {
+		if !hasDateColumn && strings.TrimSpace(row.OrderDateRaw) != "" {
+			hasDateColumn = true
+		}
+		if !hasPhoneColumn && row.RecipientPhone() != "" {
+			hasPhoneColumn = true
+		}
+	}
+	if !hasDateColumn {
+		warnings = append(warnings, models.ImportError{
+			Field: "DATE", ErrorCode: "DATE_COLUMN_MISSING",
+			Message:    "File không có cột DATE — tất cả đơn sẽ lấy ngày import (" + today + ")",
+			Suggestion: "Thêm cột DATE nếu muốn đơn nằm đúng ngày khách đặt",
+		})
+	}
+	if !hasPhoneColumn {
+		warnings = append(warnings, models.ImportError{
+			Field: "ShippingPhone", ErrorCode: "PHONE_COLUMN_MISSING",
+			Message:    "File không có số điện thoại người nhận ở bất kỳ dòng nào",
+			Suggestion: "Nhiều hãng vận chuyển bắt buộc có số — bổ sung cột ShippingPhone",
+		})
+	}
+
+	mkWarn := func(rowNumber int, row ImportRow, field, code, msg, suggestion string) {
+		warnings = append(warnings, models.ImportError{
+			RowNumber: rowNumber, StoreOrderID: row.StoreOrderID, SKU: row.SKU,
+			Field: field, ErrorCode: code, Message: msg, Suggestion: suggestion,
+		})
+	}
+
+	// File-level notices, reported once with RowNumber 0 rather than per row.
+	if len(hdr.Retired) > 0 {
+		warnings = append(warnings, models.ImportError{
+			Field: "Header", ErrorCode: "COL_RETIRED",
+			Message:    "Các cột không còn dùng, hệ thống bỏ qua: " + strings.Join(hdr.Retired, ", "),
+			Suggestion: "Có thể xoá các cột này khỏi file cho gọn",
+		})
+	}
+	if len(hdr.Unknown) > 0 {
+		warnings = append(warnings, models.ImportError{
+			Field: "Header", ErrorCode: "COL_UNKNOWN",
+			Message:    "Cột không nhận diện được (dữ liệu trong cột này KHÔNG được nhập): " + strings.Join(hdr.Unknown, ", "),
+			Suggestion: "Kiểm tra chính tả tên cột, hoặc tải lại file mẫu mới nhất",
+		})
+	}
+
 	for i, row := range rows {
-		if e := s.validateRow(i+1, row, skus); e != nil {
+		if e := s.validateRow(i+1, row, skus, seller); e != nil {
 			importErrors = append(importErrors, *e)
 			continue
 		}
 		validRows = append(validRows, row)
-		orderSet[strings.ToLower(strings.TrimSpace(row.StoreOrderID))] = true
+		key := strings.ToLower(strings.TrimSpace(row.StoreOrderID))
+		orderSet[key] = true
+
+		// ---- DATE (business day of the order) ----
+		date, ambiguous, _ := ParseOrderDate(row.OrderDateRaw) // already validated above
+		switch {
+		case date == "":
+			// Only worth a row-level note when the file HAS the column and this row
+			// left it blank; the whole-file case was reported once, above.
+			if hasDateColumn {
+				mkWarn(i+1, row, "DATE", "DATE_EMPTY",
+					"Cột DATE để trống — đơn sẽ lấy ngày import ("+today+")",
+					"Điền ngày đặt hàng nếu muốn đơn nằm đúng ngày của nó")
+			}
+			date = today
+		case ambiguous:
+			mkWarn(i+1, row, "DATE", "DATE_AMBIGUOUS",
+				"Ngày \""+strings.TrimSpace(row.OrderDateRaw)+"\" đọc theo kiểu ngày/tháng → "+date+" (có thể khách định ghi tháng/ngày)",
+				"Ghi rõ dạng 2026-08-20 để không nhầm")
+		case date > today:
+			mkWarn(i+1, row, "DATE", "DATE_FUTURE",
+				"Ngày đặt "+date+" nằm ở tương lai so với hôm nay ("+today+")",
+				"Kiểm tra lại năm/tháng trong file")
+		case date < oldestSane:
+			mkWarn(i+1, row, "DATE", "DATE_TOO_OLD",
+				"Ngày đặt "+date+" cách đây hơn 1 năm",
+				"Kiểm tra lại năm trong file")
+		}
+		if prev, ok := orderDates[key]; ok {
+			if prev != date {
+				mkWarn(i+1, row, "DATE", "DATE_CONFLICT",
+					"Cùng ORDER ID nhưng DATE khác nhau ("+prev+" vs "+date+") — đơn sẽ dùng "+prev,
+					"Sửa cho các dòng cùng ORDER ID có cùng ngày")
+			}
+		} else {
+			orderDates[key] = date
+		}
+
 		// Non-blocking heads-up: this StoreOrderID already exists for the seller
 		// from an earlier import. We still import it as a brand-new, independent
 		// order with its own internal code — a store order id is a repeatable label
 		// — but flag the row so staff can confirm with the customer it isn't an
 		// accidental re-send.
 		if existingStoreOrders[strings.TrimSpace(row.StoreOrderID)] {
-			warnings = append(warnings, models.ImportError{
-				RowNumber: i + 1, StoreOrderID: row.StoreOrderID, SKU: row.SKU,
-				Field: "StoreOrderID", ErrorCode: "ORD_DUPLICATE",
-				Message:    "StoreOrderID đã tồn tại cho seller này — không chặn, kiểm tra kẻo trùng",
-				Suggestion: "Xác nhận với khách nếu đây là đơn đã có; nếu đúng là đơn mới thì bỏ qua",
-			})
+			mkWarn(i+1, row, "StoreOrderID", "ORD_DUPLICATE",
+				"ORDER ID đã tồn tại cho seller này — không chặn, kiểm tra kẻo trùng",
+				"Xác nhận với khách nếu đây là đơn đã có; nếu đúng là đơn mới thì bỏ qua")
 		}
 		// Cột ZIP đang giữ mã bang và cột Bang đang giữ ZIP — xem zipStateSwapped.
 		// Cảnh báo chứ không chặn: máy chỉ SUY ĐOÁN từ hình dạng chuỗi, còn người
 		// nhập mới biết chắc. Nhưng phải nói ra, vì không nói thì sai này lặng lẽ
 		// đi thẳng lên nhãn gửi hàng và chỉ lộ khi kiện bị trả về.
 		if zipStateSwapped(row.ShippingZip, row.ShippingProvince) {
-			warnings = append(warnings, models.ImportError{
-				RowNumber: i + 1, StoreOrderID: row.StoreOrderID, SKU: row.SKU,
-				Field:     "ShippingZip",
-				ErrorCode: "ADDR_ZIP_STATE_SWAPPED",
-				Message: "Có vẻ ZIP và Bang bị đảo cột: ShippingZip=\"" + strings.TrimSpace(row.ShippingZip) +
-					"\" (giống mã bang), ShippingProvince=\"" + strings.TrimSpace(row.ShippingProvince) + "\" (giống mã ZIP)",
-				Suggestion: "Đổi chỗ hai cột: ShippingZip là mã bưu chính (số), ShippingProvince là bang/tỉnh",
-			})
+			mkWarn(i+1, row, "Zipcode", "ADDR_ZIP_STATE_SWAPPED",
+				"Có vẻ Zipcode và Mã vùng bị đảo cột: Zipcode=\""+strings.TrimSpace(row.ShippingZip)+
+					"\" (giống mã bang), Mã vùng=\""+strings.TrimSpace(row.ShippingProvince)+"\" (giống mã ZIP)",
+				"Đổi chỗ hai cột: Zipcode là mã bưu chính (số), Mã vùng là bang/tỉnh")
+		}
+		// No phone at all means the carrier has no way to reach the recipient.
+		if hasPhoneColumn && row.RecipientPhone() == "" {
+			mkWarn(i+1, row, "ShippingPhone", "PHONE_MISSING",
+				"Đơn không có số điện thoại người nhận",
+				"Điền cột ShippingPhone — nhiều hãng vận chuyển bắt buộc có số")
 		}
 	}
 
@@ -507,7 +909,7 @@ func (s *ImportService) Preview(actor Actor, sellerID uint, source, filename str
 	return &PreviewResult{
 		ImportJobID: job.ID, Status: job.Status, TotalRows: len(rows),
 		OrderCount: len(orderSet), ValidRows: len(validRows), ErrorRows: len(importErrors),
-		Errors: importErrors, Warnings: warnings,
+		Errors: importErrors, Warnings: warnings, Headers: hdr,
 	}, nil
 }
 
@@ -586,13 +988,41 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 		// round-trips, which against a remote database is tens of minutes. The
 		// batched shape is a fixed handful of statements per few hundred rows.
 		now := time.Now()
-		orderDate := AppDateString(now)
-		// One reservation for the whole file: we own the block ending at lastSeq.
-		lastSeq, seqErr := txRepo.Order.ReserveDailySeq(orderDate, len(orderKeys), now)
-		if seqErr != nil {
-			return seqErr
+		importDate := AppDateString(now)
+
+		// Each order sits on the business day from its own "DATE" column, so a file
+		// uploaded late still files its orders under the day they were placed. Rows
+		// sharing an ORDER ID are one order, so the group's first row decides.
+		groupDates := make([]string, len(orderKeys))
+		countByDate := map[string]int{}
+		for i, key := range orderKeys {
+			d, _, dateErr := ParseOrderDate(groups[key].header.OrderDateRaw)
+			// Preview already blocks unparseable dates; a leftover bad value (an
+			// older preview job committed after this deploy) falls back to today
+			// rather than failing a commit the operator has already confirmed.
+			if d == "" || dateErr != nil {
+				d = importDate
+			}
+			groupDates[i] = d
+			countByDate[d]++
 		}
-		firstSeq := lastSeq - len(orderKeys) + 1
+
+		// Reserve one block per distinct day. The days are sorted so concurrent
+		// commits always lock daily_counters rows in the same order — two files
+		// spanning the same two days would otherwise be able to deadlock each other.
+		dates := make([]string, 0, len(countByDate))
+		for d := range countByDate {
+			dates = append(dates, d)
+		}
+		sort.Strings(dates)
+		nextSeq := make(map[string]int, len(dates))
+		for _, d := range dates {
+			lastSeq, seqErr := txRepo.Order.ReserveDailySeq(d, countByDate[d], now)
+			if seqErr != nil {
+				return seqErr
+			}
+			nextSeq[d] = lastSeq - countByDate[d] + 1
+		}
 
 		orders := make([]models.Order, 0, len(orderKeys))
 		for i, key := range orderKeys {
@@ -607,7 +1037,6 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 			order.SellerID = *job.SellerID
 			order.StoreName = g.header.StoreName
 			order.Account = g.header.Account
-			order.ShippingMethod = g.header.ShippingMethod
 			order.ShippingName = g.header.ShippingName
 			order.ShippingAddress1 = g.header.ShippingAddress1
 			order.ShippingAddress2 = g.header.ShippingAddress2
@@ -615,9 +1044,7 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 			order.ShippingZip = g.header.ShippingZip
 			order.ShippingProvince = g.header.ShippingProvince
 			order.ShippingCountry = g.header.ShippingCountry
-			order.ShippingPhone = g.header.ShippingPhone
-			order.ShippingEmail = g.header.ShippingEmail
-			order.IOSS = g.header.IOSS
+			order.ShippingPhone = g.header.RecipientPhone()
 			order.Note = g.header.Note
 			order.SellerStatus = models.SellerStatusProduction
 			// (Re)enter the review queue with a clean slate — must be reviewed
@@ -627,9 +1054,10 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 			order.TrackingStatus = models.TrackingNone
 			order.ImportJobID = &job.ID
 			order.CreatedByID = actor.IDPtr()
-			// "STT trong ngày" comes out of the reserved block, in file order.
-			order.OrderDate = orderDate
-			order.DailySeq = firstSeq + i
+			// "STT trong ngày" comes out of that day's reserved block, in file order.
+			order.OrderDate = groupDates[i]
+			order.DailySeq = nextSeq[groupDates[i]]
+			nextSeq[groupDates[i]]++
 			// internal_code is UNIQUE and can only be computed from the DB id, so the
 			// insert carries a placeholder that is already distinct per row —
 			// inserting a batch of blanks would collide on the unique index. The
@@ -673,8 +1101,6 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 					InternalCode:   itemInternalCode(orderID, lineNo+1, total),
 					SKUID:          skuID,
 					SKUCode:        skuCode,
-					ProductName:    row.ProductName,
-					VariantCode:    row.VariantCode,
 					Quantity:       maxInt(int(row.Quantity), 1),
 					ImageCode:      row.ImageCode,
 					DesignURL:      row.FrontDesignValue(),

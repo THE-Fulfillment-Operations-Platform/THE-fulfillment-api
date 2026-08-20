@@ -60,27 +60,35 @@ components:
         password: { type: string, example: "Password123!" }
     ImportRow:
       type: object
+      description: >
+        Một dòng của file import (1 dòng = 1 sản phẩm; các dòng cùng ORDER ID gộp
+        thành 1 đơn). Khoá là NHÃN CỘT trong file. Backend nhận cả nhãn template
+        2026-08 (tiếng Việt) lẫn nhãn template cũ (StoreOrderID, ShippingName…).
+        Các cột đã ngừng nhập — ShippingMethod, ProductName, VariantCode, IOSS,
+        ShippingEmail — vẫn parse được nhưng bị bỏ qua và báo lại trong
+        preview.headers.retired.
       properties:
-        StoreOrderID: { type: string }
-        StoreName: { type: string }
-        ShippingMethod: { type: string }
-        Quantity: { type: integer }
-        ProductName: { type: string }
-        VariantCode: { type: string }
-        SKU: { type: string }
-        Design: { type: string }
+        "Seller ID": { type: string, description: "Đối chiếu với seller đang import; khác seller → chặn dòng" }
+        Account: { type: string }
+        "Shop name": { type: string }
+        DATE: { type: string, description: "Ngày đặt → order_date + STT trong ngày. 20/08/2026 hoặc 2026-08-20" }
+        name: { type: string, description: "Tên người nhận" }
+        "Địa chỉ nhận": { type: string }
+        "Địa chỉ nhận (Phụ)": { type: string }
+        "Thành phố": { type: string }
+        "Mã vùng": { type: string, description: "Bang/tỉnh (KHÔNG phải mã vùng điện thoại)" }
+        Zipcode: { type: string }
+        "Quốc Gia": { type: string }
+        "ORDER ID": { type: string }
+        "MÃ SKU": { type: string }
+        "Mã ảnh (nếu có)": { type: string }
+        "SỐ LƯỢNG": { type: integer }
+        "DESIGN ORDER": { type: string, description: "Link design mặt trước" }
+        designBack: { type: string, description: "Link design mặt sau (sản phẩm 2 mặt)" }
         Mockup: { type: string, description: "Mockup URL seller gửi — chuẩn QC" }
-        EngraveText: { type: string }
-        ShippingName: { type: string }
-        ShippingAddress1: { type: string }
-        ShippingAddress2: { type: string }
-        ShippingCity: { type: string }
-        ShippingZip: { type: string }
-        ShippingProvince: { type: string }
-        ShippingCountry: { type: string }
+        "EngraveText (if have)": { type: string }
         ShippingPhone: { type: string }
-        ShippingEmail: { type: string }
-        IOSS: { type: string }
+        Phone: { type: string, description: "Dự phòng: chỉ dùng khi ShippingPhone trống" }
         Note: { type: string }
 security:
   - bearerAuth: []

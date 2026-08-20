@@ -23,9 +23,11 @@ type LabelRequest struct {
 	Province       string
 	Zip            string
 	Country        string
-	Phone          string
-	WeightGrams    int
-	ShippingMethod string
+	Phone       string
+	WeightGrams int
+	// No ShippingMethod: orders no longer carry one (the seller template dropped
+	// the column). A real carrier client picks the service level from the contract,
+	// not from a free-text cell a seller typed.
 }
 
 // LabelResult is the carrier's response. In phase 2 this carries the real

@@ -79,15 +79,20 @@ func TestImport_DuplicateStoreOrderID_StillGeneratesCodes(t *testing.T) {
 		row("US-SINGLE-2", "IMG-F"),
 	}
 
-	prev, err := svc.Preview(actor, sellerID, "XLSX", "seller.xlsx", rows)
+	prev, err := svc.Preview(actor, sellerID, "XLSX", "seller.xlsx", rows, HeaderReport{})
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
 	if prev.ErrorRows != 0 || len(prev.Errors) != 0 {
 		t.Fatalf("expected no blocking errors on first import, got %d: %+v", prev.ErrorRows, prev.Errors)
 	}
-	if len(prev.Warnings) != 0 {
-		t.Fatalf("expected no warnings on a first-ever import, got %+v", prev.Warnings)
+	// A first-ever import must not raise the duplicate flag. Other advisory
+	// notices (no DATE column, no phone column in this minimal fixture) are
+	// expected and are asserted separately in the import-template tests.
+	for _, w := range prev.Warnings {
+		if w.ErrorCode == "ORD_DUPLICATE" {
+			t.Fatalf("first-ever import flagged as duplicate: %+v", w)
+		}
 	}
 	if prev.ValidRows != 6 {
 		t.Fatalf("expected 6 valid rows, got %d", prev.ValidRows)
@@ -134,15 +139,21 @@ func TestImport_DuplicateStoreOrderID_StillGeneratesCodes(t *testing.T) {
 	}
 
 	// --- Re-import the SAME StoreOrderID: must NOT block, warns, new order. ---
-	prev2, err := svc.Preview(actor, sellerID, "XLSX", "seller2.xlsx", []ImportRow{row("US-DUP-1", "IMG-Z")})
+	prev2, err := svc.Preview(actor, sellerID, "XLSX", "seller2.xlsx", []ImportRow{row("US-DUP-1", "IMG-Z")}, HeaderReport{})
 	if err != nil {
 		t.Fatalf("preview 2: %v", err)
 	}
 	if prev2.ErrorRows != 0 {
 		t.Fatalf("re-import must not be blocked, got errors: %+v", prev2.Errors)
 	}
-	if len(prev2.Warnings) != 1 || prev2.Warnings[0].ErrorCode != "ORD_DUPLICATE" {
-		t.Fatalf("expected 1 ORD_DUPLICATE warning, got %+v", prev2.Warnings)
+	dupWarnings := 0
+	for _, w := range prev2.Warnings {
+		if w.ErrorCode == "ORD_DUPLICATE" {
+			dupWarnings++
+		}
+	}
+	if dupWarnings != 1 {
+		t.Fatalf("expected exactly 1 ORD_DUPLICATE warning, got %+v", prev2.Warnings)
 	}
 	if _, err := svc.Commit(actor, prev2.ImportJobID); err != nil {
 		t.Fatalf("commit 2: %v", err)

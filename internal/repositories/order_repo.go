@@ -512,7 +512,7 @@ func (r *OrderRepository) baseQuery(f OrderFilter) *gorm.DB {
 		like := "%" + s + "%"
 		cols := []string{
 			"orders.store_order_id", "orders.internal_code", "orders.tracking_number",
-			"orders.shipping_name", "orders.shipping_phone", "orders.shipping_email",
+			"orders.shipping_name", "orders.shipping_phone",
 		}
 		var sb strings.Builder
 		args := make([]interface{}, 0, len(cols))

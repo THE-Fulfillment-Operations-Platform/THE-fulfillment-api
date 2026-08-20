@@ -21,25 +21,36 @@ func TestOrderImportTemplateXLSX_RoundTrips(t *testing.T) {
 	// Every header must normalize to a headerToField key — otherwise a column the
 	// template advertises would be silently dropped on re-upload.
 	for _, h := range orderImportTemplateHeaders {
-		if _, ok := headerToField[normalizeHeader(h)]; !ok {
+		if _, ok := headerToField[headerKey(h)]; !ok {
 			t.Errorf("template header %q does not map to any parser field", h)
 		}
 	}
 
 	// Parse the generated workbook through the real importer.
-	rows, err := ParseXLSX(bytes.NewReader(data))
+	rows, hdr, err := ParseXLSX(bytes.NewReader(data))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(rows) != 2 {
 		t.Fatalf("want 2 sample rows, got %d", len(rows))
 	}
+	// The template must satisfy its own required-column rule and carry no column
+	// the parser cannot place.
+	if len(hdr.Missing) != 0 || len(hdr.Unknown) != 0 || len(hdr.Retired) != 0 {
+		t.Fatalf("template header report should be clean, got %+v", hdr)
+	}
 	r0 := rows[0]
 	// Spot-check that columns landed in the right fields — including the Vietnamese
-	// "Mã ảnh" header (→ ImageCode), the one that used to come out garbled.
+	// headers "Mã ảnh (nếu có)" (→ ImageCode) and "Địa chỉ nhận" vs its "(Phụ)"
+	// sibling, the pair most at risk of collapsing onto each other.
 	if r0.StoreOrderID != "Etsy-9001" || r0.SKU != "WOOD-01" || r0.ImageCode != "IMG-9001" ||
-		r0.Quantity != 1 || r0.ShippingCountry != "US" {
+		r0.Quantity != 1 || r0.ShippingCountry != "US" || r0.ShippingName != "John Doe" ||
+		r0.ShippingAddress1 != "12 Main St" || r0.ShippingAddress2 != "" ||
+		r0.OrderDateRaw != "2026-08-20" || r0.SellerRef != "SELLER01" {
 		t.Fatalf("row0 columns not split cleanly: %+v", r0)
+	}
+	if rows[1].BackDesign == "" || rows[1].BackDesign == rows[1].FrontDesignValue() {
+		t.Fatalf("row1 should carry a distinct back design: %+v", rows[1])
 	}
 }
 
