@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><title>12 · SOW & SLA mẫu</title>
+<link rel="stylesheet" href="kit.css">
+<style> .clause { margin-bottom:6pt; } .clause b { color:var(--navy); } </style>
+</head>
+<body>
+<div class="doc-header">
+  <div>
+    <div class="brand">FFM OPS <span>· Nền tảng vận hành xưởng fulfillment</span></div>
+    <div class="doc-title">12 · Phạm vi công việc (SOW) &amp; Cam kết dịch vụ (SLA) — mẫu</div>
+  </div>
+  <div class="meta">Phụ lục hợp đồng · v0.1 · 08/2026</div>
+</div>
+
+<div class="callout danger"><p><b>Đây là bản mẫu nghiệp vụ, không phải tư vấn pháp lý.</b> Trước khi ký hợp đồng đầu tiên, nhờ luật sư rà các điều khoản về sở hữu trí tuệ, trách nhiệm, bảo mật và chấm dứt. Mẫu này dùng làm <b>Phụ lục A (SOW)</b> và <b>Phụ lục B (SLA)</b> đính kèm hợp đồng dịch vụ phần mềm.</p></div>
+
+<h1 style="font-size:16pt">Phụ lục A · Phạm vi công việc (SOW)</h1>
+<h2>A1. Các bên &amp; tài liệu tham chiếu</h2>
+<p><b>Bên cung cấp:</b> <span class="ph">[Tên công ty]</span> · <b>Bên sử dụng:</b> <span class="ph">[Tên xưởng / công ty khách]</span><br>
+<b>Tham chiếu:</b> Đề xuất giải pháp số <span class="ph">[__]</span> ngày <span class="ph">[__]</span>; Biên bản khảo sát ngày <span class="ph">[__]</span>. Nếu mâu thuẫn, SOW này có hiệu lực cao hơn đề xuất.</p>
+
+<h2>A2. Phạm vi cung cấp</h2>
+<table>
+<thead><tr><th class="w30">Hạng mục</th><th class="w50">Mô tả</th><th class="w20">Ghi chú</th></tr></thead>
+<tbody>
+<tr><td>Phần mềm FFM Ops — gói <span class="ph">[Standard]</span></td><td>Các phân hệ theo bảng gói (tài liệu 07): tiếp nhận &amp; import đơn, duyệt, danh mục SKU–NVL, thiết kế &amp; batch, sản xuất, QC, đóng gói, bàn giao, tracking, cổng seller, CS, quản trị</td><td>Phiên bản tại ngày bàn giao</td></tr>
+<tr><td>Cài đặt &amp; cấu hình</td><td>Trên <span class="ph">[hạ tầng]</span>; tên miền <span class="ph">[__]</span>; TLS; sao lưu hàng ngày; thương hiệu &amp; đối tác vận chuyển; nhà cung cấp tracking</td><td></td></tr>
+<tr><td>Dữ liệu ban đầu</td><td>Import danh mục NVL / SKU / mapping / hạn mức từ file Bên sử dụng cung cấp; tạo <span class="ph">[__]</span> tài khoản người dùng, <span class="ph">[__]</span> seller</td><td>Không gồm đơn lịch sử</td></tr>
+<tr><td>Map template đơn</td><td><span class="ph">[__]</span> template của seller theo file mẫu đã bàn giao</td><td>Template phát sinh: tuỳ biến</td></tr>
+<tr><td>Tuỳ biến</td><td><span class="ph">[Liệt kê từng hạng mục, số ngày công — theo mục 3 đề xuất]</span></td><td>Chốt trước khi làm</td></tr>
+<tr><td>Đào tạo</td><td><span class="ph">[__]</span> buổi theo trạm, tại xưởng hoặc trực tuyến; tài liệu hướng dẫn theo vai trò</td><td></td></tr>
+<tr><td>Hỗ trợ go-live</td><td>Chạy song song <span class="ph">[1–2]</span> tuần; hỗ trợ tại chỗ <span class="ph">[__]</span> ngày</td><td></td></tr>
+<tr><td>Bảo hành</td><td>Sửa lỗi phần mềm lõi trong 3 tháng sau nghiệm thu cuối, không tính phí</td><td>Không gồm yêu cầu mới</td></tr>
+</tbody></table>
+
+<h2>A3. Ngoài phạm vi</h2>
+<ul>
+  <li>Tích hợp sàn TMĐT, tạo vận đơn trực tiếp với hãng, kế toán, đối soát công nợ — trừ khi ghi ở A2 “Tuỳ biến”.</li>
+  <li>Nhập đơn lịch sử; làm sạch dữ liệu danh mục của Bên sử dụng.</li>
+  <li>Thiết bị (điện thoại, máy in tem, máy tính, mạng); hạ tầng máy chủ nếu Bên sử dụng tự cung cấp.</li>
+  <li>Thay đổi quy trình phát sinh sau khi chốt phạm vi (xử lý theo A6).</li>
+</ul>
+
+<h2>A4. Sản phẩm bàn giao &amp; mốc</h2>
+<table>
+<thead><tr><th class="w10">Mốc</th><th class="w40">Sản phẩm bàn giao</th><th class="w25">Thời hạn</th><th class="w25">Thanh toán</th></tr></thead>
+<tbody>
+<tr><td>M0</td><td>Ký hợp đồng &amp; SOW</td><td>Ngày <span class="ph">[__]</span></td><td>40% phí triển khai</td></tr>
+<tr><td>M1</td><td>Biên bản chốt phạm vi; danh mục đã rà; hệ thống cài đặt với dữ liệu thật</td><td>M0 + 2 tuần</td><td>—</td></tr>
+<tr><td>M2</td><td>Bản chạy thử đủ tính năng; biên bản nghiệm thu UAT; nhân sự đã đào tạo</td><td>M0 + 4 tuần</td><td>40%</td></tr>
+<tr><td>M3</td><td>Cắt chuyển vận hành thật; biên bản nghiệm thu cuối; tài liệu HDSD</td><td>M0 + 6 tuần</td><td>20% + bắt đầu phí vận hành</td></tr>
+</tbody></table>
+<p class="small muted">Thời hạn tính theo tuần làm việc và giả định Bên sử dụng hoàn thành trách nhiệm ở A5 đúng hạn. Chậm trễ do Bên sử dụng làm lùi mốc tương ứng, không phát sinh phí trừ khi vượt 4 tuần.</p>
+
+<h2>A5. Trách nhiệm Bên sử dụng</h2>
+<ul>
+  <li>Cử một đầu mối có thẩm quyền; phản hồi trong 2 ngày làm việc.</li>
+  <li>Cung cấp file danh mục SKU–NVL, hạn mức, file đơn mẫu, tài khoản hãng vận chuyển / tracking trước M1.</li>
+  <li>Bố trí nhân sự các trạm tham gia UAT và đào tạo; chuẩn bị thiết bị theo tài liệu kỹ thuật.</li>
+  <li>Kiểm tra và ký biên bản nghiệm thu trong 5 ngày làm việc sau khi nhận bàn giao; quá hạn không có ý kiến bằng văn bản coi như đã nghiệm thu.</li>
+</ul>
+
+<h2>A6. Thay đổi phạm vi</h2>
+<p>Yêu cầu ngoài A2 được lập thành <b>Phiếu yêu cầu thay đổi</b> gồm mô tả, ước lượng ngày công, ảnh hưởng lộ trình và chi phí theo đơn giá <span class="ph">[__] / ngày công</span>. Chỉ thực hiện sau khi hai bên ký phiếu. Thay đổi nhỏ (≤ 0.5 ngày công, tối đa <span class="ph">[3]</span> phiếu) trong giai đoạn triển khai không tính phí.</p>
+
+<h2>A7. Tiêu chí nghiệm thu</h2>
+<ul class="check">
+  <li>Import file đơn thật của các seller trong phạm vi không lỗi hệ thống; lỗi dữ liệu báo theo dòng.</li>
+  <li>Ít nhất một batch thật đi hết luồng đến “Đã bàn giao” và tracking cập nhật.</li>
+  <li>Seller đăng nhập cổng, thấy đúng trạng thái tổng; không truy cập được dữ liệu seller khác.</li>
+  <li>Mỗi trạm có người thao tác độc lập; tài liệu HDSD bàn giao.</li>
+  <li>Không còn lỗi mức P1/P2 (theo Phụ lục B) mở tại thời điểm nghiệm thu.</li>
+</ul>
+
+<h2>A8. Sở hữu trí tuệ &amp; quyền sử dụng</h2>
+<div class="clause"><b>Phần mềm lõi</b> (FFM Ops) thuộc sở hữu Bên cung cấp. Bên sử dụng được cấp <b>quyền sử dụng không độc quyền, không chuyển nhượng</b> cho <span class="ph">[1]</span> xưởng, <span class="ph">[không giới hạn]</span> người dùng, trong thời gian hợp đồng còn hiệu lực.</div>
+<div class="clause"><b>Phần tuỳ biến riêng</b> cho Bên sử dụng: Bên sử dụng có quyền sử dụng vĩnh viễn; Bên cung cấp được quyền tái sử dụng ý tưởng và mã không chứa dữ liệu / bí mật kinh doanh của Bên sử dụng.</div>
+<div class="clause"><b>Dữ liệu</b> hoàn toàn thuộc Bên sử dụng. Bên cung cấp chỉ truy cập để thực hiện dịch vụ, không dùng cho mục đích khác, không tiết lộ.</div>
+<div class="clause"><b>Ký quỹ mã nguồn (tuỳ chọn)</b>: nếu chọn, mã nguồn được ký quỹ tại <span class="ph">[bên thứ ba]</span>; giải phóng cho Bên sử dụng khi Bên cung cấp ngừng hoạt động hoặc ngừng hỗ trợ quá <span class="ph">[90]</span> ngày.</div>
+
+<h2>A9. Chấm dứt &amp; bàn giao dữ liệu</h2>
+<p>Khi hợp đồng kết thúc vì bất kỳ lý do gì, Bên cung cấp bàn giao bản sao toàn bộ dữ liệu (định dạng PostgreSQL dump + Excel) trong 10 ngày làm việc và xoá khỏi hạ tầng của mình trong 30 ngày, có xác nhận bằng văn bản. Hệ thống tiếp tục hoạt động đến hết kỳ đã thanh toán.</p>
+
+<div class="page-break"></div>
+<h1 style="font-size:16pt">Phụ lục B · Cam kết mức dịch vụ (SLA)</h1>
+<h2>B1. Phạm vi áp dụng</h2>
+<p>Áp dụng cho phần mềm FFM Ops chạy trên hạ tầng do Bên cung cấp vận hành, theo gói <span class="ph">[Standard]</span>, kể từ mốc M3. Với hạ tầng do Bên sử dụng tự vận hành, cam kết thời gian hoạt động (B2) không áp dụng; cam kết phản hồi (B3) vẫn áp dụng.</p>
+
+<h2>B2. Thời gian hoạt động</h2>
+<table>
+<tbody>
+<tr><th class="w40">Cam kết sẵn sàng hàng tháng</th><td><b><span class="ph">[99.5]</span>%</b> (≈ tối đa 3,6 giờ gián đoạn ngoài kế hoạch / tháng)</td></tr>
+<tr><th>Bảo trì có kế hoạch</th><td>Ngoài giờ <span class="ph">[22:00–06:00]</span>, báo trước 48 giờ, tối đa 4 giờ / tháng, không tính vào gián đoạn</td></tr>
+<tr><th>Cách đo</th><td>Giám sát <code>/health</code> mỗi phút từ bên ngoài; gián đoạn = liên tục thất bại ≥ 5 phút</td></tr>
+<tr><th>Bồi hoàn</th><td>Dưới cam kết: giảm <span class="ph">[10]</span>% phí vận hành tháng đó; dưới 98%: giảm <span class="ph">[25]</span>%. Bồi hoàn là biện pháp duy nhất.</td></tr>
+</tbody></table>
+
+<h2>B3. Phân loại sự cố &amp; thời gian phản hồi</h2>
+<table>
+<thead><tr><th class="w10">Mức</th><th class="w35">Định nghĩa</th><th class="w20">Phản hồi</th><th class="w20">Khắc phục / giải pháp tạm</th><th class="w15">Kênh</th></tr></thead>
+<tbody>
+<tr><td><b>P1</b></td><td>Toàn bộ hệ thống không truy cập được, hoặc không thể QC / đóng gói / bàn giao; ảnh hưởng cả xưởng</td><td><span class="ph">[1]</span> giờ, 24/7</td><td><span class="ph">[4]</span> giờ</td><td>Hotline + Zalo</td></tr>
+<tr><td><b>P2</b></td><td>Một phân hệ hỏng, có cách làm vòng; hoặc dữ liệu sai ảnh hưởng nhiều đơn</td><td><span class="ph">[4]</span> giờ làm việc</td><td><span class="ph">[1]</span> ngày làm việc</td><td>Zalo + email</td></tr>
+<tr><td><b>P3</b></td><td>Lỗi nhỏ, ảnh hưởng ít người, không chặn vận hành</td><td>1 ngày làm việc</td><td>Bản cập nhật kế tiếp (≤ 2 tuần)</td><td>Email</td></tr>
+<tr><td><b>P4</b></td><td>Câu hỏi sử dụng, đề xuất cải tiến</td><td>2 ngày làm việc</td><td>Theo lộ trình</td><td>Email</td></tr>
+</tbody></table>
+<p class="small muted">Giờ làm việc: <span class="ph">[08:30–17:30, thứ 2 – thứ 6]</span>, trừ ngày lễ. Thời gian khắc phục tính từ khi Bên cung cấp có đủ thông tin tái hiện lỗi.</p>
+
+<h2>B4. Sao lưu &amp; phục hồi</h2>
+<ul>
+  <li>Sao lưu cơ sở dữ liệu <b>hàng ngày</b>, giữ <b>30 ngày</b>, lưu ở vị trí tách biệt máy chủ chạy.</li>
+  <li>Mục tiêu điểm phục hồi (RPO): 24 giờ · Mục tiêu thời gian phục hồi (RTO): <span class="ph">[8]</span> giờ.</li>
+  <li>Phục hồi theo yêu cầu của Bên sử dụng (ví dụ xoá nhầm): tối đa <span class="ph">[2]</span> lần / năm không tính phí.</li>
+</ul>
+
+<h2>B5. Cập nhật &amp; bảo trì</h2>
+<ul>
+  <li>Cập nhật bảo mật và sửa lỗi: theo nhu cầu, deploy không gián đoạn.</li>
+  <li>Cải tiến lõi: Bên sử dụng được nhận các cải tiến lõi phát hành trong thời gian hợp đồng, không tính phí; tính năng tuỳ biến riêng báo giá theo A6.</li>
+  <li>Thông báo thay đổi ảnh hưởng cách dùng trước 5 ngày làm việc kèm hướng dẫn.</li>
+</ul>
+
+<h2>B6. Bảo mật &amp; truy cập</h2>
+<ul>
+  <li>Truy cập của Bên cung cấp vào production chỉ để hỗ trợ, bằng tài khoản định danh, có nhật ký.</li>
+  <li>Sự cố bảo mật ảnh hưởng dữ liệu Bên sử dụng: thông báo trong 24 giờ kể từ khi phát hiện.</li>
+  <li>Hai bên ký thoả thuận bảo mật (NDA) kèm hợp đồng.</li>
+</ul>
+
+<h2>B7. Trách nhiệm Bên sử dụng trong SLA</h2>
+<ul>
+  <li>Báo sự cố qua kênh đã thống nhất, kèm mô tả, thời điểm, tài khoản, ảnh chụp màn hình.</li>
+  <li>Quản lý tài khoản người dùng của mình; thu hồi khi nhân sự nghỉ.</li>
+  <li>Bảo đảm thiết bị và Internet tại xưởng; sự cố do mạng / thiết bị của xưởng không tính vào SLA.</li>
+</ul>
+
+<h2>B8. Phí vận hành &amp; rà soát</h2>
+<p>Phí vận hành <span class="ph">[__] / tháng</span>, thanh toán theo <span class="ph">[quý]</span> trả trước. Hai bên rà soát SLA và phí mỗi 12 tháng; điều chỉnh phí không quá <span class="ph">[10]</span>% / năm, báo trước 60 ngày.</p>
+
+<div class="grid2" style="margin-top:24pt">
+  <div><p><b>Đại diện Bên cung cấp</b></p><p style="height:50pt"></p><p>Ký, ghi rõ họ tên, đóng dấu</p></div>
+  <div><p><b>Đại diện Bên sử dụng</b></p><p style="height:50pt"></p><p>Ký, ghi rõ họ tên, đóng dấu</p></div>
+</div>
+</body></html>

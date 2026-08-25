@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><title>00 · Hướng dẫn bộ tài liệu bán hàng</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+  table.idx td:first-child { text-align:center; font-weight:700; color:var(--navy); }
+  .doc { border:1px solid var(--line); border-radius:6pt; padding:8pt 10pt; margin-bottom:8pt; page-break-inside:avoid; }
+  .doc h3 { margin-top:0; display:flex; justify-content:space-between; align-items:center; gap:6pt; }
+  .doc h3 span.b { font-weight:400; }
+  .doc p { margin-bottom:4pt; }
+  .lbl { font-weight:700; color:var(--gray); font-size:8.5pt; text-transform:uppercase; letter-spacing:.3pt; margin-right:3pt; }
+</style></head>
+<body>
+<div class="doc-header">
+  <div>
+    <div class="brand">FFM OPS <span>· Bộ tài liệu thương mại hoá</span></div>
+    <div class="doc-title">00 · Hướng dẫn bộ tài liệu bán hàng — đọc trước</div>
+  </div>
+  <div class="meta">Nội bộ · v0.1 · 26/08/2026</div>
+</div>
+
+<h2>1. Bộ tài liệu này để làm gì</h2>
+<p>Mục tiêu: mang hệ thống đang chạy tại xưởng tham chiếu đi bán cho các xưởng fulfillment / in-cắt khác, theo mô hình <b>lõi có sẵn + tuỳ biến theo xưởng</b>. Bộ tài liệu gồm 13 file, mỗi file trả lời <b>một câu hỏi của khách tại một thời điểm</b> trong hành trình mua: từ “các anh làm gì?” (one-pager) đến “ký thế nào?” (SOW/SLA).</p>
+<p>Nguyên tắc: <b>không đưa cả bộ cho khách</b>. Gửi đúng tài liệu ở đúng bước. Khách hàng là chủ xưởng — họ đọc 1 trang, nghe 30 phút, và tin vào thứ chạy thật hơn mọi slide.</p>
+
+<h2>2. Mô hình bán — quyết định trước khi chào</h2>
+<table>
+<thead><tr><th class="w20">Mô hình</th><th class="w30">Ưu</th><th class="w30">Nhược</th><th class="w20">Kết luận</th></tr></thead>
+<tbody>
+<tr><td>Xây riêng từng khách</td><td>Giá trị hợp đồng cao</td><td>Không scale; mỗi deal khảo sát và xây lại; đội ngũ kẹt bảo trì nhiều bản khác nhau</td><td>Không khuyến nghị</td></tr>
+<tr><td><b>Lõi sẵn + tuỳ biến ~20%</b></td><td>Bán dễ nhất: “đã chạy thật, 4–6 tuần”; biên lợi nhuận tốt vì lõi tái dùng</td><td>Phải kỷ luật: tuỳ biến đưa về lõi khi có thể, tránh phân nhánh</td><td><span class="badge b-ok">Khuyến nghị</span> — bộ tài liệu viết theo mô hình này</td></tr>
+<tr><td>SaaS thuê bao</td><td>Doanh thu đều</td><td>Lõi hiện một công ty / một bản cài; cần thêm đa công ty, thanh toán, tự đăng ký — nhiều tháng kỹ thuật</td><td>Giai đoạn sau, khi có ≥ 3 khách chạy ổn</td></tr>
+</tbody></table>
+
+<h2>3. Tổng quan 13 tài liệu</h2>
+<table class="idx">
+<thead><tr><th class="w10">#</th><th class="w25">Tài liệu</th><th class="w15">Ai đọc</th><th class="w20">Dùng khi</th><th class="w15">Cần thiết</th><th class="w15">Ưu tiên</th></tr></thead>
+<tbody>
+<tr><td>01</td><td>Sales one-pager</td><td>Chủ xưởng</td><td>Gặp lần đầu, gửi sau demo</td><td><span class="badge b-must">Bắt buộc</span></td><td><span class="badge b-p0">P0</span></td></tr>
+<tr><td>02</td><td>Pitch deck</td><td>Chủ xưởng + quản lý</td><td>Buổi trình bày 20–30 phút</td><td><span class="badge b-must">Bắt buộc</span></td><td><span class="badge b-p0">P0</span></td></tr>
+<tr><td>03</td><td>Case study xưởng tham chiếu</td><td>Chủ xưởng</td><td>Sau demo, khi khách cân nhắc</td><td><span class="badge b-must">Bắt buộc</span></td><td><span class="badge b-p1">P1</span> (chờ số liệu)</td></tr>
+<tr><td>04</td><td>Kịch bản demo 30 phút</td><td>Nội bộ sales</td><td>Chuẩn bị &amp; chạy demo</td><td><span class="badge b-should">Nên có</span></td><td><span class="badge b-p1">P1</span></td></tr>
+<tr><td>05</td><td>Sơ đồ quy trình vận hành</td><td>Chủ xưởng, trưởng ca</td><td>Demo, khảo sát, đề xuất</td><td><span class="badge b-must">Bắt buộc</span></td><td><span class="badge b-p0">P0</span></td></tr>
+<tr><td>06</td><td>Danh mục tính năng theo vai trò</td><td>Quản lý, IT</td><td>Khách đối chiếu quy trình; cơ sở báo giá</td><td><span class="badge b-must">Bắt buộc</span></td><td><span class="badge b-p0">P0</span></td></tr>
+<tr><td>07</td><td>Bảng giá &amp; gói dịch vụ</td><td>Chủ xưởng (A) · nội bộ (B)</td><td>Cuối demo, gửi kèm đề xuất</td><td><span class="badge b-must">Bắt buộc</span></td><td><span class="badge b-p0">P0</span> (sếp chốt số)</td></tr>
+<tr><td>08</td><td>Mẫu đề xuất giải pháp &amp; lộ trình</td><td>Chủ xưởng</td><td>5 ngày sau khảo sát</td><td><span class="badge b-should">Nên có</span></td><td><span class="badge b-p1">P1</span></td></tr>
+<tr><td>09</td><td>Tổng quan kỹ thuật &amp; bảo mật</td><td>IT của khách</td><td>Khi khách có người kỹ thuật hỏi</td><td><span class="badge b-should">Nên có</span></td><td><span class="badge b-p2">P2</span></td></tr>
+<tr><td>10</td><td>FAQ &amp; xử lý phản đối</td><td>Nội bộ sales</td><td>Trước mỗi buổi gặp</td><td><span class="badge b-should">Nên có</span></td><td><span class="badge b-p1">P1</span></td></tr>
+<tr><td>11</td><td>Bảng khảo sát nhu cầu</td><td>Nội bộ, dùng tại xưởng khách</td><td>Buổi khảo sát 60 phút</td><td><span class="badge b-must">Bắt buộc</span></td><td><span class="badge b-p0">P0</span></td></tr>
+<tr><td>12</td><td>SOW &amp; SLA mẫu</td><td>Hai bên ký</td><td>Khi chốt hợp đồng</td><td><span class="badge b-must">Bắt buộc khi ký</span></td><td><span class="badge b-p2">P2</span></td></tr>
+<tr><td>13</td><td>Checklist onboarding &amp; HDSD theo vai trò</td><td>Khách sau khi ký</td><td>Triển khai</td><td><span class="badge b-nice">Có thì tốt</span></td><td><span class="badge b-p2">P2</span></td></tr>
+</tbody></table>
+<p class="small muted">P0 = không có thì không đi chào được · P1 = cần trước buổi gặp thứ hai · P2 = cần khi có deal đầu tiên.</p>
+
+<h2>4. Vì sao cần từng tài liệu</h2>
+
+<div class="doc"><h3>01 · Sales one-pager <span class="b"><span class="badge b-must">Bắt buộc</span> <span class="badge b-p0">P0</span></span></h3>
+<p><span class="lbl">Mục đích</span> Thứ duy nhất khách còn giữ sau buổi gặp, và thứ họ chuyển tiếp cho người khác (đối tác, kế toán, vợ/chồng). Trả lời trong 60 giây: làm gì, cho ai, được gì, liên hệ ai.</p>
+<p><span class="lbl">Không có thì sao</span> Khách nhớ “phần mềm quản lý gì đó”, không kể lại được cho người quyết định cùng.</p>
+<p><span class="lbl">Trạng thái</span> Xong nội dung. Cần: điền 4 con số kết quả, thông tin liên hệ, ảnh / logo.</p></div>
+
+<div class="doc"><h3>02 · Pitch deck <span class="b"><span class="badge b-must">Bắt buộc</span> <span class="badge b-p0">P0</span></span></h3>
+<p><span class="lbl">Mục đích</span> Khung cho buổi trình bày: dẫn khách từ nỗi đau → giải pháp → bằng chứng → giá → bước tiếp. Ép người trình bày đi đúng thứ tự thuyết phục thay vì nhảy vào tính năng.</p>
+<p><span class="lbl">Không có thì sao</span> Mỗi người bán kể một kiểu; buổi gặp thành buổi khoe tính năng, khách không thấy mình trong đó.</p>
+<p><span class="lbl">Trạng thái</span> 13 slide xong. Cần: 4 ảnh màn hình từ môi trường demo, số liệu, giá.</p></div>
+
+<div class="doc"><h3>03 · Case study xưởng tham chiếu <span class="b"><span class="badge b-must">Bắt buộc</span> <span class="badge b-p1">P1</span></span></h3>
+<p><span class="lbl">Mục đích</span> Bằng chứng mạnh nhất: một xưởng giống họ đã dùng và được gì. Chủ xưởng tin chủ xưởng khác hơn tin nhà cung cấp.</p>
+<p><span class="lbl">Không có thì sao</span> Mọi lời hứa là lời hứa. Khách hỏi “ai đang dùng?” và không có câu trả lời cụ thể là mất điểm nặng.</p>
+<p><span class="lbl">Trạng thái</span> Khung + phụ lục cách lấy số liệu. <b>Cần 1 buổi với xưởng tham chiếu</b> để điền số và xin trích dẫn + xin phép nêu tên. Đây là việc quan trọng nhất tuần này.</p></div>
+
+<div class="doc"><h3>04 · Kịch bản demo 30 phút <span class="b"><span class="badge b-should">Nên có</span> <span class="badge b-p1">P1</span></span></h3>
+<p><span class="lbl">Mục đích</span> Demo là nơi bán được hàng. Kịch bản bảo đảm hai khoảnh khắc: đơn của chính khách chạy hết luồng, và khách tự tay quét QR. Kèm checklist chuẩn bị và xử lý tình huống.</p>
+<p><span class="lbl">Không có thì sao</span> Demo lan man, lỗi vặt vì chưa chuẩn bị dữ liệu, khách hỏi giá giữa chừng làm lệch buổi.</p>
+<p><span class="lbl">Trạng thái</span> Xong. Cần: dựng môi trường demo riêng, quay video dự phòng 3 phút.</p></div>
+
+<div class="doc"><h3>05 · Sơ đồ quy trình vận hành <span class="b"><span class="badge b-must">Bắt buộc</span> <span class="badge b-p0">P0</span></span></h3>
+<p><span class="lbl">Mục đích</span> Chủ xưởng nhìn 30 giây là thấy quy trình của mình trong đó. Là ngôn ngữ chung giữa sales – khách – kỹ thuật khi chốt phạm vi; cũng là tài liệu để trưởng ca (người có thể phản đối) hiểu vai trò của mình.</p>
+<p><span class="lbl">Không có thì sao</span> Khách hình dung sai (tưởng là phần mềm kế toán / bán hàng), phạm vi tuỳ biến bị hiểu lệch.</p>
+<p><span class="lbl">Trạng thái</span> Xong, rút thẳng từ hệ thống hiện tại. Có thể gửi ngay.</p></div>
+
+<div class="doc"><h3>06 · Danh mục tính năng theo vai trò <span class="b"><span class="badge b-must">Bắt buộc</span> <span class="badge b-p0">P0</span></span></h3>
+<p><span class="lbl">Mục đích</span> Hai việc: khách đối chiếu “tôi cần cái này, có chưa?”; và nội bộ xác định cái gì là lõi (miễn phí) và cái gì là tuỳ biến (tính tiền). Mục 4 nói rõ cái chưa có — tránh hứa hớ.</p>
+<p><span class="lbl">Không có thì sao</span> Sales hứa tính năng không có; kỹ thuật nhận việc ngoài phạm vi không thu tiền; khách thất vọng ở tuần 3.</p>
+<p><span class="lbl">Trạng thái</span> Xong, rút từ phân quyền thực tế của hệ thống. Cập nhật mỗi khi lõi thêm tính năng.</p></div>
+
+<div class="doc"><h3>07 · Bảng giá &amp; gói dịch vụ <span class="b"><span class="badge b-must">Bắt buộc</span> <span class="badge b-p0">P0</span></span></h3>
+<p><span class="lbl">Mục đích</span> Chủ xưởng ghét “để em về báo giá sau”. Ba gói giúp khách tự xếp mình; cấu phần giá giúp họ hiểu trả tiền cho cái gì; phần B (nội bộ) cho sales công thức báo giá nhanh và nguyên tắc khi bị ép giá.</p>
+<p><span class="lbl">Không có thì sao</span> Mỗi deal một giá, không có cơ sở; giảm giá tuỳ hứng; không biết deal nào lỗ.</p>
+<p><span class="lbl">Trạng thái</span> Cấu trúc xong, có khung tham khảo. <b>Sếp phải chốt các ô vàng.</b> Xoá phần B trước khi gửi khách.</p></div>
+
+<div class="doc"><h3>08 · Mẫu đề xuất giải pháp &amp; lộ trình <span class="b"><span class="badge b-should">Nên có</span> <span class="badge b-p1">P1</span></span></h3>
+<p><span class="lbl">Mục đích</span> Tài liệu khách mang lên bàn để quyết định mua. Mục 1 phải nhắc đúng lời khách nói khi khảo sát — đó là lý do có tài liệu 11. Kèm lộ trình 6 tuần, trách nhiệm hai bên, tiêu chí nghiệm thu.</p>
+<p><span class="lbl">Không có thì sao</span> Mỗi đề xuất viết lại từ đầu, mất 2–3 ngày; thiếu tiêu chí nghiệm thu → tranh cãi lúc thanh toán.</p>
+<p><span class="lbl">Trạng thái</span> Mẫu xong. Điền từ bảng khảo sát cho từng khách.</p></div>
+
+<div class="doc"><h3>09 · Tổng quan kỹ thuật &amp; bảo mật <span class="b"><span class="badge b-should">Nên có</span> <span class="badge b-p2">P2</span></span></h3>
+<p><span class="lbl">Mục đích</span> Khi khách có người IT (hoặc con/cháu rành công nghệ) hỏi “dữ liệu ở đâu, công nghệ gì, an toàn không”. Trả lời trước để họ không thành người phủ quyết. Mục 9 nói thẳng hạn chế — tạo tin cậy.</p>
+<p><span class="lbl">Không có thì sao</span> Câu hỏi kỹ thuật trả lời miệng, thiếu nhất quán; người IT của khách nghi ngờ và deal chậm lại.</p>
+<p><span class="lbl">Trạng thái</span> Xong, đúng với kiến trúc hiện tại.</p></div>
+
+<div class="doc"><h3>10 · FAQ &amp; xử lý phản đối <span class="b"><span class="badge b-should">Nên có</span> <span class="badge b-p1">P1</span></span></h3>
+<p><span class="lbl">Mục đích</span> 15 phản đối thường gặp với câu trả lời đã cân nhắc, kèm câu hỏi khai thác và dấu hiệu khách không phù hợp. Giúp người mới bán được như người cũ.</p>
+<p><span class="lbl">Không có thì sao</span> Trả lời ứng biến, hứa hớ, hoặc mất deal vì một câu “Excel vẫn ổn mà” không đỡ được.</p>
+<p><span class="lbl">Trạng thái</span> Xong. Sống: thêm câu mới sau mỗi buổi gặp.</p></div>
+
+<div class="doc"><h3>11 · Bảng khảo sát nhu cầu <span class="b"><span class="badge b-must">Bắt buộc</span> <span class="badge b-p0">P0</span></span></h3>
+<p><span class="lbl">Mục đích</span> Với mô hình lõi + tuỳ biến, đây là tài liệu quan trọng nhất về mặt tiền: trả lời xong 60 phút là biết gói nào, tuỳ biến gì, bao nhiêu ngày công. Mục K chấm điểm phù hợp để không tốn thời gian với khách sai.</p>
+<p><span class="lbl">Không có thì sao</span> Báo giá theo cảm tính; phát hiện quy trình khác biệt ở tuần 3; deal lỗ.</p>
+<p><span class="lbl">Trạng thái</span> Xong, in ra dùng ngay.</p></div>
+
+<div class="doc"><h3>12 · SOW &amp; SLA mẫu <span class="b"><span class="badge b-must">Bắt buộc khi ký</span> <span class="badge b-p2">P2</span></span></h3>
+<p><span class="lbl">Mục đích</span> Chốt phạm vi, mốc, thanh toán, thay đổi phạm vi, sở hữu trí tuệ, bàn giao dữ liệu; SLA chốt thời gian phản hồi, sao lưu, uptime. Bảo vệ cả hai bên.</p>
+<p><span class="lbl">Không có thì sao</span> “Tưởng là có trong gói” — làm không công; tranh chấp lúc thanh toán; khách lo bị kẹt nhà cung cấp.</p>
+<p><span class="lbl">Trạng thái</span> Mẫu nghiệp vụ xong. <b>Nhờ luật sư rà trước hợp đồng đầu tiên.</b></p></div>
+
+<div class="doc"><h3>13 · Checklist onboarding &amp; HDSD theo vai trò <span class="b"><span class="badge b-nice">Có thì tốt</span> <span class="badge b-p2">P2</span></span></h3>
+<p><span class="lbl">Mục đích</span> Giảm chi phí hỗ trợ sau bán và tăng uy tín: khách thấy có sẵn hướng dẫn từng trạm, kế hoạch đào tạo, checklist go-live. Cũng là tài liệu bàn giao trong SOW.</p>
+<p><span class="lbl">Không có thì sao</span> Bán được nhưng triển khai lộn xộn, hỗ trợ tốn giờ, khách không giới thiệu tiếp.</p>
+<p><span class="lbl">Trạng thái</span> Xong theo màn hình hiện tại. Bổ sung ảnh màn hình khi có môi trường demo.</p></div>
+
+<h2>5. Thứ tự làm — 4 tuần</h2>
+<table>
+<thead><tr><th class="w15">Tuần</th><th class="w55">Việc</th><th class="w30">Kết quả</th></tr></thead>
+<tbody>
+<tr><td><b>1</b></td><td>Sếp chốt mô hình bán, tên thương mại, giá (07). Đi lấy số liệu và trích dẫn ở xưởng tham chiếu (03). Dựng môi trường demo riêng, đổi brand.</td><td>Có giá, có số, có demo</td></tr>
+<tr><td><b>2</b></td><td>Điền số vào 01 / 02 / 03; chụp 4 ảnh màn hình; quay video demo 3 phút; in 05 và 11.</td><td>Bộ P0 sẵn sàng đi chào</td></tr>
+<tr><td><b>3</b></td><td>Chào 3–5 xưởng đầu bằng 01 + 02 + demo. Ghi phản đối vào 10. Khảo sát bằng 11.</td><td>Phản hồi thật từ thị trường</td></tr>
+<tr><td><b>4</b></td><td>Gửi đề xuất (08) cho khách đạt ≥ 12 điểm. Luật sư rà 12. Sửa bộ tài liệu theo phản hồi.</td><td>Deal đầu tiên vào đàm phán</td></tr>
+</tbody></table>
+
+<h2>6. Việc phía sản phẩm phải làm trước khi chào</h2>
+<ul>
+  <li><b>Tên thương mại</b>: bộ tài liệu dùng tạm “FFM Ops”. Chốt tên rồi thay toàn bộ (tìm – thay trong thư mục <code>html/</code>, build lại). Bỏ tên xưởng tham chiếu khỏi giao diện.</li>
+  <li><b>Môi trường demo</b> tách khỏi production; reset dữ liệu trước mỗi buổi; tài khoản theo vai trò.</li>
+  <li><b>Tách phần riêng của xưởng tham chiếu</b> (tên đối tác vận chuyển, nhà cung cấp tracking) thành cấu hình — phần lớn đã là cấu hình, rà lại chỗ còn cứng.</li>
+  <li><b>Ảnh màn hình</b> 4–6 màn hình chính từ môi trường demo cho 02 và 13.</li>
+</ul>
+
+<h2>7. Quy ước &amp; cách cập nhật</h2>
+<ul>
+  <li>Ô <span class="ph">vàng</span> = chỗ phải điền / sếp chốt. Không gửi khách tài liệu còn ô vàng.</li>
+  <li>Nguồn là HTML trong <code>docs/sales-kit/html/</code>; sửa rồi chạy <code>bash docs/sales-kit/build.sh</code> để xuất lại PDF. CSS dùng chung <code>kit.css</code> (tài liệu) và <code>deck.css</code> (slide).</li>
+  <li>Tài liệu nội bộ (04, 10, 07-phần B, 11-mục K) không gửi khách.</li>
+  <li>Phiên bản: tăng số v khi sửa nội dung gửi khách; ghi ngày ở góc phải đầu trang.</li>
+</ul>
+</body></html>

@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><title>06 · Danh mục tính năng theo vai trò</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+  table.matrix { font-size:8.5pt; }
+  table.matrix th, table.matrix td { padding:2.6pt 3pt; text-align:center; }
+  table.matrix td:first-child, table.matrix th:first-child { text-align:left; width:30%; }
+  table.matrix th.r { writing-mode:vertical-rl; transform:rotate(180deg); height:56pt; font-size:8pt; padding:4pt 2pt; }
+  .t { color:var(--teal); font-weight:700; } .h { color:#9aa3b2; font-size:7.5pt; } .x { color:#d5d9e2; }
+  .mod h3 { margin-top:9pt; }
+  .mod ul { margin-bottom:4pt; }
+</style></head>
+<body>
+<div class="doc-header">
+  <div>
+    <div class="brand">FFM OPS <span>· Nền tảng vận hành xưởng fulfillment</span></div>
+    <div class="doc-title">06 · Danh mục tính năng theo vai trò</div>
+  </div>
+  <div class="meta">Gửi khách hàng · v0.1 · 08/2026</div>
+</div>
+
+<p>Danh mục này liệt kê <b>mọi chức năng đang có trong lõi hệ thống</b> và <b>vai trò nào được dùng chức năng đó</b>.
+Dùng để khách đối chiếu với quy trình hiện tại của họ, và làm cơ sở xác định phần cần tuỳ biến khi báo giá.
+Phân quyền được kiểm tra ở tầng API cho từng nhóm chức năng — không phải chỉ ẩn nút trên giao diện.</p>
+
+<h2>1. Ma trận vai trò × nhóm chức năng</h2>
+<p class="small muted"><span class="t">●</span> được thao tác &nbsp; <span class="h">xem</span> chỉ xem &nbsp; <span class="x">—</span> không truy cập</p>
+<table class="matrix">
+<thead><tr><th>Nhóm chức năng</th><th class="r">OWNER</th><th class="r">ADMIN</th><th class="r">OPS</th><th class="r">DESIGNER</th><th class="r">PRODUCTION</th><th class="r">QC</th><th class="r">PACKING</th><th class="r">SHIPPING</th><th class="r">CS</th><th class="r">SELLER</th></tr></thead>
+<tbody>
+<tr><td>Người dùng &amp; phân quyền</td><td class="t">●</td><td class="t">●</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td></tr>
+<tr><td>Nhật ký thao tác (audit log)</td><td class="t">●</td><td class="t">●</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td></tr>
+<tr><td>Seller &amp; cửa hàng</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="x">—</td></tr>
+<tr><td>Danh mục NVL / SKU / mapping SKU→NVL</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="x">—</td><td class="x">—</td></tr>
+<tr><td>Nhập hạn mức sản xuất theo NVL</td><td class="t">●</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td></tr>
+<tr><td>Import đơn (Excel) &amp; lịch sử import</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="t">● (đơn của mình)</td></tr>
+<tr><td>Tra cứu đơn, chi tiết, lịch sử trạng thái</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">đơn của mình</td></tr>
+<tr><td>Duyệt đơn / yêu cầu sửa / từ chối</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td></tr>
+<tr><td>Xử lý yêu cầu huỷ (đơn &amp; sản phẩm)</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="t">gửi yêu cầu</td></tr>
+<tr><td>Hàng chờ thiết kế, rổ NVL, tải asset</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td></tr>
+<tr><td>Tạo / xoá batch, link file in-cắt, xuất bảng sản xuất</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="x">—</td><td class="x">—</td></tr>
+<tr><td>Chuyển trạng thái batch (Đã in / Đã cắt)</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td></tr>
+<tr><td>QC: quét QR, Pass / Fail</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="x">—</td><td class="x">—</td><td class="t">●</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td></tr>
+<tr><td>Kết quả QC (đã đủ hàng để lấy chưa)</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="x">—</td><td class="x">—</td></tr>
+<tr><td>Đóng gói: quét gói, trạng thái gói</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="t">●</td><td class="x">—</td><td class="x">—</td><td class="x">—</td></tr>
+<tr><td>Bàn giao: quét là gửi / gửi hàng loạt</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="t">●</td><td class="t">●</td><td class="x">—</td><td class="x">—</td></tr>
+<tr><td>Phiếu bàn giao, đánh dấu đã gửi</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="x">—</td></tr>
+<tr><td>Gắn mã vận đơn (lẻ / hàng loạt Excel), đồng bộ tracking</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="x">—</td></tr>
+<tr><td>Hành trình vận đơn</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">xem</td><td class="h">đơn của mình</td></tr>
+<tr><td>Ghi chú “cần chú ý”</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="x">—</td></tr>
+<tr><td>Dashboard &amp; badge đếm việc</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="t">●</td><td class="x">—</td></tr>
+<tr><td>Cổng seller (upload, trạng thái, huỷ)</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="t">●</td></tr>
+<tr><td>Vùng nguy hiểm: xoá toàn bộ dữ liệu đơn</td><td class="t">●</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td><td class="x">—</td></tr>
+</tbody></table>
+
+<h2>2. Chi tiết chức năng theo phân hệ</h2>
+<div class="grid2">
+<div class="mod">
+  <h3>2.1 Tiếp nhận &amp; import đơn</h3>
+  <ul>
+    <li>Import Excel/CSV theo template: <b>xem trước → xác nhận</b>; báo lỗi theo dòng.</li>
+    <li>Phân biệt lỗi <i>SKU chưa có</i> và <i>SKU chưa gán NVL</i>.</li>
+    <li>Chặn trùng mã đơn đang hoạt động; đơn đã từ chối / huỷ được <b>hồi sinh khi import lại</b>, giữ mã.</li>
+    <li>Tải template chuẩn; nhận được template riêng của khách (cột DATE → ngày đơn…).</li>
+    <li>Tạo đơn thủ công; sửa đơn; lịch sử job import.</li>
+  </ul>
+  <h3>2.2 Duyệt đơn &amp; huỷ đơn</h3>
+  <ul>
+    <li>Hàng chờ duyệt; duyệt lẻ / <b>duyệt hàng loạt</b>; yêu cầu sửa kèm lý do; từ chối.</li>
+    <li>Yêu cầu huỷ ở mức đơn và <b>mức từng sản phẩm</b>; duyệt / từ chối; danh sách đã xử lý để đối soát.</li>
+    <li>Chính sách huỷ theo giai đoạn (miễn phí trước sản xuất, tính phí khi đã vào sản xuất).</li>
+  </ul>
+  <h3>2.3 Danh mục (master data)</h3>
+  <ul>
+    <li>NVL, SKU, mapping SKU → NVL (một SKU nhiều NVL: combo).</li>
+    <li>Import bảng vận hành cũ (cột SKU + Loại VL) → xem trước → tạo danh mục; báo <i>cần rà soát</i> khi 1 SKU nhiều loại VL.</li>
+    <li>Import <b>hạn mức sản xuất</b> theo NVL (số sản phẩm / đơn vị NVL) — chỉ OWNER.</li>
+    <li>Bật/tắt hàng loạt, xoá hàng loạt; chuẩn hoá mã tự động (bỏ dấu, viết hoa).</li>
+  </ul>
+  <h3>2.4 Thiết kế &amp; gom batch</h3>
+  <ul>
+    <li>Hàng chờ thiết kế theo trạng thái: chưa làm / đang làm / sẵn sàng / thiếu asset; <b>set-ready hàng loạt</b>.</li>
+    <li>Thiết kế 2 mặt; tải trọn bộ asset (.zip) theo lô hoặc theo batch.</li>
+    <li>“Rổ NVL”: gom sản phẩm sẵn sàng theo NVL, tạo batch theo hạn mức.</li>
+    <li>STT trong ngày, mã nội bộ kiểu xưởng, hạn hoàn thành, link file in / cắt theo batch.</li>
+    <li>Xuất <b>bảng sản xuất .xlsx</b> (header đậm, cố định, bộ lọc); tem QR theo sản phẩm.</li>
+    <li>Xoá batch chưa sản xuất — sản phẩm trở về rổ.</li>
+  </ul>
+  <h3>2.5 Sản xuất</h3>
+  <ul>
+    <li>Bảng sản xuất theo batch; chuyển Đã in → Đã cắt.</li>
+    <li>Trạng thái <b>chỉ tiến không lùi</b>; OWNER override; bảo vệ sản phẩm đã QC.</li>
+    <li>Tìm batch theo mã nội bộ đơn hoặc mã trên tem; lọc đơn theo ngày xuất xưởng.</li>
+  </ul>
+</div>
+<div class="mod">
+  <h3>2.6 QC</h3>
+  <ul>
+    <li>Quét QR bằng camera điện thoại → hiện mockup + mô tả NVL để đối chiếu.</li>
+    <li>Pass / Fail kèm ghi chú; <b>mỗi sản phẩm QC một lần</b>.</li>
+    <li>Batch tự dồn trạng thái khi mọi sản phẩm pass; màn hình <i>Kết quả QC</i> cho đóng gói biết đơn nào đã đủ hàng.</li>
+  </ul>
+  <h3>2.7 Đóng gói &amp; bàn giao</h3>
+  <ul>
+    <li>Quét đóng gói; kiểm tra đơn đủ hàng (nhiều sản phẩm, nhiều batch); gói Mở → Đã đóng.</li>
+    <li><b>Quét là gửi</b> (ship-scan) từng gói; bàn giao hàng loạt theo danh sách đơn.</li>
+    <li>Phiếu bàn giao cho đơn vị vận chuyển; đánh dấu đã gửi; hàng chờ gửi.</li>
+  </ul>
+  <h3>2.8 Vận đơn &amp; tracking</h3>
+  <ul>
+    <li>Gắn mã vận đơn lẻ; <b>gắn hàng loạt từ Excel</b> (template → xem trước → xác nhận).</li>
+    <li>Tự đồng bộ hành trình từ nhà cung cấp tracking theo lịch; đồng bộ tay khi cần.</li>
+    <li>Trạng thái chỉ tiến (không lùi khi hãng báo ngược); tự lên “Đã giao”.</li>
+    <li>Tên thương hiệu đối tác vận chuyển cấu hình được; adapter hãng vận chuyển thay thế được.</li>
+  </ul>
+  <h3>2.9 Cổng seller</h3>
+  <ul>
+    <li>Upload đơn theo template (tự động gắn đúng seller), sửa đơn khi còn chờ duyệt.</li>
+    <li>Chỉ thấy 5 trạng thái tổng + lịch sử đơn + hành trình vận đơn.</li>
+    <li>Huỷ ngay (trước sản xuất) hoặc gửi yêu cầu huỷ (đã sản xuất) — đơn hoặc từng sản phẩm.</li>
+    <li>In tem QR cho sản phẩm của mình khi xưởng yêu cầu.</li>
+  </ul>
+  <h3>2.10 Chăm sóc khách hàng (CS)</h3>
+  <ul>
+    <li>Tra đơn theo mã cửa hàng / người nhận; đọc đầy đủ thông tin giao hàng.</li>
+    <li>Gắn mã vận đơn, ghi chú theo phạm vi CS; <b>không</b> vào màn hình sản xuất, danh mục, người dùng.</li>
+  </ul>
+  <h3>2.11 Quản trị &amp; bảo mật</h3>
+  <ul>
+    <li>Người dùng, vai trò; đăng nhập JWT, mật khẩu băm bcrypt; giới hạn tần suất đăng nhập.</li>
+    <li>Nhật ký thao tác (ai, làm gì, lúc nào); lịch sử trạng thái theo đơn / batch.</li>
+    <li>Xoá mềm + dọn rác định kỳ theo thời hạn lưu; vùng nguy hiểm xoá dữ liệu đơn (OWNER).</li>
+  </ul>
+  <h3>2.12 Tiện ích chung</h3>
+  <ul>
+    <li>Dashboard: tổng đơn, sản phẩm chờ xử lý, batch đang chạy, cần chú ý, đã bàn giao.</li>
+    <li>Badge đếm việc trên menu theo vai trò; ghi chú “cần chú ý” theo mức độ và trạng thái.</li>
+    <li>Cài như app trên iPhone / Android (PWA); giao diện tiếng Việt; thông báo lỗi tiếng Việt.</li>
+    <li>REST API có tài liệu OpenAPI / Swagger để tích hợp.</li>
+  </ul>
+</div>
+</div>
+
+<h2>3. Quy mô lõi hiện tại</h2>
+<div class="grid4">
+  <div class="card kpi"><div class="n">10</div><div class="l">vai trò phân quyền</div></div>
+  <div class="card kpi"><div class="n">~30</div><div class="l">màn hình web / mobile</div></div>
+  <div class="card kpi"><div class="n">~100</div><div class="l">API có tài liệu</div></div>
+  <div class="card kpi"><div class="n">9</div><div class="l">bước trong luồng chuẩn</div></div>
+</div>
+
+<h2>4. Mở rộng theo yêu cầu (chưa có sẵn trong lõi)</h2>
+<p>Nói rõ với khách để tránh kỳ vọng sai. Mỗi mục dưới đây là hạng mục tuỳ biến có báo giá riêng:</p>
+<table>
+<thead><tr><th class="w30">Hạng mục</th><th class="w50">Ghi chú</th><th class="w20">Độ phức tạp</th></tr></thead>
+<tbody>
+<tr><td>Kết nối sàn TMĐT (Shopee, TikTok Shop, Lazada)</td><td>Kéo đơn tự động thay vì import Excel. Phụ thuộc API sàn và phê duyệt tài khoản nhà phát triển.</td><td>Trung bình – cao</td></tr>
+<tr><td>Tích hợp hãng vận chuyển khác (GHTK, GHN, VNPost, J&amp;T…)</td><td>Tạo vận đơn / in tem trực tiếp. Lõi đã có adapter, mỗi hãng là một adapter.</td><td>Trung bình / hãng</td></tr>
+<tr><td>Báo cáo &amp; thống kê nâng cao</td><td>Năng suất theo trạm, theo NVL, theo seller; xuất báo cáo định kỳ.</td><td>Thấp – trung bình</td></tr>
+<tr><td>Đối soát &amp; công nợ seller</td><td>Tính tiền theo đơn / sản phẩm, phí huỷ, xuất bảng kê.</td><td>Trung bình</td></tr>
+<tr><td>Nhiều xưởng / chi nhánh, nhiều công ty trên một hệ thống (SaaS)</td><td>Lõi hiện chạy một công ty / một xưởng cho mỗi bản cài. Đa công ty cần thiết kế thêm.</td><td>Cao</td></tr>
+<tr><td>Trạm sản xuất khác In / Cắt (sơn, dán, lắp ráp, thêu…)</td><td>Thêm bước vào máy trạng thái batch.</td><td>Thấp – trung bình</td></tr>
+<tr><td>Thông báo Zalo / email cho seller</td><td>Khi đơn đổi trạng thái, cần sửa, đã gửi.</td><td>Thấp</td></tr>
+</tbody></table>
+</body></html>

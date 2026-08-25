@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><title>04 · Kịch bản demo 30 phút</title>
+<link rel="stylesheet" href="kit.css">
+<style> table.script td:first-child { white-space:nowrap; font-weight:600; color:var(--navy); } </style>
+</head>
+<body>
+<div class="doc-header">
+  <div>
+    <div class="brand">FFM OPS <span>· Nền tảng vận hành xưởng fulfillment</span></div>
+    <div class="doc-title">04 · Kịch bản demo 30 phút</div>
+  </div>
+  <div class="meta">Nội bộ sales · v0.1 · 08/2026</div>
+</div>
+
+<div class="callout">
+  <p><b>Mục tiêu của buổi demo:</b> khách thấy <b>đơn của chính họ</b> chạy hết luồng, và <b>tự tay quét một tem QR</b> bằng điện thoại. Hai khoảnh khắc đó bán được hàng; mọi thứ khác là phụ.</p>
+</div>
+
+<h2>1. Chuẩn bị (1 ngày trước)</h2>
+<div class="grid2">
+  <div>
+    <h4>Môi trường</h4>
+    <ul class="check">
+      <li>Instance demo riêng (không dùng production của xưởng tham chiếu), đã đổi tên thương hiệu &amp; đối tác vận chuyển.</li>
+      <li>Reset dữ liệu đơn trước mỗi buổi (Vùng nguy hiểm → xoá dữ liệu đơn, giữ danh mục).</li>
+      <li>9 tài khoản theo vai trò, mật khẩu ghi ra thẻ; đã đăng nhập sẵn trên 2 trình duyệt (Seller / Ops).</li>
+      <li>1 điện thoại đã cài app (PWA) và đăng nhập tài khoản QC; pin đầy.</li>
+      <li>Internet dự phòng: phát 4G từ điện thoại thứ hai.</li>
+    </ul>
+  </div>
+  <div>
+    <h4>Dữ liệu của khách</h4>
+    <ul class="check">
+      <li>Xin trước <b>file đơn thật</b> của khách (1 seller, 10–30 dòng). Kiểm tra mở được, không lỗi font.</li>
+      <li>Import sẵn danh mục SKU–NVL của khách (từ bảng họ gửi) — nếu chưa có, dùng danh mục mẫu và nói rõ.</li>
+      <li>Cố ý để <b>1 dòng SKU chưa gán NVL</b> trong file để hệ thống bắt lỗi trước mặt khách.</li>
+      <li>In sẵn 5–10 tem QR của sản phẩm trong file đó.</li>
+      <li>Có 2–3 mockup thật để màn hình QC hiện hình ảnh.</li>
+    </ul>
+  </div>
+</div>
+
+<h2>2. Kịch bản theo phút</h2>
+<table class="script">
+<thead><tr><th class="w10">Phút</th><th class="w15">Tài khoản</th><th class="w40">Thao tác</th><th class="w35">Thông điệp cần nói</th></tr></thead>
+<tbody>
+<tr><td>0–3</td><td>—</td><td>Không mở máy. Nhắc lại 2–3 nỗi đau đã nghe khi khảo sát. Đưa tờ <i>Sơ đồ quy trình</i> (tài liệu 05).</td><td>“Hôm nay tôi sẽ chạy đúng file đơn của anh/chị qua hết luồng này, tới lúc bàn giao vận chuyển.”</td></tr>
+<tr><td>3–8</td><td>SELLER</td><td>Đăng nhập cổng seller → Upload file đơn của khách → màn hình xem trước báo 1 dòng <i>SKU chưa gán NVL</i> → giải thích → xác nhận các dòng còn lại → danh sách đơn “Chờ duyệt”.</td><td>“Seller tự làm việc này, không ai phải gõ lại. Lỗi được bắt trước khi vào xưởng, không phải lúc đã cắt xong.”</td></tr>
+<tr><td>8–12</td><td>OPS</td><td>Hàng chờ duyệt → duyệt hàng loạt → chọn 1 đơn “Yêu cầu sửa” kèm lý do → chuyển sang tab seller cho thấy đơn bị trả về.</td><td>“Ops chỉ quyết định, không nhập liệu. Seller thấy ngay lý do, sửa xong nộp lại, giữ nguyên mã đơn.”</td></tr>
+<tr><td>12–16</td><td>DESIGNER</td><td>Hàng chờ thiết kế → set ready hàng loạt → Rổ NVL (sản phẩm tự nhóm theo vật liệu) → tạo batch → mở batch: STT trong ngày, mã nội bộ, xuất <i>bảng sản xuất .xlsx</i>, in tem QR.</td><td>“Batch gom theo đúng vật liệu và hạn mức máy của xưởng. Bảng sản xuất là file Excel quen thuộc, tổ in không phải học gì mới.”</td></tr>
+<tr><td>16–20</td><td>PRODUCTION</td><td>Bảng sản xuất → chuyển Đã in → Đã cắt. Thử lùi về Đã in → hệ thống chặn.</td><td>“Trạng thái chỉ tiến, không ai lùi nhầm. Chủ xưởng mới có quyền đảo ngược, và có nhật ký.”</td></tr>
+<tr><td>20–24</td><td>QC<br><b>(khách cầm điện thoại)</b></td><td>Đưa điện thoại + tem QR cho khách. Khách quét → mockup và mô tả NVL hiện lên → bấm Pass. Quét tem thứ hai → Fail kèm ghi chú → mở <i>Kết quả QC</i>.</td><td>“Anh/chị vừa QC một sản phẩm bằng điện thoại. Không máy quét, không máy tính. Sản phẩm này QC một lần duy nhất, kết quả lưu mãi.”</td></tr>
+<tr><td>24–27</td><td>PACKING → SHIPPING</td><td>Quét đóng gói (hệ thống báo đơn đủ hàng) → <i>Quét là gửi</i> → phiếu bàn giao → gắn mã vận đơn → mở hành trình vận đơn.</td><td>“Từ đây kiện hàng thuộc về hãng vận chuyển. Hệ thống tự cập nhật hành trình, không ai phải tra tay.”</td></tr>
+<tr><td>27–29</td><td>SELLER</td><td>Quay lại cổng seller: trạng thái đã đổi, hành trình hiện. Thử huỷ đơn đã sản xuất → hệ thống chuyển thành <i>yêu cầu huỷ</i> → sang OPS thấy yêu cầu chờ duyệt kèm giai đoạn &amp; tính phí.</td><td>“Seller không thể huỷ không khi xưởng đã tốn vật liệu. Hệ thống nói rõ đơn đã đi tới đâu — đó là căn cứ thu phí.”</td></tr>
+<tr><td>29–30</td><td>—</td><td>Đóng máy. Đưa <i>One-pager</i> + nêu 3 bước tiếp theo. Hẹn ngày khảo sát.</td><td>“Bước tiếp theo: tôi đến xưởng 60 phút, sau đó gửi đề xuất và báo giá trong 5 ngày.”</td></tr>
+</tbody></table>
+
+<h2>3. Những gì KHÔNG demo (trừ khi khách hỏi)</h2>
+<ul>
+  <li>Nhật ký thao tác chi tiết, danh sách người dùng — nhàm, không bán được.</li>
+  <li>Vùng nguy hiểm xoá dữ liệu, cấu hình hạn mức NVL, tài liệu API (Swagger).</li>
+  <li>Thiết kế 2 mặt, tải asset zip — chỉ nói một câu nếu khách có nhu cầu.</li>
+</ul>
+
+<h2>4. Tình huống hay gặp</h2>
+<table>
+<thead><tr><th class="w35">Tình huống</th><th class="w65">Xử lý</th></tr></thead>
+<tbody>
+<tr><td>File đơn của khách không đúng template, import lỗi nhiều</td><td>Chuyển sang file mẫu đã chuẩn bị. Nói: “Tuần 1 triển khai chúng tôi map template của anh/chị, seller không phải đổi file — đã làm y hệt cho xưởng tham chiếu.”</td></tr>
+<tr><td>Mất mạng / server demo chậm</td><td>Bật 4G. Nếu vẫn chậm, dùng video demo 3 phút đã quay sẵn, tiếp tục kể theo kịch bản.</td></tr>
+<tr><td>Khách hỏi giá ngay giữa buổi</td><td>Trả lời khung gói (Starter / Standard / Custom) và hẹn chi tiết cuối buổi. Không né, không đọc bảng giá lúc đang demo.</td></tr>
+<tr><td>Khách muốn tính năng chưa có (kết nối Shopee, kế toán…)</td><td>Ghi vào “phạm vi tuỳ biến”, nói mức độ (thấp / trung bình / cao) theo tài liệu 06 mục 4. <b>Không hứa thời gian tại chỗ.</b></td></tr>
+<tr><td>Nhân viên xưởng đi cùng tỏ ra lo “khó dùng”</td><td>Đưa điện thoại cho chính người đó quét tem. Đây là người sẽ phản đối hoặc ủng hộ mạnh nhất sau này.</td></tr>
+<tr><td>Khách so với Excel / phần mềm khác đang dùng</td><td>Không chê công cụ cũ. Hỏi: “Hôm nay muốn biết đơn X đã cắt chưa thì anh/chị làm thế nào?” — để họ tự mô tả nỗi đau.</td></tr>
+</tbody></table>
+
+<h2>5. Sau demo (trong 24 giờ)</h2>
+<ul class="check">
+  <li>Gửi email / Zalo: One-pager (01), Sơ đồ quy trình (05), Bảng giá (07) — kèm 3 dòng tóm tắt điều khách quan tâm nhất.</li>
+  <li>Chốt ngày khảo sát tại xưởng (tài liệu 11).</li>
+  <li>Ghi lại mọi câu hỏi khách đặt vào FAQ (10) — câu nào chưa có câu trả lời tốt là việc của tuần này.</li>
+  <li>Reset dữ liệu demo.</li>
+</ul>
+</body></html>

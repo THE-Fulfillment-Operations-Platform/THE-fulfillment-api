@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><title>08 · Mẫu đề xuất giải pháp & lộ trình triển khai</title>
+<link rel="stylesheet" href="kit.css">
+</head>
+<body>
+<div class="cover">
+  <div class="brand">FFM Ops · Đề xuất giải pháp</div>
+  <h1>Hệ thống vận hành xưởng fulfillment<br>cho <span class="ph">[Tên xưởng khách hàng]</span></h1>
+  <div class="sub">Từ file đơn của seller đến mã vận đơn — một hệ thống, không sót đơn</div>
+  <div class="box">
+    <p><b>Gửi:</b> <span class="ph">[Tên người nhận, chức vụ]</span><br>
+    <b>Từ:</b> <span class="ph">[Tên công ty]</span> — <span class="ph">[Người phụ trách, SĐT, email]</span><br>
+    <b>Ngày:</b> <span class="ph">[dd/mm/yyyy]</span> · <b>Hiệu lực báo giá:</b> 30 ngày<br>
+    <b>Phiên bản:</b> 1.0</p>
+  </div>
+</div>
+
+<div class="doc-header">
+  <div>
+    <div class="brand">FFM OPS <span>· Đề xuất giải pháp</span></div>
+    <div class="doc-title">Đề xuất cho <span class="ph">[Tên xưởng]</span></div>
+  </div>
+  <div class="meta">Mẫu — điền từ bảng khảo sát (11) · v0.1</div>
+</div>
+
+<div class="callout warn"><p>Cách dùng mẫu: mọi ô <span class="ph">vàng</span> lấy từ <b>Bảng khảo sát nhu cầu</b> (tài liệu 11). Không gửi đề xuất khi mục 1 còn chung chung — khách đọc mục 1 để quyết định có đọc tiếp hay không.</p></div>
+
+<h2>1. Chúng tôi hiểu bài toán của Quý xưởng</h2>
+<p><span class="ph">[Tên xưởng]</span> sản xuất <span class="ph">[loại sản phẩm]</span> trên <span class="ph">[các NVL]</span>, khoảng <span class="ph">[__]</span> đơn/ngày (đỉnh mùa <span class="ph">[__]</span>), nhận đơn từ <span class="ph">[__]</span> seller qua <span class="ph">[Excel / Zalo / sàn]</span>, bàn giao cho <span class="ph">[hãng vận chuyển]</span>.</p>
+<p>Qua buổi khảo sát ngày <span class="ph">[__]</span>, ba vấn đề Quý xưởng muốn giải quyết trước:</p>
+<ol>
+  <li><span class="ph">[Nỗi đau 1 — trích nguyên lời khách, ví dụ: “mỗi sáng mất một tiếng gõ lại đơn từ 6 file Excel”]</span></li>
+  <li><span class="ph">[Nỗi đau 2]</span></li>
+  <li><span class="ph">[Nỗi đau 3]</span></li>
+</ol>
+<p><b>Mục tiêu sau triển khai:</b> <span class="ph">[ví dụ: seller tự upload 100% đơn; biết trạng thái mọi đơn theo thời gian thực; QC có mockup đối chiếu; huỷ đơn sau sản xuất được tính phí]</span>.</p>
+
+<h2>2. Giải pháp đề xuất</h2>
+<div class="flow">
+  <div class="step seller"><b>Seller</b>Upload đơn</div><div class="arrow">›</div>
+  <div class="step ops"><b>Duyệt</b></div><div class="arrow">›</div>
+  <div class="step ops"><b>Thiết kế</b></div><div class="arrow">›</div>
+  <div class="step ops"><b>Gom batch</b>theo NVL</div><div class="arrow">›</div>
+  <div class="step prod"><b>In → Cắt</b></div><div class="arrow">›</div>
+  <div class="step prod"><b>QC</b>quét QR</div><div class="arrow">›</div>
+  <div class="step ship"><b>Đóng gói</b></div><div class="arrow">›</div>
+  <div class="step ship"><b>Bàn giao</b>tracking</div>
+</div>
+<table>
+<thead><tr><th class="w25">Phân hệ</th><th class="w50">Áp dụng cho Quý xưởng</th><th class="w25">Giải quyết vấn đề</th></tr></thead>
+<tbody>
+<tr><td>Tiếp nhận &amp; duyệt đơn</td><td>Map <span class="ph">[__]</span> template đơn hiện có của seller; xem trước chặn trùng / SKU chưa cấu hình; duyệt hàng loạt</td><td>#1</td></tr>
+<tr><td>Thiết kế &amp; gom batch</td><td>Danh mục <span class="ph">[__]</span> NVL, hạn mức <span class="ph">[__]</span> sản phẩm/tấm; batch theo NVL; bảng sản xuất Excel; tem QR</td><td>#2</td></tr>
+<tr><td>Sản xuất &amp; QC</td><td>Trạm <span class="ph">[In / Cắt / …]</span>; QC quét QR bằng điện thoại, đối chiếu mockup</td><td>#2, #3</td></tr>
+<tr><td>Đóng gói &amp; bàn giao</td><td>Quét là gửi; phiếu bàn giao cho <span class="ph">[hãng VC]</span>; tracking tự động</td><td>#3</td></tr>
+<tr><td>Cổng seller &amp; CS</td><td><span class="ph">[__]</span> seller tự upload, tự xem trạng thái; chính sách huỷ theo giai đoạn</td><td>#1, #3</td></tr>
+</tbody></table>
+
+<h2>3. Phạm vi</h2>
+<div class="grid2">
+  <div class="card"><h4>Trong phạm vi</h4><ul>
+    <li>Cài đặt hệ thống trên <span class="ph">[cloud của chúng tôi / server khách]</span></li>
+    <li>Import danh mục SKU–NVL từ bảng hiện có; cấu hình hạn mức</li>
+    <li>Map <span class="ph">[__]</span> template đơn seller</li>
+    <li>Cấu hình đối tác vận chuyển &amp; tracking</li>
+    <li>Tạo <span class="ph">[__]</span> tài khoản theo vai trò</li>
+    <li>Đào tạo <span class="ph">[__]</span> buổi theo trạm; tài liệu hướng dẫn theo vai trò</li>
+    <li>Hỗ trợ chạy song song &amp; cắt chuyển; bảo hành 3 tháng</li>
+  </ul></div>
+  <div class="card"><h4>Ngoài phạm vi (báo giá riêng nếu cần)</h4><ul>
+    <li>Kết nối sàn TMĐT (Shopee, TikTok Shop…)</li>
+    <li>Tạo vận đơn / in tem trực tiếp với hãng vận chuyển</li>
+    <li>Đối soát công nợ seller, kế toán</li>
+    <li>Nhập liệu lịch sử đơn cũ</li>
+    <li>Thiết bị: điện thoại, máy in tem, máy tính</li>
+    <li>Hạ tầng của khách (nếu on-premise)</li>
+  </ul></div>
+</div>
+<h4>Tuỳ biến riêng cho Quý xưởng</h4>
+<table>
+<thead><tr><th class="w45">Hạng mục</th><th class="w15">Ngày công</th><th class="w40">Ghi chú</th></tr></thead>
+<tbody>
+<tr><td><span class="ph">[ví dụ: thêm trạm “Sơn” giữa Cắt và QC]</span></td><td class="num"><span class="ph">[__]</span></td><td><span class="ph">[__]</span></td></tr>
+<tr><td><span class="ph">[ví dụ: thông báo Zalo cho seller khi đơn cần sửa]</span></td><td class="num"><span class="ph">[__]</span></td><td><span class="ph">[__]</span></td></tr>
+<tr><td><span class="ph">[…]</span></td><td class="num"><span class="ph">[__]</span></td><td></td></tr>
+</tbody></table>
+
+<h2>4. Lộ trình triển khai</h2>
+<table>
+<thead><tr><th class="w10">Tuần</th><th class="w40">Công việc</th><th class="w30">Kết quả bàn giao</th><th class="w20">Phía Quý xưởng</th></tr></thead>
+<tbody>
+<tr><td><b>1</b></td><td>Khảo sát chi tiết từng trạm; chốt danh mục NVL, hạn mức, template đơn; chốt phạm vi tuỳ biến</td><td>Biên bản phạm vi; danh mục SKU–NVL đã rà</td><td>Đầu mối + trưởng trạm, 2 buổi</td></tr>
+<tr><td><b>2</b></td><td>Cài đặt; import danh mục; cấu hình vận chuyển, tracking, thương hiệu; tạo tài khoản</td><td>Hệ thống chạy với dữ liệu thật của xưởng</td><td>Cung cấp file, tài khoản hãng VC</td></tr>
+<tr><td><b>3</b></td><td>Tuỳ biến theo phạm vi đã chốt; map template; in thử tem QR</td><td>Bản chạy thử đủ tính năng</td><td>Phản hồi trên bản thử</td></tr>
+<tr><td><b>4</b></td><td>Chạy thử với đơn thật (UAT); đào tạo theo trạm; sửa lỗi</td><td>Biên bản UAT; nhân sự đã đào tạo</td><td>Mỗi trạm 1 buổi, 1–2 giờ</td></tr>
+<tr><td><b>5</b></td><td>Chạy song song với cách cũ; hỗ trợ tại chỗ / từ xa; tinh chỉnh</td><td>Nhật ký vấn đề &amp; xử lý</td><td>Vận hành cả hai cách</td></tr>
+<tr><td><b>6</b></td><td>Cắt chuyển hoàn toàn; bàn giao tài liệu; bắt đầu bảo hành</td><td>Biên bản nghiệm thu; tài liệu HDSD</td><td>Ký nghiệm thu</td></tr>
+</tbody></table>
+<p class="small muted">Lộ trình giả định Quý xưởng cung cấp dữ liệu và nhân sự đúng hạn. Mỗi tuần chậm phản hồi, lộ trình lùi tương ứng.</p>
+
+<h2>5. Đội dự án &amp; trách nhiệm</h2>
+<div class="grid2">
+  <div class="card"><h4>Phía chúng tôi</h4><ul>
+    <li><b>Quản lý dự án</b>: <span class="ph">[Tên]</span> — đầu mối duy nhất, họp tiến độ hàng tuần</li>
+    <li><b>Kỹ sư triển khai</b>: cài đặt, cấu hình, tuỳ biến</li>
+    <li><b>Đào tạo &amp; hỗ trợ</b>: đào tạo theo trạm, hỗ trợ go-live</li>
+  </ul></div>
+  <div class="card"><h4>Phía Quý xưởng</h4><ul>
+    <li><b>Người quyết định</b>: <span class="ph">[Chủ xưởng]</span> — duyệt phạm vi, nghiệm thu</li>
+    <li><b>Đầu mối dự án</b>: <span class="ph">[Tên]</span> — cung cấp dữ liệu, gom phản hồi</li>
+    <li><b>Trưởng trạm</b>: tham gia UAT và đào tạo; thiết bị: điện thoại cho QC / đóng gói, máy in tem</li>
+  </ul></div>
+</div>
+
+<h2>6. Chi phí</h2>
+<table>
+<thead><tr><th class="w45">Khoản</th><th class="w25">Số tiền (VNĐ)</th><th class="w30">Ghi chú</th></tr></thead>
+<tbody>
+<tr><td>Phí triển khai — gói <span class="ph">[Standard]</span></td><td class="num"><span class="ph">[__]</span></td><td>Một lần</td></tr>
+<tr><td>Tuỳ biến riêng (<span class="ph">[__]</span> ngày công × <span class="ph">[__]</span>)</td><td class="num"><span class="ph">[__]</span></td><td>Theo mục 3</td></tr>
+<tr><td>Phí vận hành</td><td class="num"><span class="ph">[__]</span> / tháng</td><td>Hosting, sao lưu, hỗ trợ, cập nhật</td></tr>
+<tr><td><b>Tổng năm đầu</b></td><td class="num"><b><span class="ph">[__]</span></b></td><td>Chưa gồm VAT</td></tr>
+</tbody></table>
+<p><b>Thanh toán:</b> 40% khi ký · 40% khi nghiệm thu UAT · 20% khi cắt chuyển. Phí vận hành theo quý, trả trước.</p>
+
+<h2>7. Tiêu chí nghiệm thu</h2>
+<ul class="check">
+  <li>Import file đơn thật của <span class="ph">[__]</span> seller không lỗi; lỗi dữ liệu được báo rõ theo dòng.</li>
+  <li>Một batch thật đi hết luồng: duyệt → thiết kế → batch → in/cắt → QC quét QR → đóng gói → bàn giao → tracking cập nhật.</li>
+  <li>Seller đăng nhập cổng, thấy đúng trạng thái tổng, không thấy chi tiết nội bộ.</li>
+  <li>Mỗi trạm có ít nhất 1 người thao tác độc lập sau đào tạo.</li>
+  <li>Tài liệu hướng dẫn theo vai trò đã bàn giao.</li>
+</ul>
+
+<h2>8. Bảo hành &amp; hỗ trợ</h2>
+<p>Bảo hành lỗi phần mềm lõi 3 tháng sau cắt chuyển, không tính phí. Sau đó theo gói vận hành: hỗ trợ <span class="ph">[giờ hành chính / 24-7 sự cố khẩn]</span>, phản hồi trong <span class="ph">[4]</span> giờ, cập nhật bảo mật định kỳ, sao lưu hàng ngày. Chi tiết trong SLA (phụ lục hợp đồng).</p>
+
+<h2 class="page-break">9. Bước tiếp theo</h2>
+<ol>
+  <li>Quý xưởng phản hồi đề xuất trước <span class="ph">[ngày]</span>.</li>
+  <li>Hai bên chốt phạm vi tuỳ biến (nếu có) trong 1 buổi làm việc.</li>
+  <li>Ký hợp đồng &amp; SOW; khởi động tuần 1 vào <span class="ph">[ngày]</span>.</li>
+</ol>
+<div class="grid2 avoid-break" style="margin-top:16pt">
+  <div><p><b>Đại diện <span class="ph">[Tên công ty]</span></b></p><p style="height:36pt"></p><p>Ký, ghi rõ họ tên</p></div>
+  <div><p><b>Đại diện <span class="ph">[Tên xưởng]</span></b></p><p style="height:36pt"></p><p>Ký, ghi rõ họ tên</p></div>
+</div>
+</body></html>

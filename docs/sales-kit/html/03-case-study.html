@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><title>03 · Case study xưởng tham chiếu</title>
+<link rel="stylesheet" href="kit.css">
+</head>
+<body>
+<div class="doc-header">
+  <div>
+    <div class="brand">FFM OPS <span>· Nền tảng vận hành xưởng fulfillment</span></div>
+    <div class="doc-title">03 · Case study: <span class="ph">[Tên xưởng tham chiếu]</span></div>
+  </div>
+  <div class="meta">Gửi khách hàng (sau khi điền số) · v0.1 · 08/2026</div>
+</div>
+
+<div class="callout warn">
+  <p><b>Bản mẫu — chưa gửi khách.</b> Các ô <span class="ph">vàng</span> phải điền bằng số liệu thật lấy từ hệ thống và phỏng vấn xưởng tham chiếu (xem Phụ lục A).
+  <b>Xin phép xưởng tham chiếu bằng văn bản</b> trước khi nêu tên, logo hoặc trích dẫn. Nếu chưa được phép, dùng “một xưởng in/cắt tại <span class="ph">[tỉnh/thành]</span>”.</p>
+</div>
+
+<h2>Tóm tắt</h2>
+<div class="grid4">
+  <div class="card kpi"><div class="n"><span class="ph">[__]</span></div><div class="l">đơn / ngày vận hành trên hệ thống</div></div>
+  <div class="card kpi"><div class="n"><span class="ph">[__]</span></div><div class="l">seller dùng cổng tự phục vụ</div></div>
+  <div class="card kpi"><div class="n"><span class="ph">[__]%</span></div><div class="l">giảm hàng sai lọt ra ngoài</div></div>
+  <div class="card kpi"><div class="n"><span class="ph">[__] tuần</span></div><div class="l">từ bắt đầu đến vận hành thật</div></div>
+</div>
+<p style="margin-top:8pt"><span class="ph">[Tên xưởng]</span> là xưởng in / cắt theo nguyên vật liệu (gỗ, mica, acrylic, kim loại) sản xuất hàng cá nhân hoá cho <span class="ph">[__]</span> seller.
+Trước khi dùng FFM Ops, xưởng vận hành bằng <span class="ph">[Excel + Zalo + bảng trắng]</span>. Sau <span class="ph">[__]</span> tuần triển khai, toàn bộ luồng từ nhận đơn đến bàn giao vận chuyển chạy trên một hệ thống.</p>
+
+<h2>1. Về xưởng</h2>
+<table>
+<tbody>
+<tr><th class="w30">Ngành</th><td>In / cắt gỗ, mica, acrylic, kim loại — sản phẩm cá nhân hoá theo đơn</td></tr>
+<tr><th>Quy mô</th><td><span class="ph">[__]</span> nhân sự vận hành, <span class="ph">[__]</span> seller, <span class="ph">[__]</span> SKU, <span class="ph">[__]</span> loại nguyên vật liệu</td></tr>
+<tr><th>Sản lượng</th><td><span class="ph">[__]</span> đơn / ngày trung bình, đỉnh mùa <span class="ph">[__]</span> đơn / ngày</td></tr>
+<tr><th>Vận chuyển</th><td>Bàn giao cho đối tác vận chuyển <span class="ph">[tên]</span>; theo dõi vận đơn qua nhà cung cấp tracking</td></tr>
+</tbody></table>
+
+<h2>2. Trước khi có hệ thống</h2>
+<ul>
+  <li>Đơn về theo file Excel mỗi seller một kiểu; nhân viên gõ lại vào bảng tổng — <span class="ph">[__]</span> giờ / ngày.</li>
+  <li>Tình trạng đơn cập nhật tay trên <span class="ph">[bảng trắng / Zalo]</span>; hỏi “đơn này ở đâu” phải gọi xuống xưởng.</li>
+  <li>QC đối chiếu bằng trí nhớ; sai mẫu, sai vật liệu lọt ra <span class="ph">[__]</span> sản phẩm / tháng.</li>
+  <li>Seller huỷ đơn khi đã cắt; không có căn cứ tính phí, xưởng chịu vật liệu.</li>
+  <li>Không biết seller nào gửi bao nhiêu đơn, tỷ lệ lỗi của ai — không có số để đàm phán.</li>
+</ul>
+
+<h2>3. Giải pháp đã triển khai</h2>
+<div class="grid2">
+  <div class="card">
+    <h4>Phạm vi</h4>
+    <ul>
+      <li>Toàn bộ luồng 9 bước: tiếp nhận → duyệt → thiết kế → batch → in/cắt → QC → đóng gói → bàn giao → vận đơn.</li>
+      <li>Cổng seller tự phục vụ; vai trò CS riêng.</li>
+      <li>Import danh mục SKU–NVL từ bảng vận hành cũ.</li>
+      <li>Tem QR từng sản phẩm; QC và đóng gói trên điện thoại.</li>
+      <li>Tracking tự động; gắn vận đơn hàng loạt từ Excel.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>Đã xây thêm theo yêu cầu thực tế của xưởng</h4>
+    <ul>
+      <li>Nhận template đơn riêng của khách (không bắt seller đổi file).</li>
+      <li>“Quét là gửi” tại bàn đóng gói thay cho thao tác nhiều bước.</li>
+      <li>Xoá batch chưa sản xuất, trả sản phẩm về rổ.</li>
+      <li>Lọc đơn theo ngày xuất xưởng; tìm batch theo mã tem.</li>
+      <li>Chính sách huỷ theo giai đoạn, tính phí khi đã sản xuất.</li>
+      <li>Ghi chú theo phạm vi CS; badge đếm việc theo vai trò.</li>
+    </ul>
+  </div>
+</div>
+<p class="small muted" style="margin-top:6pt">Điểm nhấn khi kể: hệ thống <b>đi theo cách xưởng làm việc</b>, không bắt xưởng đổi theo phần mềm — và các yêu cầu này được đưa vào trong vài ngày, không phải vài tháng.</p>
+
+<h2>4. Kết quả</h2>
+<table>
+<thead><tr><th class="w30">Chỉ số</th><th class="w20">Trước</th><th class="w20">Sau</th><th class="w30">Ghi chú / cách đo</th></tr></thead>
+<tbody>
+<tr><td>Thời gian nhập &amp; đối chiếu đơn mỗi ngày</td><td><span class="ph">[__] giờ</span></td><td><span class="ph">[__] phút</span></td><td>Seller tự upload; xem trước chặn lỗi</td></tr>
+<tr><td>Thời gian từ nhận đơn → bàn giao vận chuyển</td><td><span class="ph">[__] ngày</span></td><td><span class="ph">[__] ngày</span></td><td>Lịch sử trạng thái đơn</td></tr>
+<tr><td>Sản phẩm sai mẫu / sai NVL lọt ra ngoài</td><td><span class="ph">[__] / tháng</span></td><td><span class="ph">[__] / tháng</span></td><td>Kết quả QC + phản hồi seller</td></tr>
+<tr><td>Thời gian trả lời seller “đơn tôi đâu”</td><td><span class="ph">[__] phút</span></td><td>Seller tự xem</td><td>Phỏng vấn CS</td></tr>
+<tr><td>Đơn huỷ sau khi đã sản xuất được tính phí</td><td>Không</td><td><span class="ph">[__]%</span></td><td>Yêu cầu huỷ đã xử lý</td></tr>
+<tr><td>Số người vận hành / 100 đơn</td><td><span class="ph">[__]</span></td><td><span class="ph">[__]</span></td><td>Phỏng vấn chủ xưởng</td></tr>
+</tbody></table>
+
+<h2>5. Khách hàng nói gì</h2>
+<div class="callout info">
+  <p style="font-style:italic;font-size:11.5pt">“<span class="ph">[Trích dẫn 2–3 câu của chủ xưởng hoặc trưởng ca — nói về thay đổi cụ thể nhất, ví dụ: “Trước đây mỗi sáng tôi mất một tiếng hỏi xem đơn nào cắt xong; giờ mở điện thoại là thấy.”]</span>”</p>
+  <p class="muted">— <span class="ph">[Tên]</span>, <span class="ph">[Chức vụ]</span>, <span class="ph">[Tên xưởng]</span></p>
+</div>
+
+<h2>6. Điều áp dụng được cho xưởng khác</h2>
+<ul>
+  <li><b>Bắt đầu từ danh mục SKU–NVL</b>: đây là dữ liệu quyết định gom batch đúng; import từ bảng cũ trong ngày đầu.</li>
+  <li><b>Không bắt seller đổi file</b>: map template hiện có của họ, seller dùng ngay không cần đào tạo.</li>
+  <li><b>Điện thoại là thiết bị chính ở trạm</b>: cài như app, quét QR bằng camera — không mua thiết bị mới.</li>
+  <li><b>Chạy song song 1–2 tuần</b> rồi cắt chuyển; đào tạo 1 buổi / trạm là đủ.</li>
+</ul>
+
+<div class="page-break"></div>
+<h2>Phụ lục A · Số liệu cần thu thập trước khi gửi</h2>
+<p>Không có số thật thì case study chỉ là quảng cáo. Danh sách dưới đây ghi rõ <b>lấy ở đâu</b>. Dành 1 buổi với xưởng tham chiếu để hoàn thành.</p>
+<table>
+<thead><tr><th class="w30">Chỉ số</th><th class="w40">Cách lấy</th><th class="w30">Nguồn</th></tr></thead>
+<tbody>
+<tr><td>Đơn / ngày (trung bình, đỉnh)</td><td>Đếm đơn theo ngày tạo trong 30–90 ngày gần nhất</td><td>Màn hình Đơn hàng (lọc ngày) hoặc truy vấn DB bảng <code>orders</code></td></tr>
+<tr><td>Số seller đang dùng cổng</td><td>Seller có ít nhất 1 lần tự upload trong 30 ngày</td><td>Bảng <code>sellers</code> + job import theo seller</td></tr>
+<tr><td>Lead time nhận đơn → bàn giao</td><td>Trung bình (ngày tạo đơn → ngày phiếu bàn giao) trong 30 ngày</td><td>Lịch sử trạng thái đơn / bảng <code>handoffs</code></td></tr>
+<tr><td>Tỷ lệ QC không đạt</td><td>Fail / tổng số lần QC, theo tháng</td><td>Màn hình Kết quả QC</td></tr>
+<tr><td>Hàng sai lọt ra ngoài (trước / sau)</td><td>Trước: hỏi chủ xưởng ước lượng theo tháng. Sau: đếm khiếu nại seller</td><td>Phỏng vấn + ghi chú “cần chú ý” mức Cao / Nghiêm trọng</td></tr>
+<tr><td>Đơn huỷ khi đã sản xuất &amp; đã tính phí</td><td>Số yêu cầu huỷ đã duyệt ở giai đoạn “Đang sản xuất” trở đi</td><td>Màn hình Yêu cầu huỷ → đã xử lý</td></tr>
+<tr><td>Giờ nhập đơn / ngày trước đây</td><td>Hỏi người từng làm việc đó</td><td>Phỏng vấn</td></tr>
+<tr><td>Thời gian trả lời seller</td><td>Trước: hỏi CS. Sau: seller tự xem — đo số tin nhắn hỏi trạng thái / ngày</td><td>Phỏng vấn CS</td></tr>
+<tr><td>Người vận hành / sản lượng</td><td>Số người ở văn phòng + trạm so với đơn / ngày, trước và sau</td><td>Phỏng vấn chủ xưởng</td></tr>
+<tr><td>Thời gian triển khai thực tế</td><td>Ngày bắt đầu → ngày cắt chuyển hoàn toàn</td><td>Lịch sử dự án</td></tr>
+</tbody></table>
+
+<h3>Câu hỏi phỏng vấn xưởng tham chiếu (15 phút)</h3>
+<ol>
+  <li>Trước đây, việc gì mất thời gian nhất mỗi ngày? Bây giờ việc đó thế nào?</li>
+  <li>Lần gần nhất anh/chị phải “đi tìm một đơn” là khi nào? Mất bao lâu?</li>
+  <li>Seller phản ứng thế nào khi phải upload đơn qua cổng? Có ai phản đối không?</li>
+  <li>Tính năng nào anh/chị dùng nhiều nhất? Tính năng nào ban đầu nghĩ không cần nhưng giờ thấy cần?</li>
+  <li>Nếu giới thiệu cho một chủ xưởng khác, anh/chị sẽ nói câu gì đầu tiên?</li>
+</ol>
+<p class="small muted">Câu 5 thường cho trích dẫn tốt nhất. Ghi âm (xin phép) và trích nguyên văn.</p>
+</body></html>

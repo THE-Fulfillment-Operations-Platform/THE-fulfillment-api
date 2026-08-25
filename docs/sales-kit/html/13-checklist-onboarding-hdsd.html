@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><title>13 · Checklist onboarding & hướng dẫn nhanh theo vai trò</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+  .role { border:1px solid var(--line); border-radius:6pt; padding:8pt 10pt; margin-bottom:8pt; page-break-inside:avoid; }
+  .role h3 { margin-top:0; }
+  .role ol { margin-bottom:3pt; }
+  .role .tip { font-size:9pt; color:var(--gray); }
+</style></head>
+<body>
+<div class="doc-header">
+  <div>
+    <div class="brand">FFM OPS <span>· Nền tảng vận hành xưởng fulfillment</span></div>
+    <div class="doc-title">13 · Checklist onboarding &amp; hướng dẫn nhanh theo vai trò</div>
+  </div>
+  <div class="meta">Bàn giao cho khách khi triển khai · v0.1 · 08/2026</div>
+</div>
+
+<p>Phần 1 là danh sách việc phải xong <b>trước ngày chạy thật</b>. Phần 2 là hướng dẫn một trang cho từng trạm — in ra, dán tại trạm. Phần 3 là kế hoạch đào tạo.</p>
+
+<h2>Phần 1 · Checklist trước go-live</h2>
+<div class="grid2">
+  <div class="card"><h4>Hạ tầng &amp; tài khoản</h4><ul class="check">
+    <li>Hệ thống truy cập được qua tên miền, có HTTPS</li>
+    <li>Sao lưu hàng ngày đã chạy và đã thử phục hồi 1 lần</li>
+    <li>Tài khoản OWNER giao cho chủ xưởng; đổi mật khẩu mặc định</li>
+    <li>Tạo tài khoản theo trạm (OPS, DESIGNER, PRODUCTION, QC, PACKING, SHIPPING, CS); mỗi người một tài khoản, không dùng chung</li>
+    <li>Tài khoản demo / seed đã tắt</li>
+  </ul></div>
+  <div class="card"><h4>Danh mục &amp; cấu hình</h4><ul class="check">
+    <li>Import NVL, SKU, mapping SKU→NVL từ bảng cũ; xử lý hết mục “cần rà soát”</li>
+    <li>Nhập hạn mức sản xuất theo NVL (OWNER)</li>
+    <li>Tạo seller &amp; cửa hàng; tài khoản SELLER cho từng seller</li>
+    <li>Map template đơn của từng seller; import thử 1 file thật mỗi seller không lỗi</li>
+    <li>Cấu hình tên đối tác vận chuyển, nhà cung cấp tracking</li>
+  </ul></div>
+  <div class="card"><h4>Thiết bị tại trạm</h4><ul class="check">
+    <li>Điện thoại trạm QC, đóng gói, bàn giao: đã cài app (trang “Cài app”), đăng nhập đúng vai trò</li>
+    <li>Máy in tem: in thử tem QR, quét được bằng điện thoại</li>
+    <li>Wi-Fi phủ tới trạm QC / đóng gói; 4G dự phòng</li>
+    <li>Máy tính cho Ops / thiết kế / sản xuất có trình duyệt hiện đại</li>
+  </ul></div>
+  <div class="card"><h4>Con người &amp; quy trình</h4><ul class="check">
+    <li>Mỗi trạm đã đào tạo, có người thao tác độc lập</li>
+    <li>Đã thống nhất: ai duyệt đơn, ai xử lý yêu cầu huỷ, ai gắn vận đơn</li>
+    <li>Seller đã được thông báo cách upload và xem trạng thái</li>
+    <li>Kênh hỗ trợ (Zalo nhóm) đã lập, có người của nhà cung cấp</li>
+    <li>Ngày cắt chuyển và kế hoạch chạy song song đã chốt</li>
+  </ul></div>
+</div>
+
+<h2>Phần 2 · Hướng dẫn nhanh theo vai trò</h2>
+
+<div class="role"><h3>OPS — Điều phối</h3>
+<ol>
+  <li><b>Import đơn</b>: Đơn hàng → Import → chọn file → xem trước → sửa dòng lỗi (SKU chưa có / chưa gán NVL → vào Danh mục bổ sung) → Xác nhận.</li>
+  <li><b>Duyệt đơn</b>: Duyệt đơn → chọn nhiều → Duyệt hàng loạt. Đơn có vấn đề → Yêu cầu sửa (ghi rõ lý do) hoặc Từ chối.</li>
+  <li><b>Yêu cầu huỷ</b>: Huỷ đơn → xem giai đoạn &amp; tính phí → Duyệt / Từ chối. Đã xử lý nằm ở tab “Đã giải quyết”.</li>
+  <li><b>Gắn vận đơn hàng loạt</b>: Đơn hàng → Import vận đơn → tải template → dán mã từ file hãng → xem trước → xác nhận.</li>
+  <li><b>Ghi chú</b>: mở đơn → Ghi chú → chọn mức độ. Badge trên menu cho biết việc đang chờ.</li>
+</ol>
+<p class="tip">Mẹo: lọc đơn theo ngày xuất xưởng để biết hôm nay phải xong gì. Không xoá đơn — dùng Huỷ để giữ lịch sử.</p></div>
+
+<div class="role"><h3>DESIGNER — Thiết kế &amp; gom batch</h3>
+<ol>
+  <li><b>Hàng chờ thiết kế</b>: mở sản phẩm → gắn link mockup / file (2 mặt nếu có) → chuyển “Sẵn sàng”. Thiếu file → “Thiếu asset” + ghi chú.</li>
+  <li><b>Set ready hàng loạt</b> cho các sản phẩm đã có đủ file.</li>
+  <li><b>Rổ NVL</b>: chọn vật liệu → chọn sản phẩm (hệ thống báo hạn mức) → Tạo batch → đặt hạn hoàn thành.</li>
+  <li><b>Trong batch</b>: gắn link file in / cắt → Xuất bảng sản xuất (.xlsx) → In tem QR → giao xưởng.</li>
+  <li>Tạo nhầm → Xoá batch (chỉ khi chưa sản xuất); sản phẩm trở lại rổ.</li>
+</ol>
+<p class="tip">Mẹo: tải trọn bộ asset (.zip) theo batch để gửi máy in một lần.</p></div>
+
+<div class="role"><h3>PRODUCTION — Xưởng in / cắt</h3>
+<ol>
+  <li>Mở <b>Sản xuất</b> → tìm batch theo STT trong ngày hoặc quét mã trên bảng sản xuất.</li>
+  <li>In xong → bấm <b>Đã in</b>. Cắt xong → bấm <b>Đã cắt</b>.</li>
+  <li>Không lùi được trạng thái — bấm nhầm báo chủ xưởng.</li>
+  <li>Dán tem QR lên từng sản phẩm trước khi chuyển QC.</li>
+</ol>
+<p class="tip">Mẹo: bảng sản xuất Excel có bộ lọc theo NVL / kích thước — in ra dán tại máy.</p></div>
+
+<div class="role"><h3>QC — Kiểm tra chất lượng (trên điện thoại)</h3>
+<ol>
+  <li>Mở app → <b>QC</b> → bấm Quét → hướng camera vào tem QR.</li>
+  <li>Màn hình hiện mockup + mô tả NVL → so với sản phẩm thật.</li>
+  <li>Đúng → <b>Đạt</b>. Sai → <b>Không đạt</b> + chọn lý do / ghi chú → để riêng hàng lỗi.</li>
+  <li>Mỗi sản phẩm chỉ QC một lần; quét lại sẽ báo đã QC.</li>
+</ol>
+<p class="tip">Mẹo: tem mờ không quét được → gõ mã trên tem vào ô tìm.</p></div>
+
+<div class="role"><h3>PACKING — Đóng gói</h3>
+<ol>
+  <li><b>Đóng gói</b> → Quét tem sản phẩm → hệ thống hiện đơn và báo <b>đã đủ hàng chưa</b>.</li>
+  <li>Đủ → gom vào một gói → bấm <b>Đã đóng</b>. Thiếu → để khay chờ, xem “Kết quả QC” biết sản phẩm còn lại ở đâu.</li>
+  <li>Gói xong → <b>Quét là gửi</b>: quét gói → chuyển “Đã bàn giao”.</li>
+</ol>
+<p class="tip">Mẹo: đơn nhiều sản phẩm từ nhiều batch — đừng đóng khi hệ thống báo thiếu.</p></div>
+
+<div class="role"><h3>SHIPPING — Vận chuyển</h3>
+<ol>
+  <li><b>Hàng chờ gửi</b> → chọn gói đã đóng → Bàn giao hàng loạt hoặc quét từng gói.</li>
+  <li>Tạo <b>phiếu bàn giao</b> cho hãng → hãng nhận → đánh dấu <b>Đã gửi</b>.</li>
+  <li>Có mã vận đơn → gắn vào đơn (lẻ) hoặc dùng import hàng loạt.</li>
+  <li>Hành trình tự cập nhật; cần gấp → bấm Đồng bộ trên đơn.</li>
+</ol></div>
+
+<div class="role"><h3>CS — Chăm sóc khách hàng</h3>
+<ol>
+  <li><b>CS</b> → tìm đơn theo mã cửa hàng hoặc tên / SĐT người nhận.</li>
+  <li>Xem trạng thái tổng, thông tin giao hàng, hành trình vận đơn → trả lời seller.</li>
+  <li>Nhận mã vận đơn từ hãng → gắn vào đơn (lẻ hoặc file Excel hàng loạt).</li>
+  <li>Vấn đề cần xưởng xử lý → Ghi chú, chọn mức độ.</li>
+</ol>
+<p class="tip">CS không vào được màn hình sản xuất — đó là chủ ý, không phải lỗi.</p></div>
+
+<div class="role"><h3>SELLER — Khách bán hàng</h3>
+<ol>
+  <li>Đăng nhập cổng seller → <b>Upload đơn</b> → chọn file theo template → xem trước → sửa dòng lỗi → Xác nhận.</li>
+  <li>Theo dõi trạng thái: Chờ duyệt → Đang sản xuất → Đã đóng gói → Đã bàn giao → Đã gửi → Đã giao. Bấm vào đơn xem hành trình.</li>
+  <li>Đơn “Cần sửa” → mở, sửa theo lý do → nộp lại (hoặc import lại file, giữ nguyên mã).</li>
+  <li>Huỷ: chưa sản xuất → huỷ ngay, miễn phí. Đã sản xuất → gửi yêu cầu huỷ, chờ xưởng duyệt, có phí.</li>
+</ol></div>
+
+<div class="role"><h3>OWNER / ADMIN — Chủ xưởng &amp; quản trị</h3>
+<ol>
+  <li><b>Người dùng</b>: tạo / khoá tài khoản khi nhân sự vào – ra. Không dùng chung tài khoản.</li>
+  <li><b>Nhật ký</b>: tra ai làm gì khi có tranh cãi.</li>
+  <li><b>Hạn mức NVL</b>: import khi đổi khổ / máy (OWNER).</li>
+  <li><b>Đảo trạng thái batch</b> (OWNER) chỉ khi thật cần; có ghi nhật ký.</li>
+  <li><b>Vùng nguy hiểm</b>: xoá toàn bộ dữ liệu đơn — chỉ dùng trên môi trường thử.</li>
+</ol></div>
+
+<h2>Phần 3 · Kế hoạch đào tạo</h2>
+<table>
+<thead><tr><th class="w15">Buổi</th><th class="w25">Đối tượng</th><th class="w40">Nội dung</th><th class="w20">Thời lượng</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>OPS, DESIGNER, chủ xưởng</td><td>Import đơn, duyệt, danh mục, rổ NVL, batch, bảng sản xuất, tem, yêu cầu huỷ, ghi chú</td><td>2 giờ</td></tr>
+<tr><td>2</td><td>PRODUCTION, QC, PACKING, SHIPPING</td><td>Tại trạm, trên điện thoại: đổi trạng thái batch, quét QC, quét đóng gói, quét là gửi, phiếu bàn giao</td><td>1.5 giờ</td></tr>
+<tr><td>3</td><td>CS</td><td>Tra đơn, gắn vận đơn lẻ / hàng loạt, ghi chú</td><td>45 phút</td></tr>
+<tr><td>4</td><td>Seller (trực tuyến, ghi hình)</td><td>Upload đơn, sửa đơn cần sửa, xem trạng thái, huỷ / yêu cầu huỷ</td><td>30 phút</td></tr>
+</tbody></table>
+<p class="small muted">Ghi hình buổi 2 và 4 để đào tạo người mới sau này. Sau mỗi buổi, người học tự thao tác một vòng không có hướng dẫn — đó là tiêu chí “đã đào tạo”.</p>
+</body></html>

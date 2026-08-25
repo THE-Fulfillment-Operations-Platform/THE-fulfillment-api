@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><title>05 · Sơ đồ quy trình vận hành</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+  .step { font-size:8pt; padding:5pt 3pt; }
+  .role-tag { display:inline-block; background:var(--navy); color:#fff; border-radius:3pt; padding:0 4pt; font-size:8pt; font-weight:600; margin-right:2pt; }
+</style></head>
+<body>
+<div class="doc-header">
+  <div>
+    <div class="brand">FFM OPS <span>· Nền tảng vận hành xưởng fulfillment</span></div>
+    <div class="doc-title">05 · Sơ đồ quy trình vận hành</div>
+  </div>
+  <div class="meta">Gửi khách hàng · v0.1 · 08/2026</div>
+</div>
+
+<p>Tài liệu này mô tả <b>một đơn hàng đi qua xưởng như thế nào</b> khi vận hành trên FFM Ops: ai làm gì ở mỗi bước, hệ thống ghi nhận gì, và seller nhìn thấy gì.
+Đây là luồng chuẩn đang chạy tại xưởng tham chiếu; từng bước có thể <b>bật/tắt hoặc đổi tên theo xưởng của bạn</b> (xem mục 6).</p>
+
+<h2>1. Luồng chính</h2>
+<div class="flow">
+  <div class="step seller"><b>1. Tiếp nhận</b>Seller upload /<br>Ops import Excel</div><div class="arrow">›</div>
+  <div class="step ops"><b>2. Duyệt</b>Duyệt · Yêu cầu sửa<br>· Từ chối</div><div class="arrow">›</div>
+  <div class="step ops"><b>3. Thiết kế</b>Mockup, asset<br>2 mặt</div><div class="arrow">›</div>
+  <div class="step ops"><b>4. Gom batch</b>Theo rổ NVL<br>&amp; hạn mức</div><div class="arrow">›</div>
+  <div class="step prod"><b>5. In → Cắt</b>Trạng thái batch<br>chỉ tiến</div><div class="arrow">›</div>
+  <div class="step prod"><b>6. QC</b>Quét QR<br>Pass / Fail</div><div class="arrow">›</div>
+  <div class="step ship"><b>7. Đóng gói</b>Quét gói<br>theo đơn</div><div class="arrow">›</div>
+  <div class="step ship"><b>8. Bàn giao</b>Quét là gửi<br>phiếu bàn giao</div><div class="arrow">›</div>
+  <div class="step ship"><b>9. Vận đơn</b>Gắn mã, sync<br>hành trình</div>
+</div>
+<p class="small muted">Màu: <span class="tag" style="background:#fff7ea">Seller</span> <span class="tag" style="background:#eef3fb">Văn phòng / thiết kế</span> <span class="tag" style="background:#eef8f6">Xưởng sản xuất</span> <span class="tag" style="background:#f3f0fb">Đóng gói / vận chuyển</span></p>
+
+<h2>2. Chi tiết từng bước</h2>
+<table>
+<thead><tr><th class="w10">Bước</th><th class="w15">Ai làm</th><th class="w20">Đầu vào</th><th class="w35">Hệ thống làm gì</th><th class="w20">Kết quả / trạng thái</th></tr></thead>
+<tbody>
+<tr><td><b>1. Tiếp nhận đơn</b></td><td><span class="role-tag">SELLER</span> hoặc <span class="role-tag">OPS</span></td><td>File Excel theo template (hoặc nhập tay từng đơn)</td>
+<td><b>Xem trước → xác nhận</b>: kiểm tra trùng mã đơn, SKU chưa có trong danh mục, SKU chưa gán NVL, dòng lỗi. Seller bị khoá đúng tài khoản của mình. Đơn đã từ chối/huỷ có thể import lại và <b>hồi sinh giữ nguyên mã</b>.</td>
+<td>Đơn ở trạng thái <b>Chờ duyệt</b>; lịch sử import lưu lại theo job.</td></tr>
+<tr><td><b>2. Duyệt đơn</b></td><td><span class="role-tag">OPS</span> <span class="role-tag">DESIGNER</span></td><td>Danh sách đơn chờ duyệt</td>
+<td><b>Duyệt</b> (đơn lẻ hoặc hàng loạt), <b>Yêu cầu sửa</b> (trả về seller kèm lý do), <b>Từ chối</b>. Seller được sửa đơn khi còn chờ duyệt.</td>
+<td><b>Đã duyệt</b> → sản phẩm vào hàng chờ thiết kế.</td></tr>
+<tr><td><b>3. Thiết kế</b></td><td><span class="role-tag">DESIGNER</span></td><td>Sản phẩm đã duyệt, mockup từ seller</td>
+<td>Cập nhật trạng thái thiết kế: <i>Chưa làm → Đang làm → Sẵn sàng</i> hoặc <i>Thiếu asset</i>. Hỗ trợ thiết kế <b>2 mặt</b>, gắn link file, tải trọn bộ asset (.zip) theo lô.</td>
+<td>Sản phẩm <b>Sẵn sàng sản xuất</b>, xuất hiện trong “rổ NVL”.</td></tr>
+<tr><td><b>4. Gom batch</b></td><td><span class="role-tag">DESIGNER</span> <span class="role-tag">OPS</span></td><td>Rổ sản phẩm sẵn sàng, nhóm theo NVL</td>
+<td>Tạo batch theo <b>hạn mức sản xuất của NVL</b> (bao nhiêu sản phẩm / 1 đơn vị NVL), đánh <b>STT trong ngày</b> và <b>mã nội bộ kiểu xưởng</b>, xuất <b>bảng sản xuất .xlsx</b>, gắn link file in / cắt, in <b>tem QR</b> từng sản phẩm. Batch chưa sản xuất có thể xoá — sản phẩm trở lại rổ.</td>
+<td>Batch <b>Chờ sản xuất</b> (Pending).</td></tr>
+<tr><td><b>5. In → Cắt</b></td><td><span class="role-tag">PRODUCTION</span></td><td>Batch + file in / cắt</td>
+<td>Chuyển trạng thái batch <b>Đã in → Đã cắt</b>. Trạng thái <b>chỉ tiến không lùi</b> (OWNER mới được đảo ngược); sản phẩm đã QC được bảo vệ khỏi thay đổi.</td>
+<td>Batch / sản phẩm <b>Đã cắt</b>.</td></tr>
+<tr><td><b>6. QC</b></td><td><span class="role-tag">QC</span></td><td>Sản phẩm đã cắt, tem QR</td>
+<td><b>Quét QR bằng điện thoại</b> → hiện mockup + mô tả NVL để đối chiếu → <b>Pass / Fail</b> kèm ghi chú. Mỗi sản phẩm QC <b>một lần duy nhất</b>. Batch tự dồn lên “Đã QC” khi mọi sản phẩm pass.</td>
+<td>Sản phẩm <b>Đã QC</b>; hàng lỗi ghi nhận trong “Kết quả QC” để xử lý lại.</td></tr>
+<tr><td><b>7. Đóng gói</b></td><td><span class="role-tag">PACKING</span></td><td>Đơn có đủ sản phẩm đã QC</td>
+<td>Quét đóng gói; hệ thống báo đơn <b>đã đủ hàng chưa</b> (đơn nhiều sản phẩm, nhiều batch). Gói mở → <b>Đã đóng</b>.</td>
+<td>Gói <b>Đã đóng</b>; seller thấy “Đã đóng gói”.</td></tr>
+<tr><td><b>8. Bàn giao vận chuyển</b></td><td><span class="role-tag">PACKING</span> <span class="role-tag">SHIPPING</span></td><td>Gói đã đóng</td>
+<td><b>Quét là gửi</b> (ship-scan) từng gói, hoặc bàn giao hàng loạt theo danh sách đơn. Tạo <b>phiếu bàn giao</b> cho đơn vị vận chuyển, đánh dấu “Đã gửi”.</td>
+<td><b>Đã bàn giao → Đã gửi</b>.</td></tr>
+<tr><td><b>9. Theo dõi vận đơn</b></td><td><span class="role-tag">CS</span> <span class="role-tag">SHIPPING</span></td><td>Mã vận đơn từ hãng vận chuyển</td>
+<td>Gắn mã vận đơn <b>đơn lẻ hoặc hàng loạt từ Excel</b> (xem trước → xác nhận). Hệ thống <b>tự đồng bộ hành trình</b> từ nhà cung cấp tracking theo lịch; ai mở đơn cũng thấy kiện hàng đang ở đâu.</td>
+<td><b>Đã giao</b> (từ dữ liệu hãng vận chuyển).</td></tr>
+</tbody></table>
+
+<h2>3. Xưởng thấy gì — seller thấy gì</h2>
+<p>Seller chỉ nhìn <b>trạng thái tổng</b>, không thấy chi tiết in/cắt/QC nội bộ. Điều này giữ được nhịp sản xuất riêng của xưởng mà seller vẫn yên tâm.</p>
+<table>
+<thead><tr><th class="w25">Giai đoạn</th><th class="w40">Trạng thái nội bộ (xưởng thấy)</th><th class="w35">Trạng thái seller thấy</th></tr></thead>
+<tbody>
+<tr><td>Tiếp nhận &amp; duyệt</td><td>Chờ duyệt · Cần sửa · Đã duyệt · Từ chối · Đã huỷ</td><td>Chờ duyệt · Cần sửa · Đã duyệt · Từ chối · Đã huỷ</td></tr>
+<tr><td>Thiết kế</td><td>Chưa làm · Đang làm · Sẵn sàng · Thiếu asset</td><td rowspan="3"><b>Đang sản xuất</b></td></tr>
+<tr><td>Gom batch</td><td>Batch: Chờ sản xuất</td></tr>
+<tr><td>Sản xuất &amp; QC</td><td>Đã in · Đã cắt · Đã QC (Pass / Fail từng sản phẩm)</td></tr>
+<tr><td>Đóng gói</td><td>Gói: Mở · Đã đóng</td><td><b>Đã đóng gói</b></td></tr>
+<tr><td>Bàn giao</td><td>Phiếu bàn giao: Đã bàn giao · Đã gửi</td><td><b>Đã bàn giao → Đã gửi</b></td></tr>
+<tr><td>Vận chuyển</td><td>Hành trình vận đơn đồng bộ từ hãng</td><td><b>Đã giao</b> + hành trình chi tiết</td></tr>
+</tbody></table>
+
+<h2>4. Chính sách huỷ đơn theo giai đoạn</h2>
+<p>Hệ thống chụp lại <b>đơn đã đi đến đâu</b> tại thời điểm huỷ. Đó là căn cứ duy nhất quyết định: seller được tự huỷ hay phải chờ duyệt, và có tính phí hay không. Áp dụng cho <b>cả đơn lẫn từng sản phẩm</b> trong đơn.</p>
+<table>
+<thead><tr><th class="w25">Giai đoạn khi huỷ</th><th class="w30">Seller được làm gì</th><th class="w20">Ai quyết định</th><th class="w25">Tính phí?</th></tr></thead>
+<tbody>
+<tr><td><b>Trước sản xuất</b> (chờ duyệt, hoặc đã duyệt nhưng chưa vào batch)</td><td>Huỷ ngay, có hiệu lực tức thì</td><td>Tự động</td><td><span class="badge b-ok">Miễn phí</span></td></tr>
+<tr><td><b>Đang sản xuất</b> (đã vào batch / đã in / đã cắt / đã QC)</td><td>Gửi <i>yêu cầu huỷ</i></td><td>OPS / ADMIN duyệt hoặc từ chối</td><td><span class="badge b-must">Tính phí</span> — đã tiêu NVL và giờ máy</td></tr>
+<tr><td><b>Đã đóng gói / đã bàn giao</b></td><td>Gửi yêu cầu huỷ</td><td>OPS / ADMIN</td><td><span class="badge b-must">Tính phí</span></td></tr>
+<tr><td><b>Đã gửi</b></td><td>Gửi yêu cầu huỷ</td><td>OPS / ADMIN</td><td><span class="badge b-must">Tính phí</span></td></tr>
+</tbody></table>
+<p class="small muted">Ngưỡng “có tiền là có người quyết”: đúng lúc bắt đầu tính phí thì cũng là lúc cần người duyệt. Yêu cầu huỷ đã xử lý được lưu lại để đối soát.</p>
+
+<h2>5. Luồng ngoại lệ</h2>
+<div class="grid2">
+  <div class="card"><h4>Đơn cần sửa</h4><p>Ops trả đơn về seller kèm lý do. Seller sửa trực tiếp hoặc import lại file — đơn cũ <b>hồi sinh tại chỗ, giữ nguyên mã</b>, không tạo bản trùng.</p></div>
+  <div class="card"><h4>QC không đạt</h4><p>Sản phẩm bị đánh <b>Fail</b> kèm ghi chú; nằm trong “Kết quả QC” để sản xuất làm lại. Batch không thể lên “Đã QC” khi còn sản phẩm chưa đạt.</p></div>
+  <div class="card"><h4>Import lỗi cấu hình</h4><p>Hệ thống phân biệt <b>SKU chưa có</b> và <b>SKU chưa gán NVL</b>. Ops bổ sung danh mục (nhập tay hoặc import bảng SKU–NVL) rồi import lại.</p></div>
+  <div class="card"><h4>Ghi chú “cần chú ý”</h4><p>Bất kỳ trạm nào cũng gắn được ghi chú vào đơn / sản phẩm / batch / gói / phiếu bàn giao, với mức độ <i>Thấp · Bình thường · Cao · Nghiêm trọng</i> và trạng thái xử lý. Hiện badge đếm việc trên menu.</p></div>
+</div>
+
+<h2>6. Vai trò và trạm</h2>
+<table>
+<thead><tr><th class="w15">Vai trò</th><th class="w30">Trạm / bàn làm việc</th><th class="w55">Màn hình chính</th></tr></thead>
+<tbody>
+<tr><td>OWNER</td><td>Chủ xưởng</td><td>Toàn quyền; nhập hạn mức NVL; vùng nguy hiểm (xoá dữ liệu đơn); đảo ngược trạng thái batch.</td></tr>
+<tr><td>ADMIN</td><td>Quản trị</td><td>Người dùng, nhật ký thao tác, seller/cửa hàng, danh mục.</td></tr>
+<tr><td>OPS</td><td>Điều phối / văn phòng</td><td>Import đơn, duyệt đơn, yêu cầu huỷ, danh mục SKU–NVL, batch, gắn vận đơn.</td></tr>
+<tr><td>DESIGNER</td><td>Thiết kế</td><td>Hàng chờ thiết kế, rổ NVL, tạo batch, link file in/cắt.</td></tr>
+<tr><td>PRODUCTION</td><td>Xưởng in / cắt</td><td>Bảng sản xuất theo batch, chuyển Đã in / Đã cắt.</td></tr>
+<tr><td>QC</td><td>Kiểm tra chất lượng</td><td>Quét QR, Pass / Fail, kết quả QC.</td></tr>
+<tr><td>PACKING</td><td>Đóng gói</td><td>Quét đóng gói, quét bàn giao.</td></tr>
+<tr><td>SHIPPING</td><td>Vận chuyển</td><td>Hàng chờ gửi, phiếu bàn giao, gắn vận đơn.</td></tr>
+<tr><td>CS</td><td>Chăm sóc khách hàng</td><td>Tra đơn theo mã / người nhận, gắn mã vận đơn (lẻ &amp; hàng loạt), ghi chú — không vào màn hình sản xuất.</td></tr>
+<tr><td>SELLER</td><td>Khách bán hàng</td><td>Cổng seller: upload đơn, trạng thái tổng, lịch sử đơn, hành trình vận đơn, huỷ / yêu cầu huỷ.</td></tr>
+</tbody></table>
+
+<h2>7. Điểm tuỳ biến theo từng xưởng</h2>
+<ul>
+  <li><b>Nguyên vật liệu &amp; hạn mức</b>: danh mục NVL, số sản phẩm / đơn vị NVL, mapping SKU → NVL (import từ bảng vận hành cũ).</li>
+  <li><b>Template đơn</b>: cột của file seller hiện tại (đã hỗ trợ nhận template mới của khách mà không đổi lõi).</li>
+  <li><b>Trạm sản xuất</b>: thêm/bớt bước (ví dụ: sơn, dán, lắp ráp) hoặc đổi tên In / Cắt theo công nghệ của xưởng.</li>
+  <li><b>Vận chuyển</b>: tên thương hiệu đối tác vận chuyển, hãng vận chuyển, nhà cung cấp tracking (adapter thay thế được).</li>
+  <li><b>Chính sách huỷ &amp; tính phí</b>, số mặt thiết kế, quy tắc sinh mã nội bộ, số tem QR.</li>
+</ul>
+</body></html>

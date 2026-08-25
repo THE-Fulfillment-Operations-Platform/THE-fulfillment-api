@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><title>01 · Sales One-pager</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+  @page { margin: 12mm 13mm; }
+  body { font-size: 9.6pt; line-height: 1.38; }
+  h1 { font-size: 18.5pt; }
+  h2 { font-size: 11pt; margin: 9pt 0 4pt; }
+  .doc-header { margin-bottom: 8pt; padding-bottom: 6pt; }
+  .step { font-size: 8pt; padding: 5pt 3pt; }
+  .kpi .n { font-size: 16pt; }
+  ul { margin-bottom: 4pt; } li { margin-bottom: 2pt; }
+  .cta { border: 2px solid var(--navy); border-radius: 8pt; padding: 8pt 12pt; margin-top: 8pt; display: flex; justify-content: space-between; align-items: center; background: var(--bg); }
+  .cta .t { font-size: 12pt; font-weight: 700; color: var(--navy); }
+</style></head>
+<body>
+<div class="doc-header">
+  <div>
+    <div class="brand">FFM OPS <span>· Nền tảng vận hành xưởng fulfillment</span></div>
+    <div class="doc-title">Từ file đơn của seller đến mã vận đơn — một hệ thống, không sót đơn</div>
+  </div>
+  <div class="meta">Sales One-pager · v0.1 · 08/2026</div>
+</div>
+
+<p><b>FFM Ops</b> quản lý toàn bộ vòng đời đơn hàng của xưởng in/cắt theo nguyên vật liệu (gỗ, mica, acrylic, kim loại…):
+tiếp nhận đơn từ seller → duyệt → thiết kế → gom batch theo NVL → in → cắt → QC quét QR → đóng gói → bàn giao vận chuyển → theo dõi vận đơn.
+Mỗi trạm một màn hình, mỗi sản phẩm một tem QR, mỗi thao tác một dòng nhật ký.</p>
+
+<div class="grid2">
+  <div class="card">
+    <h3 style="color:var(--red)">Xưởng đang mất tiền ở đâu</h3>
+    <ul>
+      <li>Đơn về từ nhiều seller qua Excel/Zalo, gõ lại tay → <b>trùng đơn, sót đơn</b>.</li>
+      <li>Không ai biết đơn nào đã in, đã cắt, đã QC; <b>tìm một đơn mất 10 phút</b>.</li>
+      <li>QC bằng mắt, <b>sai mẫu chỉ phát hiện khi đã ship</b>.</li>
+      <li>Seller nhắn hỏi “đơn tôi đâu” cả ngày; <b>huỷ đơn giữa chừng không ai tính phí</b>.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3 style="color:var(--teal)">FFM Ops thay đổi điều đó</h3>
+    <ul>
+      <li>Seller <b>tự upload đơn</b> theo template; hệ thống chặn trùng, báo SKU chưa cấu hình ngay khi xem trước.</li>
+      <li>Bảng điều hành xưởng theo thời gian thực: <b>ai đang làm gì, đơn nào kẹt ở đâu</b>.</li>
+      <li>QC <b>quét QR bằng điện thoại</b>, đối chiếu mockup, kết quả lưu vĩnh viễn.</li>
+      <li>Seller tự xem trạng thái &amp; hành trình vận đơn; <b>chính sách huỷ theo giai đoạn</b>, đã sản xuất là tính phí.</li>
+    </ul>
+  </div>
+</div>
+
+<h2>Một luồng xuyên suốt</h2>
+<div class="flow">
+  <div class="step seller"><b>Seller</b>Upload đơn<br>theo template</div><div class="arrow">›</div>
+  <div class="step ops"><b>Duyệt</b>Duyệt / yêu cầu sửa<br>/ từ chối</div><div class="arrow">›</div>
+  <div class="step ops"><b>Thiết kế</b>Mockup 2 mặt<br>asset sẵn sàng</div><div class="arrow">›</div>
+  <div class="step ops"><b>Gom batch</b>Theo NVL &amp;<br>hạn mức máy</div><div class="arrow">›</div>
+  <div class="step prod"><b>In → Cắt</b>File in/cắt<br>tem QR</div><div class="arrow">›</div>
+  <div class="step prod"><b>QC</b>Quét QR<br>đối chiếu mockup</div><div class="arrow">›</div>
+  <div class="step ship"><b>Đóng gói</b>Quét gói<br>theo đơn</div><div class="arrow">›</div>
+  <div class="step ship"><b>Bàn giao</b>Quét là gửi<br>tracking tự động</div>
+</div>
+
+<h2>Kết quả tại xưởng tham chiếu</h2>
+<div class="grid4">
+  <div class="card kpi"><div class="n"><span class="ph">[__]</span></div><div class="l">đơn / ngày đang vận hành</div></div>
+  <div class="card kpi"><div class="n"><span class="ph">[__]%</span></div><div class="l">giảm sản phẩm sai mẫu lọt ra ngoài</div></div>
+  <div class="card kpi"><div class="n"><span class="ph">[__] phút</span></div><div class="l">trả lời seller “đơn tôi đâu”</div></div>
+  <div class="card kpi"><div class="n"><span class="ph">[__] người</span></div><div class="l">vận hành cùng sản lượng</div></div>
+</div>
+
+<div class="grid2" style="margin-top:8pt">
+  <div>
+    <h2 style="margin-top:0">Tính năng nổi bật</h2>
+    <ul>
+      <li><b>Cổng seller tự phục vụ</b>: upload đơn, xem trạng thái, hành trình vận đơn, huỷ / yêu cầu huỷ.</li>
+      <li><b>Gom batch theo nguyên vật liệu</b>, tôn trọng hạn mức sản xuất mỗi tấm/khổ; STT trong ngày, mã nội bộ kiểu xưởng.</li>
+      <li><b>Tem QR từng sản phẩm</b>: quét ở QC, đóng gói, bàn giao — dùng điện thoại, không cần máy quét.</li>
+      <li><b>Tracking tự động</b> đồng bộ từ đơn vị vận chuyển; CS gắn mã vận đơn hàng loạt từ Excel.</li>
+      <li><b>10 vai trò</b> phân quyền theo trạm, nhật ký thao tác, ghi chú “cần chú ý” theo mức độ.</li>
+      <li>Xuất bảng sản xuất .xlsx, tải trọn bộ file thiết kế theo batch, thao tác hàng loạt.</li>
+    </ul>
+  </div>
+  <div>
+    <h2 style="margin-top:0">Vì sao chọn FFM Ops</h2>
+    <ul>
+      <li><b>Đã vận hành thật</b> tại xưởng tham chiếu — không phải bản demo trên slide.</li>
+      <li><b>Triển khai 4–6 tuần</b>: lõi có sẵn, tuỳ biến NVL / template đơn / trạm / hãng vận chuyển theo xưởng của bạn.</li>
+      <li><b>Dữ liệu là của bạn</b>: cài trên server của bạn hoặc cloud riêng; xuất dữ liệu bất cứ lúc nào.</li>
+      <li><b>Nhân viên xưởng dùng trên điện thoại</b> (cài như app), đào tạo 1 buổi / trạm.</li>
+      <li>Kiến trúc mở (REST API có tài liệu) để nối sàn TMĐT, kế toán, hãng vận chuyển khác.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="cta">
+  <div>
+    <div class="t">Đặt lịch demo 30 phút — bằng chính file đơn của bạn</div>
+    <div class="small muted">Mang file đơn hiện tại, chúng tôi import và chạy hết luồng ngay trong buổi gặp.</div>
+  </div>
+  <div class="small" style="text-align:right">
+    <span class="ph">[Tên người liên hệ]</span><br>
+    <span class="ph">[SĐT / Zalo]</span> · <span class="ph">[Email]</span><br>
+    <span class="ph">[Website / Công ty]</span>
+  </div>
+</div>
+</body></html>

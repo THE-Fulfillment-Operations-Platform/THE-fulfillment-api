@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><title>10 · FAQ & xử lý phản đối</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+  .obj { border:1px solid var(--line); border-radius:6pt; margin:0 0 8pt; page-break-inside:avoid; }
+  .obj .q { background:var(--bg); padding:5pt 9pt; font-weight:700; color:var(--navy); border-bottom:1px solid var(--line); }
+  .obj .b { padding:6pt 9pt; }
+  .obj .b p { margin-bottom:4pt; }
+  .lbl { font-weight:600; color:var(--gray); font-size:8.5pt; text-transform:uppercase; letter-spacing:.3pt; }
+</style></head>
+<body>
+<div class="doc-header">
+  <div>
+    <div class="brand">FFM OPS <span>· Nền tảng vận hành xưởng fulfillment</span></div>
+    <div class="doc-title">10 · FAQ &amp; xử lý phản đối</div>
+  </div>
+  <div class="meta">Nội bộ sales · v0.1 · 08/2026</div>
+</div>
+
+<p>Mỗi phản đối có ba phần: <b>khách nói gì</b>, <b>họ thực sự lo gì</b>, và <b>trả lời thế nào</b> kèm bằng chứng. Nguyên tắc chung: không tranh cãi, không chê công cụ cũ, <b>hỏi lại để khách tự mô tả nỗi đau</b>, rồi mới trả lời. Câu nào gặp mà chưa có ở đây → thêm vào sau buổi gặp.</p>
+
+<h2>A. Về nhu cầu</h2>
+<div class="obj"><div class="q">1. “Xưởng tôi dùng Excel + Zalo vẫn ổn mà.”</div><div class="b">
+<p><span class="lbl">Lo thật</span> Sợ đổi cách làm, sợ nhân viên phản đối, chưa thấy mất tiền ở đâu.</p>
+<p><span class="lbl">Trả lời</span> “Ổn là đúng ở quy mô hiện tại. Anh/chị cho tôi hỏi: hôm qua muốn biết đơn X đã cắt chưa thì làm thế nào? Mất bao lâu?” — để khách tự kể. Rồi: “Excel không sai. Nó chỉ không biết đơn đang ở trạm nào và ai đang cầm. Khi tăng gấp đôi sản lượng, Excel cần thêm người; hệ thống thì không.”</p>
+<p><span class="lbl">Bằng chứng</span> Case study (03) — số giờ nhập đơn trước/sau.</p></div></div>
+
+<div class="obj"><div class="q">2. “Sao không dùng ERP / Odoo / phần mềm quản lý sản xuất có sẵn?”</div><div class="b">
+<p><span class="lbl">Lo thật</span> Sợ mua phần mềm nhỏ, sau này phải đổi; muốn thứ “chuẩn”.</p>
+<p><span class="lbl">Trả lời</span> “ERP tổng quát làm được mọi thứ ở mức 60%, và cần 6–12 tháng cấu hình để làm được việc gom batch theo tấm mica hay QC quét tem đối chiếu mockup. FFM Ops sinh ra từ đúng loại xưởng này — cổng seller, rổ NVL, huỷ đơn theo giai đoạn đều là thứ ERP không có sẵn. Nếu sau này cần kế toán, chúng tôi nối qua API.”</p>
+<p><span class="lbl">Bằng chứng</span> Sơ đồ quy trình (05), danh mục tính năng (06).</p></div></div>
+
+<div class="obj"><div class="q">3. “Quy trình xưởng tôi khác — không có bước duyệt / không có seller ngoài / có thêm bước sơn.”</div><div class="b">
+<p><span class="lbl">Lo thật</span> Sợ bị ép theo phần mềm.</p>
+<p><span class="lbl">Trả lời</span> “Đúng, mỗi xưởng khác nhau. Lõi có 9 bước; bước nào không dùng thì tắt, bước nào thiếu thì thêm — thêm một trạm là 2–5 ngày công. Xưởng tham chiếu cũng yêu cầu 6 thay đổi trong quá trình dùng, đều được đưa vào trong vài ngày.”</p>
+<p><span class="lbl">Bằng chứng</span> Mục “Đã xây theo yêu cầu thực tế” trong case study (03); bảng tuỳ biến trong bảng giá (07).</p></div></div>
+
+<div class="obj"><div class="q">4. “Nhân viên xưởng lớn tuổi / không rành công nghệ, có dùng được không?”</div><div class="b">
+<p><span class="lbl">Lo thật</span> Sợ mua về không ai dùng.</p>
+<p><span class="lbl">Trả lời</span> “Ở trạm, nhân viên chỉ làm một việc: quét tem rồi bấm Đạt / Không đạt. Không gõ chữ, không chọn menu. Anh/chị cho tôi đưa điện thoại cho chính người lo nhất trong xưởng quét thử.” — làm ngay trong demo.</p>
+<p><span class="lbl">Bằng chứng</span> Kịch bản demo (04) phút 20–24; PWA cài như app.</p></div></div>
+
+<div class="obj"><div class="q">5. “Seller của tôi có chịu upload đơn qua cổng không?”</div><div class="b">
+<p><span class="lbl">Lo thật</span> Sợ mất seller vì làm khó họ.</p>
+<p><span class="lbl">Trả lời</span> “Seller không phải đổi file — chúng tôi map template họ đang dùng. Đổi lại họ được thứ họ hỏi mỗi ngày: trạng thái đơn và mã vận đơn, không cần nhắn. Với seller nhất quyết không upload, Ops vẫn import hộ như cũ — chỉ là ít dần.”</p>
+<p><span class="lbl">Bằng chứng</span> Tính năng nhận template riêng; số seller đang dùng cổng ở xưởng tham chiếu.</p></div></div>
+
+<h2>B. Về rủi ro &amp; dữ liệu</h2>
+<div class="obj"><div class="q">6. “Dữ liệu đơn hàng, danh sách seller của tôi nằm ở đâu? Có bị lộ không?”</div><div class="b">
+<p><span class="lbl">Lo thật</span> Sợ đối thủ hoặc chính nhà cung cấp dùng dữ liệu.</p>
+<p><span class="lbl">Trả lời</span> “Mỗi khách một hệ thống riêng, không dùng chung cơ sở dữ liệu với ai. Dữ liệu là của anh/chị — xuất Excel hoặc bản sao toàn bộ bất cứ lúc nào; muốn thì cài trên máy chủ của anh/chị. Chúng tôi ký cam kết bảo mật trong hợp đồng.”</p>
+<p><span class="lbl">Bằng chứng</span> Tổng quan kỹ thuật (09) mục 5 và 7; SLA (12).</p></div></div>
+
+<div class="obj"><div class="q">7. “Nếu công ty các anh không làm nữa thì sao? Tôi bị kẹt.”</div><div class="b">
+<p><span class="lbl">Lo thật</span> Rủi ro phụ thuộc nhà cung cấp nhỏ.</p>
+<p><span class="lbl">Trả lời</span> “Câu hỏi đúng. Ba lớp bảo vệ: (1) dữ liệu luôn xuất được, định dạng chuẩn PostgreSQL; (2) hệ thống dùng công nghệ phổ biến — Go, PostgreSQL, Vue — kỹ sư nào cũng tiếp quản được; (3) nếu anh/chị cần, có điều khoản ký quỹ mã nguồn (escrow): chúng tôi ngừng hỗ trợ thì anh/chị nhận mã nguồn.”</p>
+<p><span class="lbl">Bằng chứng</span> Tổng quan kỹ thuật (09); tuỳ chọn escrow trong bảng giá (07).</p></div></div>
+
+<div class="obj"><div class="q">8. “Mất mạng thì xưởng đứng à?”</div><div class="b">
+<p><span class="lbl">Trả lời</span> “Trạm QC và đóng gói cần mạng để quét — như mọi hệ thống. Thực tế xưởng tham chiếu dùng 4G dự phòng, chưa dừng ngày nào vì mạng. Nếu xưởng hay mất Internet, có phương án cài máy chủ tại xưởng chạy mạng nội bộ.”</p></div></div>
+
+<div class="obj"><div class="q">9. “Import sai dữ liệu thì ai chịu?”</div><div class="b">
+<p><span class="lbl">Trả lời</span> “Hệ thống không cho sai lọt vào: xem trước từng dòng, báo trùng, báo SKU chưa cấu hình, phải bấm xác nhận mới ghi. Sai vẫn có thể sửa / huỷ trước khi sản xuất, có nhật ký ai làm. Chúng tôi chịu trách nhiệm lỗi phần mềm; dữ liệu đầu vào là của người nhập — giống mọi phần mềm.”</p></div></div>
+
+<h2>C. Về giá &amp; triển khai</h2>
+<div class="obj"><div class="q">10. “Đắt quá. Chỗ khác báo rẻ hơn / tôi thuê sinh viên viết.”</div><div class="b">
+<p><span class="lbl">Lo thật</span> Chưa thấy giá trị tương xứng, hoặc đang thử ép.</p>
+<p><span class="lbl">Trả lời</span> “So sánh đúng là với việc xây từ đầu: 4–6 tháng, 200–500 triệu, và chưa chắc chạy. Anh/chị đang mua thứ đã chạy thật ở một xưởng giống mình, triển khai trong 6 tuần. Nếu ngân sách có hạn, ta giảm phạm vi — bỏ tuỳ biến, bắt đầu với gói Starter — chứ tôi không giảm chất lượng hỗ trợ.”</p>
+<p><span class="lbl">Nội bộ</span> Giảm phạm vi, không giảm đơn giá (07 – phần B3). Không bao giờ nói xấu đối thủ.</p></div></div>
+
+<div class="obj"><div class="q">11. “Bao lâu thì dùng được? Tôi đang vào mùa.”</div><div class="b">
+<p><span class="lbl">Trả lời</span> “Gói chuẩn 4–6 tuần, trong đó tuần 5 đã chạy thật song song. Nếu đang vào mùa, tôi khuyên triển khai ngay sau đỉnh — đổi cách làm giữa mùa rủi ro cho cả hai bên. Tuần 1 khảo sát có thể làm ngay để sẵn sàng.”</p></div></div>
+
+<div class="obj"><div class="q">12. “Tôi có 2 xưởng / nhiều chi nhánh.”</div><div class="b">
+<p><span class="lbl">Trả lời</span> “Hiện mỗi xưởng một hệ thống riêng — vận hành độc lập, đơn giản. Muốn nhìn chung một chỗ thì đó là hạng mục tuỳ biến mức cao, làm sau khi xưởng đầu ổn định.” — Không hứa đa xưởng trong gói chuẩn.</p></div></div>
+
+<div class="obj"><div class="q">13. “Có kết nối Shopee / TikTok / GHTK / GHN không?”</div><div class="b">
+<p><span class="lbl">Trả lời</span> “Hiện đơn vào bằng file Excel — xuất từ sàn rồi upload, mất 1 phút. Kết nối tự động là hạng mục tích hợp riêng: 10–20 ngày công cho một sàn, 5–10 cho một hãng vận chuyển, phụ thuộc sàn duyệt tài khoản. Tôi ghi vào phạm vi giai đoạn 2.”</p>
+<p><span class="lbl">Nội bộ</span> Ghi vào đề xuất mục “ngoài phạm vi”. Không hứa thời gian tại chỗ.</p></div></div>
+
+<div class="obj"><div class="q">14. “Có app điện thoại không?”</div><div class="b">
+<p><span class="lbl">Trả lời</span> “Có — cài từ trình duyệt lên màn hình chính, chạy như app, quét QR bằng camera. Không phải lên App Store nên cập nhật tức thì, không chờ duyệt.”</p></div></div>
+
+<div class="obj"><div class="q">15. “Cho tôi dùng thử miễn phí 3 tháng.”</div><div class="b">
+<p><span class="lbl">Trả lời</span> “Dùng thử không có dữ liệu thật thì không thấy giá trị; có dữ liệu thật thì cần cấu hình — tức là triển khai. Thay vào đó: demo bằng chính file đơn của anh/chị, và bảo hành 3 tháng sau go-live. Nếu tuần 5 chạy song song mà không đạt tiêu chí nghiệm thu, anh/chị không trả 60% còn lại.”</p></div></div>
+
+<h2>D. Câu hỏi nên hỏi khách ở buổi đầu</h2>
+<table>
+<thead><tr><th class="w25">Mục đích</th><th class="w75">Câu hỏi</th></tr></thead>
+<tbody>
+<tr><td>Nỗi đau</td><td>Hôm qua muốn biết một đơn đã cắt chưa, anh/chị làm thế nào? Lần gần nhất giao sai mẫu là khi nào, tốn bao nhiêu?</td></tr>
+<tr><td>Quy mô</td><td>Bao nhiêu đơn/ngày, đỉnh mùa? Bao nhiêu seller, bao nhiêu SKU, bao nhiêu loại NVL?</td></tr>
+<tr><td>Ngân sách</td><td>Năm nay xưởng có dành ngân sách cho hệ thống chưa? Khoảng nào là hợp lý với anh/chị?</td></tr>
+<tr><td>Người quyết định</td><td>Ngoài anh/chị, ai cần đồng ý? Ai sẽ là đầu mối làm việc hàng ngày?</td></tr>
+<tr><td>Thời điểm</td><td>Khi nào là lúc tệ nhất để đổi cách làm? Khi nào là lúc tốt nhất?</td></tr>
+<tr><td>Tiêu chí</td><td>Sau 3 tháng dùng, điều gì xảy ra thì anh/chị coi là đáng tiền?</td></tr>
+</tbody></table>
+
+<h2>E. Dấu hiệu khách không phù hợp — đừng tốn thời gian</h2>
+<ul>
+  <li>Dưới <span class="ph">[30]</span> đơn/ngày và không có kế hoạch tăng — Excel vẫn đủ, nói thật với họ.</li>
+  <li>Không có bước gom theo vật liệu / không sản xuất theo đơn (ví dụ bán hàng có sẵn) — bài toán khác, cần phần mềm khác.</li>
+  <li>Muốn sở hữu toàn bộ mã nguồn với giá gói triển khai.</li>
+  <li>Không cử được người đầu mối; chủ xưởng không tham gia buổi khảo sát.</li>
+  <li>Đòi dùng thử miễn phí dài hạn trước khi nói chuyện phạm vi.</li>
+</ul>
+</body></html>

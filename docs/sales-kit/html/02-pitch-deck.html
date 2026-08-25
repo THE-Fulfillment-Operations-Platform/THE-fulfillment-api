@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><title>02 · Pitch Deck</title>
+<link rel="stylesheet" href="deck.css">
+</head>
+<body>
+
+<!-- 1. Cover -->
+<div class="slide dark">
+  <div class="body" style="display:flex;flex-direction:column;justify-content:center">
+    <div class="kicker">FFM Ops · Nền tảng vận hành xưởng fulfillment</div>
+    <h1 style="font-size:40pt">Vận hành xưởng fulfillment<br>không sót một đơn</h1>
+    <p class="big" style="font-weight:400;max-width:200mm">Quản lý đơn hàng &amp; sản xuất cho xưởng in / cắt theo nguyên vật liệu — từ file đơn của seller đến mã vận đơn.</p>
+    <p class="muted" style="margin-top:24pt"><span class="ph">[Tên công ty]</span> · <span class="ph">[Người trình bày]</span> · <span class="ph">[Ngày]</span></p>
+  </div>
+  <div class="foot"><span>FFM Ops</span><span>1</span></div>
+</div>
+
+<!-- 2. Pain -->
+<div class="slide">
+  <div class="kicker">Vấn đề</div>
+  <h2>Một ngày ở xưởng fulfillment hôm nay</h2>
+  <div class="body grid2">
+    <div class="card pain"><h3>Đơn về từ khắp nơi</h3><p>Mỗi seller một file Excel, một nhóm Zalo. Nhân viên gõ lại, ghép lại. Trùng đơn, sót đơn, nhầm mẫu.</p></div>
+    <div class="card pain"><h3>Không ai biết đơn đang ở đâu</h3><p>Đã in chưa? Đã cắt chưa? Ai đang cầm? Tìm một đơn phải hỏi ba người, mất mười phút.</p></div>
+    <div class="card pain"><h3>QC bằng mắt, sai lọt ra ngoài</h3><p>Không có mockup bên cạnh khi kiểm. Hàng sai mẫu chỉ phát hiện khi khách nhận — tốn tiền làm lại và mất seller.</p></div>
+    <div class="card pain"><h3>Seller hỏi cả ngày, huỷ đơn không ai tính</h3><p>“Đơn tôi đâu?” lặp lại hàng chục lần mỗi ngày. Seller huỷ khi đã cắt xong — ai chịu tiền vật liệu?</p></div>
+  </div>
+  <div class="foot"><span>FFM Ops · Pitch deck</span><span>2</span></div>
+</div>
+
+<!-- 3. Cost -->
+<div class="slide">
+  <div class="kicker">Cái giá của vận hành thủ công</div>
+  <h2>Những con số xưởng đang trả mà không thấy trên hoá đơn</h2>
+  <div class="body">
+    <div class="grid4" style="margin-bottom:18pt">
+      <div class="kpi"><div class="n"><span class="ph">[__]</span></div><div class="l">giờ / ngày gõ lại &amp; đối chiếu đơn</div></div>
+      <div class="kpi"><div class="n"><span class="ph">[__]%</span></div><div class="l">sản phẩm làm lại vì sai mẫu / sai NVL</div></div>
+      <div class="kpi"><div class="n"><span class="ph">[__]</span></div><div class="l">tin nhắn “đơn tôi đâu” mỗi ngày</div></div>
+      <div class="kpi"><div class="n"><span class="ph">[__] tr</span></div><div class="l">VNĐ / tháng vật liệu cho đơn huỷ muộn</div></div>
+    </div>
+    <p class="big">Sản lượng tăng 2 lần thì số người vận hành cũng phải tăng 2 lần — trừ khi hệ thống biết đơn đang ở đâu thay cho con người.</p>
+    <p class="muted small">Điền số từ khảo sát xưởng của khách (tài liệu 11) hoặc số trung bình từ xưởng tham chiếu (tài liệu 03).</p>
+  </div>
+  <div class="foot"><span>FFM Ops · Pitch deck</span><span>3</span></div>
+</div>
+
+<!-- 4. Solution flow -->
+<div class="slide">
+  <div class="kicker">Giải pháp</div>
+  <h2>Một luồng xuyên suốt — mỗi trạm một màn hình, mỗi sản phẩm một tem QR</h2>
+  <div class="body">
+    <div class="flow">
+      <div class="step seller"><b>Seller</b>Upload đơn theo template</div><div class="arrow">›</div>
+      <div class="step ops"><b>Duyệt</b>Duyệt · sửa · từ chối</div><div class="arrow">›</div>
+      <div class="step ops"><b>Thiết kế</b>Mockup, asset 2 mặt</div><div class="arrow">›</div>
+      <div class="step ops"><b>Gom batch</b>Theo NVL &amp; hạn mức</div><div class="arrow">›</div>
+      <div class="step prod"><b>In → Cắt</b>File in/cắt, tem QR</div><div class="arrow">›</div>
+      <div class="step prod"><b>QC</b>Quét QR, đối chiếu mockup</div><div class="arrow">›</div>
+      <div class="step ship"><b>Đóng gói</b>Quét gói theo đơn</div><div class="arrow">›</div>
+      <div class="step ship"><b>Bàn giao</b>Quét là gửi, tracking</div>
+    </div>
+    <div class="grid3" style="margin-top:16pt">
+      <div class="card gain"><h3>Không gõ lại</h3><p>Seller tự upload; hệ thống chặn trùng, báo SKU chưa cấu hình ngay lúc xem trước.</p></div>
+      <div class="card gain"><h3>Không hỏi nhau</h3><p>Đơn ở trạm nào, ai làm, từ lúc nào — nhìn là thấy. Seller tự xem, không cần nhắn.</p></div>
+      <div class="card gain"><h3>Không lọt hàng sai</h3><p>QC quét QR, mockup hiện ngay trên điện thoại. Mỗi sản phẩm kiểm một lần, kết quả lưu lại.</p></div>
+    </div>
+  </div>
+  <div class="foot"><span>FFM Ops · Pitch deck</span><span>4</span></div>
+</div>
+
+<!-- 5. Seller portal -->
+<div class="slide">
+  <div class="kicker">Phân hệ 1</div>
+  <h2>Cổng seller: seller tự phục vụ, xưởng bớt việc</h2>
+  <div class="body grid2">
+    <div>
+      <ul>
+        <li><b>Upload đơn theo template</b> — xem trước, sửa lỗi, xác nhận. Tự gắn đúng seller.</li>
+        <li><b>Chỉ thấy 5 trạng thái tổng</b>: Đang sản xuất → Đã đóng gói → Đã bàn giao → Đã gửi → Đã giao. Không lộ nhịp in/cắt nội bộ.</li>
+        <li><b>Hành trình vận đơn</b> hiện ngay trong đơn — hết “đơn tôi đâu”.</li>
+        <li><b>Sửa đơn</b> khi còn chờ duyệt; <b>huỷ ngay</b> nếu chưa sản xuất; <b>gửi yêu cầu huỷ</b> nếu đã sản xuất.</li>
+        <li>Import lại đơn bị từ chối / cần sửa — đơn cũ hồi sinh, giữ mã.</li>
+      </ul>
+    </div>
+    <div>
+      <div class="screen" style="height:100%"><b>[Ảnh màn hình: Cổng seller – danh sách đơn &amp; hành trình vận đơn]</b>Chụp từ môi trường demo sau khi đổi brand</div>
+    </div>
+  </div>
+  <div class="foot"><span>FFM Ops · Pitch deck</span><span>5</span></div>
+</div>
+
+<!-- 6. Office -->
+<div class="slide">
+  <div class="kicker">Phân hệ 2</div>
+  <h2>Văn phòng: duyệt → thiết kế → gom batch theo nguyên vật liệu</h2>
+  <div class="body grid2">
+    <div>
+      <ul>
+        <li><b>Duyệt đơn</b> lẻ hoặc hàng loạt; yêu cầu sửa kèm lý do; từ chối.</li>
+        <li><b>Hàng chờ thiết kế</b>: chưa làm / đang làm / sẵn sàng / thiếu asset. Thiết kế 2 mặt, tải trọn bộ asset.</li>
+        <li><b>Rổ NVL</b>: sản phẩm sẵn sàng tự gom theo vật liệu; tạo batch theo <b>hạn mức máy</b> (bao nhiêu sản phẩm / tấm).</li>
+        <li>STT trong ngày, mã nội bộ kiểu xưởng, link file in/cắt, <b>bảng sản xuất .xlsx</b>, tem QR.</li>
+        <li>Danh mục SKU–NVL import từ bảng vận hành cũ — không phải nhập lại từ đầu.</li>
+      </ul>
+    </div>
+    <div>
+      <div class="screen" style="height:100%"><b>[Ảnh màn hình: Rổ NVL &amp; tạo batch]</b>Chụp từ môi trường demo</div>
+    </div>
+  </div>
+  <div class="foot"><span>FFM Ops · Pitch deck</span><span>6</span></div>
+</div>
+
+<!-- 7. Factory -->
+<div class="slide">
+  <div class="kicker">Phân hệ 3</div>
+  <h2>Xưởng: in → cắt → QC bằng điện thoại</h2>
+  <div class="body grid2">
+    <div>
+      <ul>
+        <li><b>Bảng sản xuất theo batch</b>; chuyển Đã in → Đã cắt một chạm.</li>
+        <li>Trạng thái <b>chỉ tiến không lùi</b>; chỉ chủ xưởng được đảo ngược. Sản phẩm đã QC được khoá.</li>
+        <li><b>QC quét QR</b> bằng camera điện thoại: mockup + mô tả NVL hiện ngay để đối chiếu. Pass / Fail kèm ghi chú.</li>
+        <li>Mỗi sản phẩm QC <b>một lần duy nhất</b>; batch tự lên “Đã QC” khi mọi sản phẩm đạt.</li>
+        <li>Cài như app trên điện thoại, không cần máy quét chuyên dụng, không cần máy tính ở trạm.</li>
+      </ul>
+    </div>
+    <div>
+      <div class="screen" style="height:100%"><b>[Ảnh màn hình: QC quét QR trên điện thoại]</b>Chụp từ môi trường demo</div>
+    </div>
+  </div>
+  <div class="foot"><span>FFM Ops · Pitch deck</span><span>7</span></div>
+</div>
+
+<!-- 8. Ship -->
+<div class="slide">
+  <div class="kicker">Phân hệ 4</div>
+  <h2>Đóng gói → bàn giao → vận đơn tự đồng bộ</h2>
+  <div class="body grid2">
+    <div>
+      <ul>
+        <li><b>Quét đóng gói</b>: hệ thống báo đơn đã đủ hàng chưa (đơn nhiều sản phẩm, nằm ở nhiều batch).</li>
+        <li><b>Quét là gửi</b>: một lần quét, gói chuyển sang đã bàn giao. Có bàn giao hàng loạt.</li>
+        <li><b>Phiếu bàn giao</b> cho đơn vị vận chuyển; đánh dấu đã gửi.</li>
+        <li>CS gắn mã vận đơn lẻ hoặc <b>hàng loạt từ Excel</b> của hãng.</li>
+        <li><b>Tracking tự đồng bộ</b> theo lịch từ nhà cung cấp; tự lên “Đã giao”; ai mở đơn cũng thấy kiện hàng ở đâu.</li>
+      </ul>
+    </div>
+    <div>
+      <div class="screen" style="height:100%"><b>[Ảnh màn hình: Hàng chờ gửi &amp; hành trình vận đơn]</b>Chụp từ môi trường demo</div>
+    </div>
+  </div>
+  <div class="foot"><span>FFM Ops · Pitch deck</span><span>8</span></div>
+</div>
+
+<!-- 9. Control -->
+<div class="slide">
+  <div class="kicker">Kiểm soát</div>
+  <h2>Ai được làm gì, ai đã làm gì, huỷ đơn thì ai trả tiền</h2>
+  <div class="body grid3">
+    <div class="card"><h3>10 vai trò theo trạm</h3><p>Chủ xưởng · Quản trị · Điều phối · Thiết kế · Sản xuất · QC · Đóng gói · Vận chuyển · CS · Seller.</p><p>Phân quyền kiểm tra ở tầng API, không chỉ ẩn nút. CS tra đơn nhưng không vào sản xuất; seller không thấy nội bộ.</p></div>
+    <div class="card"><h3>Nhật ký mọi thao tác</h3><p>Ai duyệt, ai đổi trạng thái, ai QC, lúc nào — lưu theo đơn, batch, gói, phiếu bàn giao.</p><p>Ghi chú “cần chú ý” theo mức độ Thấp → Nghiêm trọng, có badge đếm việc.</p></div>
+    <div class="card"><h3>Chính sách huỷ theo giai đoạn</h3><p><b>Chưa sản xuất</b>: seller huỷ ngay, miễn phí.</p><p><b>Đã vào sản xuất</b>: phải gửi yêu cầu, Ops duyệt, <b>tính phí</b> — vì vật liệu và giờ máy đã tiêu.</p><p>Áp dụng cho cả đơn lẫn từng sản phẩm.</p></div>
+  </div>
+  <div class="foot"><span>FFM Ops · Pitch deck</span><span>9</span></div>
+</div>
+
+<!-- 10. Proof -->
+<div class="slide">
+  <div class="kicker">Đã chạy thật</div>
+  <h2>Xưởng tham chiếu: <span class="ph">[Tên xưởng]</span></h2>
+  <div class="body">
+    <div class="grid4" style="margin-bottom:16pt">
+      <div class="kpi"><div class="n"><span class="ph">[__]</span></div><div class="l">đơn / ngày</div></div>
+      <div class="kpi"><div class="n"><span class="ph">[__]</span></div><div class="l">seller đang dùng cổng</div></div>
+      <div class="kpi"><div class="n"><span class="ph">[__]%</span></div><div class="l">giảm hàng sai lọt ra ngoài</div></div>
+      <div class="kpi"><div class="n"><span class="ph">[__] tuần</span></div><div class="l">từ ký đến vận hành thật</div></div>
+    </div>
+    <div class="grid2">
+      <div class="card"><h3>Đã xây theo yêu cầu thực tế của xưởng</h3><ul class="small"><li>Nhận template đơn riêng của khách, không đổi lõi</li><li>Quét là gửi tại bàn đóng gói</li><li>Gắn mã vận đơn hàng loạt từ Excel của hãng</li><li>Vai trò CS tách khỏi sản xuất</li><li>Chính sách huỷ theo giai đoạn, tính phí khi đã sản xuất</li></ul></div>
+      <div class="card"><h3>Khách nói gì</h3><p style="font-style:italic">“<span class="ph">[Trích dẫn 1–2 câu của chủ xưởng / trưởng ca về thay đổi rõ nhất sau khi dùng]</span>”</p><p class="muted small">— <span class="ph">[Tên, chức vụ, xưởng]</span></p></div>
+    </div>
+  </div>
+  <div class="foot"><span>FFM Ops · Pitch deck</span><span>10</span></div>
+</div>
+
+<!-- 11. Rollout -->
+<div class="slide">
+  <div class="kicker">Triển khai</div>
+  <h2>4–6 tuần từ khảo sát đến vận hành thật</h2>
+  <div class="body">
+    <div class="timeline">
+      <div class="wk"><b>Tuần 1</b>Khảo sát quy trình, NVL, template đơn. Chốt phạm vi tuỳ biến.</div>
+      <div class="wk"><b>Tuần 2</b>Cài đặt, import danh mục SKU–NVL, hạn mức. Cấu hình vận chuyển.</div>
+      <div class="wk"><b>Tuần 3</b>Tuỳ biến theo phạm vi đã chốt (template, trạm, tem).</div>
+      <div class="wk"><b>Tuần 4</b>Chạy thử với đơn thật (UAT). Đào tạo từng trạm, 1 buổi / trạm.</div>
+      <div class="wk"><b>Tuần 5</b>Chạy song song với cách cũ. Sửa nhanh phát sinh.</div>
+      <div class="wk"><b>Tuần 6</b>Cắt chuyển hoàn toàn. Bàn giao tài liệu, bắt đầu bảo hành.</div>
+    </div>
+    <div class="grid2" style="margin-top:18pt">
+      <div class="card"><h3>Chúng tôi làm</h3><p>Cài đặt, cấu hình, tuỳ biến, đào tạo, hỗ trợ go-live, tài liệu hướng dẫn theo vai trò.</p></div>
+      <div class="card"><h3>Xưởng chuẩn bị</h3><p>Một người đầu mối; bảng SKU–NVL hiện tại; file đơn mẫu của seller; điện thoại cho trạm QC / đóng gói; máy in tem.</p></div>
+    </div>
+  </div>
+  <div class="foot"><span>FFM Ops · Pitch deck</span><span>11</span></div>
+</div>
+
+<!-- 12. Pricing -->
+<div class="slide">
+  <div class="kicker">Gói &amp; chi phí</div>
+  <h2>Chọn theo quy mô xưởng — lõi giống nhau, khác ở phạm vi tuỳ biến và mức hỗ trợ</h2>
+  <div class="body">
+    <table>
+      <thead><tr><th style="width:22%"></th><th>Starter</th><th>Standard</th><th>Custom</th></tr></thead>
+      <tbody>
+        <tr><td><b>Phù hợp</b></td><td>Xưởng 1 địa điểm, đơn nội bộ, ít seller</td><td>Xưởng có seller ngoài, cần cổng seller &amp; tracking</td><td>Quy trình đặc thù, tích hợp sàn / hãng vận chuyển / kế toán</td></tr>
+        <tr><td><b>Bao gồm</b></td><td>Lõi vận hành: import, duyệt, thiết kế, batch, sản xuất, QC, đóng gói</td><td>Starter + cổng seller, bàn giao, tracking tự động, CS, chính sách huỷ</td><td>Standard + tuỳ biến theo khảo sát, tích hợp theo yêu cầu</td></tr>
+        <tr><td><b>Triển khai một lần</b></td><td><span class="ph">[__] tr</span></td><td><span class="ph">[__] tr</span></td><td>Theo phạm vi (báo giá sau khảo sát)</td></tr>
+        <tr><td><b>Vận hành / tháng</b></td><td><span class="ph">[__] tr</span> (hosting + bảo trì)</td><td><span class="ph">[__] tr</span></td><td><span class="ph">[__] tr</span></td></tr>
+        <tr><td><b>Hỗ trợ</b></td><td>Giờ hành chính, email / Zalo</td><td>Giờ hành chính + sự cố khẩn ngoài giờ</td><td>SLA riêng</td></tr>
+      </tbody>
+    </table>
+    <p class="muted small" style="margin-top:8pt">Chi tiết cấu phần giá, điều khoản thanh toán và hạng mục tuỳ biến: xem tài liệu 07 – Bảng giá &amp; gói dịch vụ.</p>
+  </div>
+  <div class="foot"><span>FFM Ops · Pitch deck</span><span>12</span></div>
+</div>
+
+<!-- 13. Next -->
+<div class="slide dark">
+  <div class="kicker">Bước tiếp theo</div>
+  <h2>Ba bước để biết FFM Ops có hợp với xưởng của bạn</h2>
+  <div class="body grid3">
+    <div class="card"><h3>1. Khảo sát 60 phút</h3><p>Chúng tôi đến xưởng, đi một vòng theo luồng đơn, hỏi 30 câu. Miễn phí.</p></div>
+    <div class="card"><h3>2. Demo bằng file đơn của bạn</h3><p>Import chính file seller của bạn, chạy hết luồng tới bàn giao ngay trên môi trường demo.</p></div>
+    <div class="card"><h3>3. Đề xuất &amp; báo giá trong 5 ngày</h3><p>Phạm vi, lộ trình, chi phí — rõ ràng trước khi ký.</p></div>
+  </div>
+  <p class="big" style="margin-top:12pt"><span class="ph">[Tên người liên hệ]</span> · <span class="ph">[SĐT / Zalo]</span> · <span class="ph">[Email]</span></p>
+  <div class="foot"><span>FFM Ops · Pitch deck</span><span>13</span></div>
+</div>
+
+</body></html>

@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><title>09 · Tổng quan kỹ thuật & bảo mật</title>
+<link rel="stylesheet" href="kit.css">
+<style>
+  .arch { display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:8pt; align-items:stretch; margin:8pt 0; }
+  .arch .box { border:1px solid var(--line); border-radius:6pt; padding:8pt; text-align:center; font-size:9pt; background:#fff; }
+  .arch .box b { display:block; color:var(--navy); font-size:10pt; margin-bottom:2pt; }
+  .arch .client { background:#fff7ea; border-color:#f5d08a; }
+  .arch .web { background:#eef3fb; border-color:#b9cdf0; }
+  .arch .api { background:#eef8f6; border-color:#a9dcd3; }
+  .arch .db { background:#f3f0fb; border-color:#c9bfee; }
+  .arch .ext { background:#f5f5f5; border-style:dashed; }
+  code { font-family:Consolas,monospace; font-size:9pt; background:#f3f4f6; padding:0 3pt; border-radius:2pt; }
+</style></head>
+<body>
+<div class="doc-header">
+  <div>
+    <div class="brand">FFM OPS <span>· Nền tảng vận hành xưởng fulfillment</span></div>
+    <div class="doc-title">09 · Tổng quan kỹ thuật &amp; bảo mật</div>
+  </div>
+  <div class="meta">Gửi bộ phận IT của khách · v0.1 · 08/2026</div>
+</div>
+
+<p>Tài liệu dành cho người phụ trách kỹ thuật phía khách hàng: hệ thống được xây bằng gì, chạy ở đâu, bảo vệ dữ liệu ra sao, cần hạ tầng gì. Không đi vào chi tiết mã nguồn; tài liệu API đầy đủ có sẵn trên hệ thống (OpenAPI / Swagger).</p>
+
+<h2>1. Kiến trúc</h2>
+<div class="arch">
+  <div class="box client"><b>Người dùng</b>Trình duyệt trên PC<br>Điện thoại iOS / Android (cài như app – PWA)<br>Camera quét QR</div>
+  <div class="box web"><b>Ứng dụng web</b>Nuxt 3 (Vue 3)<br>Giao diện theo vai trò<br>Tiếng Việt</div>
+  <div class="box api"><b>API</b>Go + Gin<br>Xác thực JWT, phân quyền theo vai trò<br>Nghiệp vụ, máy trạng thái, import/xuất Excel</div>
+  <div class="box db"><b>Cơ sở dữ liệu</b>PostgreSQL 13+<br>19 nhóm bảng<br>Xoá mềm, lịch sử trạng thái, nhật ký</div>
+</div>
+<div class="arch" style="grid-template-columns:1fr 1fr 1fr">
+  <div class="box ext"><b>Nhà cung cấp tracking</b>Đồng bộ hành trình vận đơn theo lịch (đang dùng 24hTrack; thay được)</div>
+  <div class="box ext"><b>Hãng vận chuyển</b>Adapter <code>shipping.Carrier</code> — tích hợp tạo vận đơn / in tem khi cần</div>
+  <div class="box ext"><b>File Excel / CSV</b>Import đơn, danh mục, hạn mức, vận đơn; xuất bảng sản xuất, template</div>
+</div>
+<p>Tách lớp rõ: <b>handler → service → repository</b>. Nghiệp vụ nằm trong service, không nằm ở giao diện — nên mọi kiểm tra (phân quyền, chuyển trạng thái, chính sách huỷ) áp dụng cả khi gọi qua API.</p>
+
+<h2>2. Công nghệ</h2>
+<table>
+<thead><tr><th class="w25">Thành phần</th><th class="w35">Công nghệ</th><th class="w40">Vì sao</th></tr></thead>
+<tbody>
+<tr><td>Backend / API</td><td>Go 1.24+, Gin, GORM</td><td>Hiệu năng cao, một file thực thi, ít phụ thuộc, dễ vận hành trên VPS nhỏ</td></tr>
+<tr><td>Cơ sở dữ liệu</td><td>PostgreSQL 13+</td><td>Mã nguồn mở, ổn định, sao lưu / phục hồi chuẩn, không phí license</td></tr>
+<tr><td>Giao diện</td><td>Nuxt 3 (Vue 3), PWA</td><td>Một mã nguồn cho PC và điện thoại; cài lên màn hình chính, quét QR bằng camera</td></tr>
+<tr><td>Xác thực</td><td>JWT có hạn, mật khẩu băm bcrypt</td><td>Chuẩn phổ biến, không lưu mật khẩu dạng đọc được</td></tr>
+<tr><td>Excel</td><td>excelize (.xlsx)</td><td>Import / xuất đúng định dạng Excel, không lỗi font, không phụ thuộc Office</td></tr>
+<tr><td>Đóng gói &amp; triển khai</td><td>Docker, CI/CD (GitHub Actions), deploy không gián đoạn</td><td>Cập nhật phiên bản mà không dừng xưởng; kiểm tra <code>/health</code> trước khi chuyển lưu lượng</td></tr>
+<tr><td>Tài liệu API</td><td>OpenAPI 3 + Swagger UI tại <code>/docs</code></td><td>Tích hợp bên thứ ba không cần hỏi chúng tôi từng endpoint</td></tr>
+</tbody></table>
+
+<h2>3. Bảo mật</h2>
+<table>
+<thead><tr><th class="w30">Kiểm soát</th><th class="w70">Cách thực hiện</th></tr></thead>
+<tbody>
+<tr><td>Xác thực</td><td>JWT bắt buộc cho mọi API nghiệp vụ; thời hạn cấu hình được; mật khẩu băm bcrypt, không lưu dạng thô.</td></tr>
+<tr><td>Phân quyền</td><td>10 vai trò, kiểm tra ở tầng API cho từng nhóm route và kiểm tra lại trong service với thao tác nhạy cảm (sửa / huỷ / xoá đơn). Seller chỉ truy cập được dữ liệu của chính mình — ép ở service, không dựa vào giao diện.</td></tr>
+<tr><td>Chống dò mật khẩu</td><td>Giới hạn 10 lần đăng nhập / phút / IP; chỉ tin proxy được khai báo để không bị giả mạo IP.</td></tr>
+<tr><td>Đầu vào</td><td>Giới hạn kích thước body; kiểm tra dữ liệu theo trường với thông báo tiếng Việt; chuẩn hoá mã; tải URL ngoài qua bộ lọc chống SSRF.</td></tr>
+<tr><td>CORS</td><td>Danh sách origin cho phép, cấu hình theo môi trường.</td></tr>
+<tr><td>Cấu hình production</td><td>Chặn khởi động nếu thiếu JWT secret, mật khẩu demo mặc định, hoặc cấu hình hớ; tài khoản demo tự thu hồi khi tắt cờ seed.</td></tr>
+<tr><td>Nhật ký</td><td>Audit log mọi thao tác nghiệp vụ (ai, gì, lúc nào, trên bản ghi nào); request-id cho từng yêu cầu; lỗi 5xx ghi nguyên nhân gốc phía server, không lộ ra client.</td></tr>
+<tr><td>Dữ liệu</td><td>Xoá mềm; job dọn rác định kỳ theo thời hạn lưu; thông tin đối tác vận chuyển được che theo vai trò.</td></tr>
+<tr><td>Truyền tải</td><td>HTTPS/TLS qua reverse proxy (Caddy / Nginx); secret qua biến môi trường, không nằm trong mã nguồn.</td></tr>
+</tbody></table>
+
+<h2>4. Vận hành &amp; độ tin cậy</h2>
+<ul>
+  <li><b>Health check</b> <code>GET /health</code> (hỗ trợ cả HEAD) cho giám sát và load balancer.</li>
+  <li><b>Deploy không gián đoạn</b>: bản mới khởi động, qua kiểm tra health rồi mới nhận lưu lượng; bản cũ tắt sau.</li>
+  <li><b>Tác vụ nền</b>: đồng bộ tracking theo lịch; dọn dữ liệu xoá mềm quá hạn.</li>
+  <li><b>Hiệu năng</b>: truy vấn tối ưu cho danh sách lớn, chống xung đột ghi đồng thời (race), tuning pool kết nối và index. Đã tối ưu tốc độ xác nhận import.</li>
+  <li><b>Sao lưu (khuyến nghị)</b>: <code>pg_dump</code> hàng ngày, giữ 30 ngày, bản sao ngoài máy chủ; diễn tập phục hồi mỗi quý.</li>
+  <li><b>Giám sát (khuyến nghị)</b>: uptime monitor vào <code>/health</code>, cảnh báo dung lượng đĩa và DB.</li>
+</ul>
+
+<h2>5. Tuỳ chọn triển khai</h2>
+<table>
+<thead><tr><th class="w25">Phương án</th><th class="w40">Ưu điểm</th><th class="w35">Lưu ý</th></tr></thead>
+<tbody>
+<tr><td><b>Cloud do chúng tôi vận hành</b> (VPS tại Việt Nam)</td><td>Nhanh nhất; chúng tôi lo sao lưu, giám sát, cập nhật; phí vận hành gộp</td><td>Mỗi khách một instance riêng (không dùng chung DB). Dữ liệu thuộc khách, xuất bất cứ lúc nào.</td></tr>
+<tr><td><b>VPS / cloud của khách</b></td><td>Khách kiểm soát hạ tầng và hoá đơn cloud</td><td>Cần cấp quyền truy cập để triển khai và hỗ trợ; khách chịu trách nhiệm sao lưu nếu không mua gói vận hành</td></tr>
+<tr><td><b>On-premise</b> (máy chủ tại xưởng)</td><td>Dữ liệu không rời xưởng; chạy được khi mất Internet nội bộ (nếu có mạng LAN)</td><td>Cần UPS, sao lưu ngoài, người quản trị; tracking / seller từ xa cần mở Internet; phí triển khai cao hơn</td></tr>
+</tbody></table>
+
+<h2>6. Yêu cầu hạ tầng</h2>
+<div class="grid2">
+  <div class="card"><h4>Máy chủ (cho xưởng ≤ 2.000 đơn/ngày)</h4><ul>
+    <li>2 vCPU, 4 GB RAM, 40 GB SSD (khuyến nghị 4 vCPU / 8 GB khi &gt; 50 người dùng đồng thời)</li>
+    <li>Ubuntu 22.04+ hoặc tương đương, Docker</li>
+    <li>PostgreSQL 13+ (cùng máy hoặc managed)</li>
+    <li>Tên miền + chứng chỉ TLS; mở cổng 443</li>
+  </ul></div>
+  <div class="card"><h4>Phía người dùng</h4><ul>
+    <li>Trình duyệt hiện đại (Chrome, Edge, Safari)</li>
+    <li>Điện thoại iOS / Android có camera cho trạm QC, đóng gói, bàn giao</li>
+    <li>Máy in tem QR (nhiệt, khổ <span class="ph">[__]</span> mm)</li>
+    <li>Internet ổn định tại xưởng; 4G dự phòng</li>
+  </ul></div>
+</div>
+
+<h2>7. Dữ liệu &amp; quyền sở hữu</h2>
+<ul>
+  <li>Toàn bộ dữ liệu nghiệp vụ (đơn, seller, danh mục, nhật ký) <b>thuộc về khách hàng</b>.</li>
+  <li>Xuất dữ liệu: Excel/CSV từ giao diện; bản sao DB (dump) theo yêu cầu; qua API.</li>
+  <li>Khi kết thúc hợp đồng: bàn giao bản dump, xoá khỏi hạ tầng của chúng tôi trong 30 ngày, có xác nhận.</li>
+  <li>Truy cập của chúng tôi vào production chỉ để hỗ trợ, có nhật ký, theo thoả thuận bảo mật.</li>
+</ul>
+
+<h2>8. Tích hợp &amp; mở rộng</h2>
+<ul>
+  <li><b>REST API</b> có tài liệu OpenAPI; envelope JSON thống nhất; mã lỗi rõ ràng.</li>
+  <li><b>Hãng vận chuyển</b>: interface adapter — thêm hãng mới không sửa nghiệp vụ.</li>
+  <li><b>Tracking</b>: nhà cung cấp thay được; tắt được bằng cấu hình.</li>
+  <li><b>Chưa có sẵn</b> (tuỳ biến): webhook đẩy sự kiện, SSO / đăng nhập Google, xác thực 2 lớp, kết nối sàn TMĐT.</li>
+</ul>
+
+<h2>9. Hạn chế hiện tại — nói thẳng</h2>
+<table>
+<thead><tr><th class="w35">Hạn chế</th><th class="w65">Ý nghĩa với khách &amp; hướng xử lý</th></tr></thead>
+<tbody>
+<tr><td>Mỗi bản cài phục vụ một công ty / một xưởng</td><td>Nhiều xưởng của cùng chủ → nhiều instance hoặc tuỳ biến đa xưởng (mức cao). Không ảnh hưởng xưởng đơn lẻ.</td></tr>
+<tr><td>Migration schema tự động (AutoMigrate)</td><td>Phù hợp giai đoạn hiện tại; sẽ chuyển sang công cụ migration có phiên bản khi cần quản lý chặt hơn — không đổi dữ liệu.</td></tr>
+<tr><td>Chưa tạo vận đơn trực tiếp với hãng</td><td>Hiện gắn mã vận đơn nhận từ hãng (lẻ / hàng loạt). Tạo vận đơn trực tiếp = 1 adapter / hãng.</td></tr>
+<tr><td>Chưa có SSO / 2FA</td><td>Đăng nhập email + mật khẩu, JWT có hạn, giới hạn tần suất. Bổ sung theo yêu cầu.</td></tr>
+</tbody></table>
+</body></html>
