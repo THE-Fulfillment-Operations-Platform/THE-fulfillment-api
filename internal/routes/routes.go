@@ -15,23 +15,7 @@ import (
 	"the-fulfillment/backend/internal/handlers"
 	"the-fulfillment/backend/internal/middleware"
 	"the-fulfillment/backend/internal/models"
-	"the-fulfillment/backend/internal/response"
 )
-
-// resetEnabled blocks the destructive data-reset route unless ALLOW_DATA_RESET
-// is on. This is an operator kill-switch, NOT an environment gate: the route is
-// a normal OWNER-only feature (role + a server-verified typed confirmation), so
-// it is allowed to run in production once the flag is turned on. Flip the flag
-// off to disable the feature entirely.
-func resetEnabled(cfg *config.Config) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if !cfg.AllowDataReset {
-			response.AbortForbidden(c, "Chức năng xoá dữ liệu đang tắt (ALLOW_DATA_RESET=false)")
-			return
-		}
-		c.Next()
-	}
-}
 
 // Role sets reused across route groups.
 var (
@@ -123,12 +107,13 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	// Audit logs (admin/owner).
 	authd.GET("/audit-logs", middleware.RequireRoles(roleAdminOwner...), h.ListAuditLogs)
 
-	// Admin / danger zone (OWNER only, and only when ALLOW_DATA_RESET is enabled).
-	// POST /api/admin/reset wipes order/production data so the catalog can be
-	// re-imported from scratch; master data and users are preserved.
+	// Admin / danger zone (OWNER only). POST /api/admin/reset wipes
+	// order/production data so the catalog can be re-imported from scratch;
+	// master data and users are preserved. The OWNER role is the whole gate:
+	// anyone holding it may run the reset, in any environment.
 	admin := authd.Group("/admin", middleware.RequireRoles(models.RoleOwner))
 	{
-		admin.POST("/reset", resetEnabled(cfg), h.ResetData)
+		admin.POST("/reset", h.ResetData)
 	}
 
 	// Sellers (ops/admin/owner write; internal read).

@@ -5,8 +5,8 @@ import (
 	"the-fulfillment/backend/internal/repositories"
 )
 
-// AdminService holds destructive maintenance operations. Access is gated to
-// OWNER (and the ALLOW_DATA_RESET flag) at the route layer.
+// AdminService holds destructive maintenance operations. Access is gated to the
+// OWNER role at the route layer.
 type AdminService struct {
 	repo  *repositories.Repositories
 	audit *AuditService

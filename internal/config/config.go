@@ -76,9 +76,6 @@ type Config struct {
 	SeedDemoUsers bool
 	DemoPassword  string
 
-	// Ops / danger zone
-	AllowDataReset bool
-
 	// Maintenance: periodically hard-delete rows soft-deleted longer ago than the
 	// retention window, so GORM soft-deletes don't accumulate without bound.
 	PurgeEnabled       bool
@@ -160,8 +157,6 @@ func Load() *Config {
 		SeedOnStart:   getEnvAsBool("SEED_ON_START", true),
 		SeedDemoUsers: getEnvAsBool("SEED_DEMO_USERS", true),
 		DemoPassword:  getEnv("SEED_DEMO_PASSWORD", DefaultDemoPassword),
-
-		AllowDataReset: getEnvAsBool("ALLOW_DATA_RESET", false),
 
 		PurgeEnabled:       getEnvAsBool("PURGE_ENABLED", true),
 		PurgeRetentionDays: getEnvAsInt("PURGE_RETENTION_DAYS", 30),
