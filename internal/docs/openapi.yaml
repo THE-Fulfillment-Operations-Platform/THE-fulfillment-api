@@ -427,6 +427,37 @@ paths:
       tags: [Batches]
       summary: Download batch assets bundle as ZIP
       responses: { '200': { description: ZIP file } }
+  /api/batches/{id}/scrap:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    post:
+      tags: [Batches]
+      summary: Huỷ batch đã sản xuất (cả tấm hỏng) → đóng batch, trả sản phẩm về làm lại
+      description: >-
+        Ngược lại với DELETE. Xoá là undo của lệnh gom batch (chưa ai đụng vào,
+        xoá sạch dấu vết); huỷ ghi nhận một tấm ĐÃ in/cắt hỏng thật: mọi phần
+        còn sống được đánh dấu huỷ kèm lý do + người huỷ, batch đóng lại, sản
+        phẩm quay về hàng chờ gom batch (route PRODUCTION) hoặc hàng chờ thiết
+        kế (route DESIGN) và được gom vào một batch MỚI.
+        Huỷ được từng batch con (mỗi con là một tấm vật lý); huỷ batch mẹ = huỷ
+        mọi con còn mở, và mẹ tự đóng khi con cuối cùng đóng.
+        Với hàng combo nhiều NVL, các phần NVL khác của cùng sản phẩm đang ở
+        "đã QC" sẽ bị hạ về CUT — QC là cổng cấp sản phẩm, còn phần đang làm lại
+        thì cả sản phẩm chưa QC xong.
+        Từ chối (422) khi: batch chưa vào sản xuất và xoá được (dùng DELETE),
+        batch đã đóng, hoặc ĐƠN của sản phẩm đã bắt đầu đóng gói.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, maxLength: 60, description: Lý do huỷ (bắt buộc) }
+                route: { type: string, enum: [PRODUCTION, DESIGN], default: PRODUCTION }
+      responses:
+        '200': { description: Đã huỷ — trả về mã batch, số phần đã huỷ, sản phẩm bị ảnh hưởng, ghi chú đã mở }
+        '422': { description: Batch chưa sản xuất (dùng DELETE) / đã đóng / đơn đã bắt đầu đóng gói }
   /api/batches/{id}/status:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
     patch:
@@ -479,7 +510,12 @@ paths:
   /api/qc/fail:
     post:
       tags: [QC]
-      summary: QC fail → tạo Required Attention / rework note
+      summary: QC fail → huỷ phần hỏng, mở Required Attention / rework note
+      description: >-
+        Phần NVL bị lỗi được đánh dấu huỷ (ở nguyên batch đã làm ra nó) và sản
+        phẩm quay về hàng chờ làm lại. Hàng combo: các phần NVL khác đang ở "đã
+        QC" bị hạ về CUT, vì QC là cổng cấp sản phẩm. Từ chối (422) khi ĐƠN đã
+        bắt đầu đóng gói.
       requestBody:
         content:
           application/json:
@@ -491,6 +527,31 @@ paths:
                 defect_code: { type: string }
                 note: { type: string }
       responses: { '201': { description: Created note } }
+  /api/qc/undo:
+    post:
+      tags: [QC]
+      summary: Hạ QC đã bấm nhầm (OWNER/ADMIN) → mọi phần còn sống về "Đã cắt"
+      description: >-
+        Dành cho đúng một ca: BẤM NHẦM. Hàng vẫn nguyên vẹn, nên không tấm nào bị
+        ghi bỏ, không tăng rework_count, không đụng link sản xuất và không đẩy
+        sản phẩm về hàng chờ thiết kế — chỉ mở lại cổng QC. Ghi một bản ghi QC
+        result=UNDO cho lịch sử.
+        Hàng hỏng thật thì KHÔNG dùng lối này: dùng /api/qc/fail (một sản phẩm)
+        hoặc /api/batches/{id}/scrap (cả tấm).
+        Từ chối (422) khi sản phẩm chưa ở trạng thái đã QC, hoặc ĐƠN đã bắt đầu
+        đóng gói.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code: { type: string }
+                item_id: { type: integer }
+                reason: { type: string, maxLength: 60 }
+      responses:
+        '200': { description: OK }
+        '422': { description: Chưa QC pass / đơn đã bắt đầu đóng gói }
   /api/packing/scan:
     post:
       tags: [Packing]

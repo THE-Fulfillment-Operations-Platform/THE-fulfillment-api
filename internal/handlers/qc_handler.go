@@ -78,3 +78,19 @@ func (h *Handlers) QCResults(c *gin.Context) {
 	// rather than inside it — the tiles must not change as the user pages.
 	response.List(c, gin.H{"orders": rows, "summary": summary}, metaFor(p, total))
 }
+
+// QCUndoPass hạ kết luận "đã QC" của một sản phẩm về "đã cắt" — dành cho ca bấm
+// nhầm, không phải ca hàng hỏng (hàng hỏng đi lối QC fail / huỷ batch).
+// POST /api/qc/undo
+func (h *Handlers) QCUndoPass(c *gin.Context) {
+	var in services.UndoQCInput
+	if !bindJSON(c, &in) {
+		return
+	}
+	res, err := h.svc.QC.UndoPass(actor(c), in)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, res)
+}

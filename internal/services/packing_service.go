@@ -122,12 +122,6 @@ func (s *PackingService) Scan(actor Actor, in PackingScanInput) (*PackingResult,
 	if err != nil {
 		return nil, err
 	}
-	if item.InternalStatus != models.StatusQCPassed {
-		return nil, apperr.Unprocessable("Item is not QC-passed yet; cannot pack (BLOCK)")
-	}
-	if itemCancelled(item.CancellationStatus) {
-		return nil, apperr.Conflict("Sản phẩm đã huỷ, không thể đóng gói")
-	}
 	order, err := s.repo.Order.FindByID(item.OrderID)
 	if err != nil {
 		return nil, apperr.Internal("could not load order").Wrap(err)
@@ -139,6 +133,24 @@ func (s *PackingService) Scan(actor Actor, in PackingScanInput) (*PackingResult,
 	var result *PackingResult
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
 		txRepo := repositories.New(tx)
+		// Cửa "đã QC chưa / đã huỷ chưa" phải đọc TRONG transaction, sau khi khoá
+		// dòng sản phẩm. Đọc ngoài rồi mới mở transaction thì một lần huỷ batch
+		// hoặc hạ QC chạy song song vẫn kịp lọt: lần quét này mở kiện cho CẢ đơn
+		// và từ đó không luồng nào kéo hàng về "chờ làm lại" được nữa, nên nó phải
+		// nhìn thấy đúng trạng thái tại thời điểm ghi.
+		if err := txRepo.OrderItem.LockForUpdate([]uint{item.ID}); err != nil {
+			return apperr.Internal("Không khoá được sản phẩm để đóng gói").Wrap(err)
+		}
+		status, cancellation, err := txRepo.OrderItem.GateStateByID(item.ID)
+		if err != nil {
+			return apperr.Internal("could not re-read item").Wrap(err)
+		}
+		if status != models.StatusQCPassed {
+			return apperr.Unprocessable("Item is not QC-passed yet; cannot pack (BLOCK)")
+		}
+		if itemCancelled(cancellation) {
+			return apperr.Conflict("Sản phẩm đã huỷ, không thể đóng gói")
+		}
 		pkg, err := s.getOrCreateOpenPackage(tx, order, actor)
 		if err != nil {
 			return err

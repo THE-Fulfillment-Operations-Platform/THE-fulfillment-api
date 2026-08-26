@@ -87,6 +87,12 @@ func (r *BatchRepository) FindByID(id uint) (*models.Batch, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Số phần đã huỷ: màn chi tiết phải nói được "0 còn lại · 2 đã huỷ" thay vì
+	// hiện một batch trông như trống rỗng. Danh sách đã điền sẵn trường này; chi
+	// tiết thì chưa, nên batch vừa bị huỷ mở ra không giải thích được gì.
+	if scrapped, err := r.ScrappedCounts([]uint{b.ID}); err == nil {
+		b.ScrappedCount = scrapped[b.ID]
+	}
 	return &b, nil
 }
 

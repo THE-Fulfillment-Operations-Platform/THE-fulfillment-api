@@ -332,6 +332,11 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 	if batch.Status == models.StatusQCPassed {
 		return nil, apperr.Unprocessable("Batch đã QC — không cập nhật trạng thái ở bảng sản xuất nữa.")
 	}
+	// Batch đã đóng (huỷ cả tấm, hoặc mọi phần đã bị huỷ ở QC) không còn gì để
+	// sản xuất — hàng làm lại nằm ở batch mới.
+	if batch.ClosedAt != nil {
+		return nil, apperr.Unprocessable("Batch " + batch.Code + " đã đóng — không cập nhật trạng thái nữa. Hàng làm lại nằm ở batch mới.")
+	}
 	// Production moves forward: a batch never regresses to an earlier stage, which
 	// protects the QC gate (regressing a CUT batch would un-finish its items). The
 	// one exception is OWNER, who may step a batch back to fix a mistaken advance.
@@ -375,6 +380,28 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 	affectedItems := map[uint]bool{}
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
 		txRepo := repositories.New(tx)
+		// Đọc lại batch có khoá dòng, ngay trong transaction. Mọi guard ở trên chạy
+		// trên bản đọc trước transaction, nên giữa lúc render màn hình và lúc ghi,
+		// batch có thể đã bị huỷ (đóng) hoặc đã được đẩy trạng thái ở nơi khác —
+		// và không có vòng này thì lệnh vẫn ghi đè lên trạng thái mới đó.
+		locked, err := txRepo.Batch.FindLiteManyForUpdate([]uint{batch.ID})
+		if err != nil {
+			return err
+		}
+		if len(locked) == 0 {
+			return apperr.NotFound("Batch not found")
+		}
+		fresh := locked[0]
+		if fresh.ClosedAt != nil {
+			return apperr.Unprocessable("Batch " + fresh.Code + " vừa bị huỷ/đóng — tải lại bảng sản xuất.")
+		}
+		if fresh.Status == models.StatusQCPassed {
+			return apperr.Unprocessable("Batch đã QC — không cập nhật trạng thái ở bảng sản xuất nữa.")
+		}
+		if newStatus.Rank() < fresh.Status.Rank() && actor.Role != models.RoleOwner {
+			return apperr.Unprocessable("Sản xuất chỉ tiến, không lùi: batch đang ở '" + string(fresh.Status) + "', không thể hạ về '" + string(newStatus) + "'. (Chỉ OWNER được sửa khi bấm nhầm.)")
+		}
+		batch.Status = fresh.Status
 		// Cancelled parts are filtered out by the query itself — the cascade never
 		// touches them, so there is no reason to fetch them and their cancellation
 		// status in a second statement.
@@ -594,6 +621,9 @@ func (s *BatchService) SetBatchLink(actor Actor, batchID uint, in SetBatchLinkIn
 	if batch.IsParent {
 		return nil, apperr.Unprocessable("Batch mẹ không chứa item sản xuất. Hãy cập nhật link trên từng batch con.")
 	}
+	if batch.ClosedAt != nil {
+		return nil, apperr.Unprocessable("Batch " + batch.Code + " đã đóng — không sửa link sản xuất nữa.")
+	}
 
 	now := time.Now()
 	// The per-item column this kind fans out to. Fixed literals, never user input.
@@ -608,6 +638,20 @@ func (s *BatchService) SetBatchLink(actor Actor, batchID uint, in SetBatchLinkIn
 	// whose link says one thing while its items say another is worse than neither.
 	if err := s.repo.DB.Transaction(func(tx *gorm.DB) error {
 		txRepo := repositories.New(tx)
+
+		// Guard "batch đã đóng" phải nằm trong transaction: một batch bị huỷ ngay
+		// sau khi màn hình được render mà vẫn nhận link mới thì lệnh fan-out bên
+		// dưới sẽ đóng dấu lại URL lên đúng những sản phẩm vừa được gỡ ra.
+		locked, err := txRepo.Batch.FindLiteManyForUpdate([]uint{batchID})
+		if err != nil {
+			return apperr.Internal("could not lock batch").Wrap(err)
+		}
+		if len(locked) == 0 {
+			return apperr.NotFound("Batch not found")
+		}
+		if locked[0].ClosedAt != nil {
+			return apperr.Unprocessable("Batch " + locked[0].Code + " vừa bị huỷ/đóng — không sửa link sản xuất nữa.")
+		}
 
 		existing, err := txRepo.Batch.FindLink(batchID, kind)
 		if err != nil {
@@ -796,13 +840,37 @@ var productionColumnWidths = []float64{
 	42, // Q  Link cắt
 }
 
+// GetWithScrapHistory loads a batch for viewing/exporting và, với batch ĐÃ ĐÓNG,
+// đọc cả những phần đã huỷ.
+//
+// Batch detail cố tình chỉ preload phần còn sống — trạng thái phải tính trên cái
+// còn làm được. Nhưng batch đã đóng thì theo định nghĩa không còn phần nào sống,
+// nên export của nó ra file rỗng: tải bảng sản xuất của một tấm vừa huỷ được một
+// file chỉ có dòng tiêu đề, đúng lúc người ta cần nó nhất để đối chiếu xem tấm đó
+// đã có những gì. Ở đây phần đã huỷ chính là nội dung.
+func (s *BatchService) GetWithScrapHistory(batchID uint) (*models.Batch, error) {
+	batch, err := s.Get(batchID)
+	if err != nil {
+		return nil, err
+	}
+	if len(batch.Items) > 0 || batch.ClosedAt == nil {
+		return batch, nil
+	}
+	items, err := s.repo.Batch.AllBatchItemsDetailed(batch.ID)
+	if err != nil {
+		return nil, apperr.Internal("could not load scrapped batch items").Wrap(err)
+	}
+	batch.Items = items
+	return batch, nil
+}
+
 // ProductionTemplateXLSX loads a batch and renders the legacy production template as
 // a real .xlsx workbook. Unlike CSV, an xlsx always splits into columns cleanly in
 // Excel regardless of the machine's locale/list separator, and Vietnamese headers
 // need no BOM. The header row is bold on a light fill, frozen, and auto-filtered,
 // with per-column widths so it is readable on open.
 func (s *BatchService) ProductionTemplateXLSX(batchID uint) ([]byte, string, error) {
-	batch, err := s.Get(batchID)
+	batch, err := s.GetWithScrapHistory(batchID)
 	if err != nil {
 		return nil, "", err
 	}
@@ -869,7 +937,7 @@ func BatchZipName(batch *models.Batch) string {
 // naming plus a manifest, so the existing "Download ZIP" on the batch board is
 // unchanged. A single broken/blocked asset URL is skipped (recorded), not fatal.
 func (s *BatchService) StreamBatchAssetsZip(ctx context.Context, w io.Writer, batchID uint, designOnly bool) error {
-	batch, err := s.Get(batchID)
+	batch, err := s.GetWithScrapHistory(batchID)
 	if err != nil {
 		return err
 	}

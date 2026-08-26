@@ -1024,12 +1024,15 @@ func (r *OrderItemRepository) ListAll(f ItemFilter) ([]models.OrderItem, error) 
 // It is how a batch-level print/cut link fans out to the per-item columns that the
 // production export and QC screens read, so "same batch → same print/cut file"
 // holds without the link ever being re-entered per item. Cancelled lines are left
-// alone — they are never produced. `column` is caller-supplied and must stay a
-// fixed literal, never user input.
+// alone — they are never produced. Parts already written off are left alone too:
+// huỷ một phần đã gỡ link sản xuất khỏi sản phẩm, và sửa lại link của batch cũ
+// không được đóng dấu URL đó lên sản phẩm đang chờ làm lại ở batch khác.
+// `column` is caller-supplied and must stay a fixed literal, never user input.
 func (r *OrderItemRepository) SetProductionFileForBatch(batchID uint, column, url string) (int64, error) {
 	res := r.db.Model(&models.OrderItem{}).
 		Where("id IN (?)",
-			r.db.Model(&models.BatchItem{}).Select("order_item_id").Where("batch_id = ?", batchID)).
+			r.db.Model(&models.BatchItem{}).Select("order_item_id").
+				Where("batch_id = ? AND scrapped_at IS NULL", batchID)).
 		Where("cancellation_status NOT IN ?",
 			[]models.CancellationStatus{models.CancellationSeller, models.CancellationApproved}).
 		Update(column, url)

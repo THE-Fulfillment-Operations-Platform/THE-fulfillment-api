@@ -25,6 +25,14 @@ var (
 	roleProdOps    = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleProduction, models.RoleDesigner}
 	roleQCOps      = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleQC}
 	rolePackOps    = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RolePacking}
+	// Huỷ batch (cả tấm hỏng, vứt đi, làm lại) là việc của người đứng cạnh cái
+	// tấm đó: xưởng sản xuất phát hiện cắt/in hỏng, QC phát hiện cả tấm sai file.
+	// DESIGNER cố tình không có ở đây — họ gom batch và xoá batch chưa sản xuất,
+	// còn ghi bỏ vật liệu đã tiêu thì không.
+	roleScrapBatch = []models.Role{
+		models.RoleOwner, models.RoleAdmin, models.RoleOps,
+		models.RoleProduction, models.RoleQC,
+	}
 	// Roles that may hand finished goods to THE — mirrors canShipToCarrier in the
 	// service. SHIPPING belongs here (it is literally their desk); CS does not.
 	roleShipCarrier = []models.Role{
@@ -277,6 +285,9 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		// touched, so this is "undo create", not data destruction.
 		batches.DELETE("/:id", middleware.RequireRoles(roleDesignOps...), h.DeleteBatch)
 		batches.PATCH("/:id/status", middleware.RequireRoles(roleProdOps...), h.UpdateBatchStatus)
+		// Huỷ batch: ngược lại với xoá. Xoá là undo của lệnh gom (chưa ai đụng
+		// vào, xoá sạch dấu vết); huỷ là ghi nhận một tấm đã in/cắt hỏng thật.
+		batches.POST("/:id/scrap", middleware.RequireRoles(roleScrapBatch...), h.ScrapBatch)
 	}
 
 	// QC.
@@ -286,6 +297,11 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		qc.POST("/pass", h.QCPass)
 		qc.POST("/fail", h.QCFail)
 	}
+	// Hạ QC (bấm nhầm) nằm NGOÀI nhóm /qc ở trên vì nó chặt hơn: chỉ OWNER/ADMIN.
+	// Nó mở lại một cửa đã đóng, và ranh giới giữa "bấm nhầm" với "hàng hỏng
+	// nhưng ngại làm thủ tục huỷ" là thứ phải có người chịu trách nhiệm.
+	authd.POST("/qc/undo", middleware.RequireRoles(roleAdminOwner...), h.QCUndoPass)
+
 	// Kết quả QC: đọc-only, mở cho mọi vai trò nội bộ — đóng gói/OPS cần biết đơn
 	// nào đã QC đủ để lấy hàng, không chỉ tổ QC.
 	authd.GET("/qc/results", middleware.RequireRoles(roleInternal...), h.QCResults)

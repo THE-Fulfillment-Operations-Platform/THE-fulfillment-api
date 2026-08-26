@@ -225,20 +225,41 @@ func reworkRoute(explicit, defectCode string) string {
 	return ReworkToProduction
 }
 
+// liveParts trả các phần sản xuất CÒN SỐNG của item đã preload.
+//
+// item.BatchItems giữ cả phần đã huỷ — đó là chủ đích, màn hình lịch sử cần thấy
+// tấm đã vứt đi. Nhưng mọi quyết định QC thì không: phần đã huỷ ở lần sản xuất
+// trước không phải thứ đang nằm trên bàn QC, và tính nó vào sẽ đóng dấu "đã QC"
+// lên một tấm đã ở thùng rác, đồng thời làm cửa "sản phẩm đã cắt xong chưa" mở
+// nhầm bằng trạng thái của lần sản xuất cũ.
+func liveParts(item *models.OrderItem) []models.BatchItem {
+	out := make([]models.BatchItem, 0, len(item.BatchItems))
+	for _, bi := range item.BatchItems {
+		if bi.ScrappedAt == nil {
+			out = append(out, bi)
+		}
+	}
+	return out
+}
+
 // targetBatchItems returns the batch items a decision applies to.
 func (s *QCService) targetBatchItems(item *models.OrderItem, batchItemID *uint) ([]models.BatchItem, error) {
+	live := liveParts(item)
 	if batchItemID != nil {
-		for _, bi := range item.BatchItems {
+		for _, bi := range live {
 			if bi.ID == *batchItemID {
 				return []models.BatchItem{bi}, nil
 			}
 		}
-		return nil, apperr.BadRequest("Mã batch item không thuộc item này")
+		return nil, apperr.BadRequest("Mã batch item không thuộc item này (hoặc đã bị huỷ trước đó)")
 	}
-	if len(item.BatchItems) == 0 {
+	if len(live) == 0 {
+		if len(item.BatchItems) > 0 {
+			return nil, apperr.Unprocessable("Phần sản xuất của sản phẩm này đã bị huỷ — đang chờ làm lại ở batch mới, chưa QC được.")
+		}
 		return nil, apperr.Unprocessable("Item chưa được đưa vào batch sản xuất nên chưa thể QC")
 	}
-	return item.BatchItems, nil
+	return live, nil
 }
 
 // stagePhraseVN describes how far a material part has got, for QC-block messages.
@@ -263,9 +284,12 @@ func stagePhraseVN(s models.InternalStatus, batched bool) string {
 // product as a whole, once, never a half-produced one. Falls back to the item's
 // own parts when the SKU's bill of materials is unknown (legacy items).
 func assertProductComplete(item *models.OrderItem) error {
-	// Highest fabrication stage reached per material.
+	// Highest fabrication stage reached per material — trên các phần CÒN SỐNG.
+	// Một tấm đã huỷ vẫn ghi "đã cắt", nên nếu tính cả nó thì sản phẩm đang chờ
+	// làm lại trông như đã hoàn thiện và lọt qua cửa này.
+	live := liveParts(item)
 	best := map[uint]models.InternalStatus{}
-	for _, bi := range item.BatchItems {
+	for _, bi := range live {
 		if cur, ok := best[bi.MaterialID]; !ok || bi.Status.Rank() > cur.Rank() {
 			best[bi.MaterialID] = bi.Status
 		}
@@ -297,10 +321,10 @@ func assertProductComplete(item *models.OrderItem) error {
 	}
 
 	// Unknown BOM: gate on the item's own parts — all must have reached CUT.
-	if len(item.BatchItems) == 0 {
+	if len(live) == 0 {
 		return apperr.Unprocessable("Item chưa được đưa vào batch sản xuất nên chưa thể QC")
 	}
-	for _, bi := range item.BatchItems {
+	for _, bi := range live {
 		if bi.Status.Rank() < cutRank {
 			return apperr.Unprocessable("Sản phẩm chưa cắt xong (còn phần " +
 				stagePhraseVN(bi.Status, true) + ") — cắt xong hết rồi mới QC.")
@@ -380,14 +404,28 @@ func (s *QCService) Pass(actor Actor, in QCDecisionInput) (*models.OrderItem, er
 
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
 		txRepo := repositories.New(tx)
+		// Khoá dòng sản phẩm trước khi ghi: huỷ batch / QC fail / hạ QC cũng khoá
+		// đúng dòng này, nên ba luồng xếp hàng thay vì cùng ghi lên một sản phẩm.
+		if err := txRepo.OrderItem.LockForUpdate([]uint{item.ID}); err != nil {
+			return apperr.Internal("Không khoá được sản phẩm để ghi QC").Wrap(err)
+		}
 		if err := txRepo.QC.CreateBulk(records); err != nil {
 			return err
 		}
 		// A targeted status update, not a Save of the whole row: a full save writes
 		// every column back (and re-upserts the Batch association), so it can undo a
 		// concurrent edit to a field QC never touched.
-		if err := txRepo.Batch.UpdateBatchItemStatuses(toPass, models.StatusQCPassed); err != nil {
+		//
+		// Lệnh này chỉ chạm phần CÒN SỐNG (scrapped_at IS NULL). Thiếu vế đó, một
+		// lần huỷ batch chạy song song sẽ bị đóng dấu "đã QC" đè lên đúng tấm vừa
+		// vứt đi, và roll-up sau đó dựng lại kết luận QC vừa bị gỡ. Đụng hụt dòng
+		// nghĩa là có người xử lý trước — bỏ cả transaction, đừng ghi nửa vời.
+		moved, err := txRepo.Batch.PassBatchItemStatuses(toPass)
+		if err != nil {
 			return err
+		}
+		if int(moved) != len(toPass) {
+			return apperr.Conflict("Có phần sản xuất của sản phẩm này vừa bị huỷ ở nơi khác — quét lại để xem trạng thái mới.")
 		}
 		return txRepo.Status.CreateBulk(history)
 	})
@@ -397,12 +435,16 @@ func (s *QCService) Pass(actor Actor, in QCDecisionInput) (*models.OrderItem, er
 		}
 		return nil, apperr.Internal("Không ghi được kết quả QC PASS").Wrap(err)
 	}
-	// targets aliases item.BatchItems, so this also refreshes the item we answer with.
+	// targets là bản LỌC (chỉ phần còn sống) chứ không alias item.BatchItems, nên
+	// phải cập nhật lại chính item — câu trả lời cho trạm QC dựng từ item, và trả
+	// về trạng thái cũ ở đây là một sai lệch âm thầm, không phải chậm.
+	passed := make(map[uint]bool, len(toPass))
 	for _, id := range toPass {
-		for i := range targets {
-			if targets[i].ID == id {
-				targets[i].Status = models.StatusQCPassed
-			}
+		passed[id] = true
+	}
+	for i := range item.BatchItems {
+		if passed[item.BatchItems[i].ID] {
+			item.BatchItems[i].Status = models.StatusQCPassed
 		}
 	}
 
@@ -484,78 +526,114 @@ func (s *QCService) Fail(actor Actor, in QCDecisionInput) (*QCFailResult, error)
 	}
 	route := reworkRoute(in.ReworkRoute, reason)
 
-	// Which part failed? Live parts only — a part scrapped by an earlier fail is
-	// not something QC can fail again.
-	live, err := s.repo.Batch.LiveBatchItemsForOrderItem(item.ID)
-	if err != nil {
-		return nil, apperr.Internal("Không đọc được phần sản xuất của item").Wrap(err)
-	}
-	var failed *models.BatchItem
-	switch {
-	case in.BatchItemID != nil:
-		for i := range live {
-			if live[i].ID == *in.BatchItemID {
-				failed = &live[i]
-				break
-			}
-		}
-		if failed == nil {
-			return nil, apperr.BadRequest("Phần sản xuất được chọn không thuộc item này (hoặc đã bị huỷ trước đó)")
-		}
-	case len(live) == 1:
-		failed = &live[0]
-	case len(live) > 1:
-		// Combo: the operator must say which material is defective, otherwise we
-		// would re-make parts that are perfectly fine.
-		return nil, apperr.Unprocessable(
-			"Sản phẩm gồm nhiều phần NVL (" + itemMaterialNames(item) + ") — chọn phần bị lỗi để làm lại")
-	}
-	// len(live) == 0 → chưa sản xuất: vẫn ghi nhận fail + note, không có gì để huỷ.
-
 	var (
-		note      *models.Note
-		batchCode string
-		matName   string
-		attempt   int
+		note          *models.Note
+		batchCode     string
+		matName       string
+		attempt       int
+		failedID      uint
+		failedBatchID uint
+		failedStatus  models.InternalStatus
+		unQCedBatches []uint
 	)
-	if failed != nil {
-		attempt = failed.Attempt
-		if failed.Batch != nil {
-			batchCode = failed.Batch.Code
-		}
-		if failed.Material != nil {
-			matName = failed.Material.Name
-		}
-	}
-
 	now := time.Now()
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
 		txRepo := repositories.New(tx)
-
-		var failedID *uint
-		if failed != nil {
-			id := failed.ID
-			failedID = &id
+		// Khoá sản phẩm trước, rồi mới đọc phần sản xuất của nó. Đọc ngoài
+		// transaction thì một QC pass hoặc một lần huỷ batch chen vào giữa sẽ làm
+		// mọi quyết định dưới đây dựa trên ảnh chụp đã cũ.
+		if err := txRepo.OrderItem.LockForUpdate([]uint{item.ID}); err != nil {
+			return apperr.Internal("Không khoá được sản phẩm để ghi QC").Wrap(err)
 		}
+		// Đơn đã lên bàn đóng gói thì đã quá muộn để trả sản phẩm về "chờ làm lại".
+		if err := assertPackingNotStarted(txRepo, []uint{item.OrderID}, "ghi QC fail"); err != nil {
+			return err
+		}
+
+		// Which part failed? Live parts only — a part scrapped by an earlier fail is
+		// not something QC can fail again.
+		live, err := txRepo.Batch.LiveBatchItemsForOrderItem(item.ID)
+		if err != nil {
+			return apperr.Internal("Không đọc được phần sản xuất của item").Wrap(err)
+		}
+		var failed *models.BatchItem
+		switch {
+		case in.BatchItemID != nil:
+			for i := range live {
+				if live[i].ID == *in.BatchItemID {
+					failed = &live[i]
+					break
+				}
+			}
+			if failed == nil {
+				return apperr.BadRequest("Phần sản xuất được chọn không thuộc item này (hoặc đã bị huỷ trước đó)")
+			}
+		case len(live) == 1:
+			failed = &live[0]
+		case len(live) > 1:
+			// Combo: the operator must say which material is defective, otherwise we
+			// would re-make parts that are perfectly fine.
+			return apperr.Unprocessable(
+				"Sản phẩm gồm nhiều phần NVL (" + itemMaterialNames(item) + ") — chọn phần bị lỗi để làm lại")
+		}
+		// len(live) == 0 → chưa sản xuất: vẫn ghi nhận fail + note, không có gì để huỷ.
+
+		var failedIDPtr *uint
+		if failed != nil {
+			failedID, failedBatchID, failedStatus = failed.ID, failed.BatchID, failed.Status
+			attempt = failed.Attempt
+			if failed.Batch != nil {
+				batchCode = failed.Batch.Code
+			}
+			if failed.Material != nil {
+				matName = failed.Material.Name
+			}
+			id := failed.ID
+			failedIDPtr = &id
+		}
+
 		if err := txRepo.QC.Create(&models.QCRecord{
-			OrderItemID: item.ID, BatchItemID: failedID, Result: models.QCFail,
+			OrderItemID: item.ID, BatchItemID: failedIDPtr, Result: models.QCFail,
 			MockupURL: item.MockupURL, DefectCode: reason, Note: in.Note, CheckedByID: actor.IDPtr(),
 		}); err != nil {
 			return err
 		}
 
 		if failed != nil {
-			if err := txRepo.Batch.ScrapBatchItem(failed.ID, reason, actor.IDPtr(), now); err != nil {
+			n, err := txRepo.Batch.ScrapBatchItems([]uint{failed.ID}, reason, actor.IDPtr(), now)
+			if err != nil {
 				return err
+			}
+			if n == 0 {
+				return apperr.Conflict("Phần sản xuất này vừa được huỷ ở nơi khác — quét lại để xem trạng thái mới.")
 			}
 			_ = recordStatus(txRepo, models.EntityBatchItem, failed.ID, string(failed.Status), "SCRAPPED", actor,
 				"QC fail ("+reason+") — huỷ phần đã sản xuất, chờ làm lại")
+
+			// Hàng combo: QC pass đẩy MỌI phần lên QC_PASSED một lượt, nên huỷ
+			// riêng phần gỗ mà để phần mica nguyên "đã QC" thì roll-up của sản phẩm
+			// (min của các phần còn sống) vẫn ra QC_PASSED và sản phẩm đi thẳng sang
+			// đóng gói trong lúc phần gỗ đang làm lại.
+			unQCedBatches, err = unQCSiblingParts(txRepo, []uint{item.ID}, []uint{failed.ID}, actor,
+				"QC fail phần "+matName+" — mở lại QC cho cả sản phẩm")
+			if err != nil {
+				return err
+			}
+
+			// Gỡ link in/cắt của tấm cũ khỏi ĐÚNG sản phẩm này (các sản phẩm khác
+			// trong tấm vẫn đang được làm từ file đó): nó sắp được làm lại ở batch
+			// mới với file mới, mang theo link cũ là chỉ thợ in vào file đã hỏng.
+			if err := unstampProductionFiles(txRepo, []uint{failed.BatchID}, []uint{item.ID}); err != nil {
+				return err
+			}
 		}
 
 		// Count the rework on the item so the bucket/list can label it, and — for a
 		// design defect — push it back to the design queue. A production defect
 		// leaves design_status alone: the file is fine, only the piece is not.
-		fields := map[string]any{"rework_count": item.ReworkCount + 1}
+		// rework_count cộng bằng biểu thức SQL, không phải đọc-rồi-ghi: hai lần fail
+		// gần nhau trên hai phần khác nhau đều phải được đếm.
+		fields := map[string]any{"rework_count": gorm.Expr("rework_count + 1")}
 		if route == ReworkToDesign {
 			fields["design_status"] = models.DesignMissing
 		}
@@ -573,6 +651,9 @@ func (s *QCService) Fail(actor Actor, in QCDecisionInput) (*QCFailResult, error)
 		}
 		if matName != "" {
 			body += "\n— Phần NVL phải làm lại: " + matName
+		}
+		if len(unQCedBatches) > 0 {
+			body += "\n— Các phần NVL khác của sản phẩm đã được hạ khỏi 'đã QC', QC lại cả sản phẩm sau khi làm lại."
 		}
 		if route == ReworkToDesign {
 			body += "\n— Hướng xử lý: lỗi từ file design → item đã được trả về hàng chờ thiết kế, sửa file rồi set ready lại."
@@ -595,7 +676,12 @@ func (s *QCService) Fail(actor Actor, in QCDecisionInput) (*QCFailResult, error)
 			OwnerRole:           owner,
 			CreatedByID:         actor.IDPtr(),
 		}
-		return txRepo.Note.Create(note)
+		if err := txRepo.Note.Create(note); err != nil {
+			return err
+		}
+		// Batch của các phần anh em vừa bị hạ QC phải tính lại ngay trong cùng
+		// transaction, không để lọt khoảnh khắc batch nói "đã QC" mà phần thì không.
+		return recomputeBatchStatuses(txRepo, unQCedBatches, actor)
 	})
 	if err != nil {
 		if ae, ok := apperr.As(err); ok {
@@ -607,15 +693,15 @@ func (s *QCService) Fail(actor Actor, in QCDecisionInput) (*QCFailResult, error)
 	// The scrapped part no longer counts, so both roll-ups can move: the item drops
 	// back to "needs producing", and the batch that made it is free to finish.
 	_, _ = recomputeOrderItemStatus(s.repo, item.ID, actor)
-	if failed != nil && failed.BatchID != 0 {
-		_ = recomputeBatchStatus(s.repo, failed.BatchID, actor)
+	if failedBatchID != 0 {
+		_ = recomputeBatchStatus(s.repo, failedBatchID, actor)
 		// If that was the batch's last live part, the run is over: nothing will ever
 		// come out of it again (the re-make happens in a new batch). Close it, or it
 		// sits on the production board forever with zero items at whatever status it
 		// had reached — and a product failed ten times would leave ten such ghosts.
-		if closed, err := s.repo.Batch.CloseIfNothingLeft(failed.BatchID,
+		if closed, err := s.repo.Batch.CloseIfNothingLeft(failedBatchID,
 			"Toàn bộ sản phẩm đã huỷ do QC fail", now); err == nil && closed {
-			_ = recordStatus(s.repo, models.EntityBatch, failed.BatchID, string(failed.Status), string(failed.Status),
+			_ = recordStatus(s.repo, models.EntityBatch, failedBatchID, string(failedStatus), string(failedStatus),
 				actor, "Đóng batch — toàn bộ sản phẩm đã huỷ, làm lại ở batch mới")
 		}
 	}
@@ -624,10 +710,10 @@ func (s *QCService) Fail(actor Actor, in QCDecisionInput) (*QCFailResult, error)
 		"QC fail for item "+item.InternalCode+" ("+reason+") → làm lại theo hướng "+route, nil)
 	return &QCFailResult{
 		Note: note, ScrappedBatchItemID: func() *uint {
-			if failed == nil {
+			if failedID == 0 {
 				return nil
 			}
-			id := failed.ID
+			id := failedID
 			return &id
 		}(),
 		BatchCode: batchCode, MaterialName: matName, Route: route, Attempt: maxInt(attempt, 1),

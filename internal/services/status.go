@@ -1,6 +1,8 @@
 package services
 
 import (
+	"time"
+
 	"the-fulfillment/backend/internal/models"
 	"the-fulfillment/backend/internal/repositories"
 )
@@ -137,13 +139,24 @@ func recomputeBatchStatuses(repo *repositories.Repositories, batchIDs []uint, ac
 	return recomputeParentBatchStatuses(repo, parentIDs, actor)
 }
 
+// closeReasonAllChildrenClosed is stamped on a parent batch whose every child is
+// finished-and-closed, so the batch list can say why the cụm disappeared from the
+// production board.
+const closeReasonAllChildrenClosed = "Mọi batch con đã đóng — không còn gì để sản xuất"
+
 // recomputeParentBatchStatuses is recomputeParentBatchStatus over a set, on the
 // same fixed budget as recomputeBatchStatuses above.
+//
+// Con ĐÃ ĐÓNG bị bỏ qua khi tính trạng thái mẹ. Một tấm bị huỷ không bao giờ
+// được làm tiếp (hàng làm lại nằm ở batch mới), nên nếu vẫn tính nó thì mẹ đứng
+// mãi ở trạng thái của tấm chết đó và cả cụm không bao giờ xong. Khi MỌI con đã
+// đóng thì bản thân cụm cũng hết việc: đóng mẹ luôn, giữ nguyên trạng thái làm
+// lịch sử của phần đã làm được.
 func recomputeParentBatchStatuses(repo *repositories.Repositories, parentIDs []uint, actor Actor) error {
 	if len(parentIDs) == 0 {
 		return nil
 	}
-	childStatuses, err := repo.Batch.ChildBatchStatusesFor(parentIDs)
+	childStates, err := repo.Batch.ChildBatchStatesFor(parentIDs)
 	if err != nil {
 		return err
 	}
@@ -154,16 +167,33 @@ func recomputeParentBatchStatuses(repo *repositories.Repositories, parentIDs []u
 
 	var history []models.StatusHistory
 	moved := map[models.InternalStatus][]uint{}
+	var toClose []uint
 	for _, p := range parents {
-		children, ok := childStatuses[p.ID]
+		children, ok := childStates[p.ID]
 		if !ok || len(children) == 0 {
-			continue
+			continue // không phải batch mẹ
 		}
 		newStatus := models.StatusQCPassed
-		for _, s := range children {
-			if s.Rank() < newStatus.Rank() {
-				newStatus = s
+		open := 0
+		for _, c := range children {
+			if c.Closed {
+				continue
 			}
+			open++
+			if c.Status.Rank() < newStatus.Rank() {
+				newStatus = c.Status
+			}
+		}
+		if open == 0 {
+			if p.ClosedAt == nil {
+				toClose = append(toClose, p.ID)
+				history = append(history, models.StatusHistory{
+					EntityType: models.EntityBatch, EntityID: p.ID,
+					FromStatus: string(p.Status), ToStatus: string(p.Status),
+					ChangedByID: actor.IDPtr(), Note: closeReasonAllChildrenClosed,
+				})
+			}
+			continue
 		}
 		if newStatus == p.Status {
 			continue
@@ -180,40 +210,22 @@ func recomputeParentBatchStatuses(repo *repositories.Repositories, parentIDs []u
 			return err
 		}
 	}
+	if len(toClose) > 0 {
+		if _, err := repo.Batch.CloseBatches(toClose, closeReasonAllChildrenClosed, time.Now()); err != nil {
+			return err
+		}
+	}
 	return repo.Status.CreateBulk(history)
 }
 
 // recomputeParentBatchStatus recalculates and persists a parent batch's status as
-// the least-advanced status across its child batches — the parent reaches
-// QC_PASSED only when every child has. Called whenever a child's status changes
-// (QC roll-up or the production board cascade). A batch with no children is left
+// the least-advanced status across its OPEN child batches — the parent reaches
+// QC_PASSED only when every open child has, and closes when none is left open.
+// Called whenever a child's status changes (QC roll-up, the production board
+// cascade, or a child being scrapped). A batch with no children is left
 // untouched, so it is safe to call on any batch id.
 func recomputeParentBatchStatus(repo *repositories.Repositories, parentID uint, actor Actor) error {
-	children, err := repo.Batch.ChildBatchesFor(parentID)
-	if err != nil {
-		return err
-	}
-	if len(children) == 0 {
-		return nil
-	}
-	newStatus := models.StatusQCPassed
-	for _, c := range children {
-		if c.Status.Rank() < newStatus.Rank() {
-			newStatus = c.Status
-		}
-	}
-	parent, err := repo.Batch.FindLite(parentID)
-	if err != nil {
-		return err
-	}
-	if newStatus != parent.Status {
-		old := string(parent.Status)
-		if err := repo.Batch.UpdateStatusColumn(parent.ID, newStatus); err != nil {
-			return err
-		}
-		_ = recordStatus(repo, models.EntityBatch, parent.ID, old, string(newStatus), actor, "derived from child batches")
-	}
-	return nil
+	return recomputeParentBatchStatuses(repo, []uint{parentID}, actor)
 }
 
 // recomputeOrderItemStatus recalculates and persists one item's internal status

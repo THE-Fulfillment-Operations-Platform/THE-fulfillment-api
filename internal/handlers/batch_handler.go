@@ -58,7 +58,10 @@ func (h *Handlers) GetBatch(c *gin.Context) {
 	if !ok {
 		return
 	}
-	b, err := h.svc.Batch.Get(id)
+	// GetWithScrapHistory: batch đã đóng không còn phần nào sống, nên bản Get
+	// thường trả về một batch trông như trống rỗng. Màn chi tiết của một tấm vừa
+	// huỷ phải kể được nó đã làm ra những gì.
+	b, err := h.svc.Batch.GetWithScrapHistory(id)
 	if err != nil {
 		response.Fail(c, err)
 		return
@@ -90,7 +93,7 @@ func (h *Handlers) DownloadBatchAssetsZip(c *gin.Context) {
 	if !ok {
 		return
 	}
-	batch, err := h.svc.Batch.Get(id)
+	batch, err := h.svc.Batch.GetWithScrapHistory(id)
 	if err != nil {
 		response.Fail(c, err)
 		return
@@ -165,4 +168,25 @@ func (h *Handlers) UpdateBatchStatus(c *gin.Context) {
 		return
 	}
 	response.OK(c, b)
+}
+
+// ScrapBatch huỷ một batch đã sản xuất: ghi bỏ mọi phần còn sống kèm lý do,
+// đóng batch và trả sản phẩm về hàng chờ làm lại. Ngược lại với DeleteBatch —
+// cái đó chỉ chạy khi chưa ai đụng vào và xoá sạch dấu vết.
+// POST /api/batches/:id/scrap
+func (h *Handlers) ScrapBatch(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	var in services.ScrapBatchInput
+	if !bindJSON(c, &in) {
+		return
+	}
+	res, err := h.svc.Batch.Scrap(actor(c), id, in)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, res)
 }

@@ -200,6 +200,11 @@ type QCResult string
 const (
 	QCPass QCResult = "PASS"
 	QCFail QCResult = "FAIL"
+	// QCUndo là gỡ một lần QC pass bấm nhầm: sản phẩm KHÔNG hỏng, không có tấm
+	// nào bị vứt đi, chỉ là cửa QC đóng nhầm nên phải mở lại. Nó là một bản ghi
+	// QC riêng (không phải FAIL) để lịch sử QC nói đúng chuyện đã xảy ra — FAIL
+	// đồng nghĩa với huỷ hàng và làm lại, còn đây thì không.
+	QCUndo QCResult = "UNDO"
 )
 
 // ImportJobStatus tracks the lifecycle of an order import.
