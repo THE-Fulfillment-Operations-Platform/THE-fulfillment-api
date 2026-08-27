@@ -15,7 +15,8 @@ import (
 func TestDesignFileName_PrefixesSKU(t *testing.T) {
 	used := map[string]int{}
 
-	got := designFileName("", "100001_1/3", "BR-SH-2-KEP", 2, models.DesignSideSingle, "x/y.png", used)
+	base := designFileBase("", "100001_1/3", "BR-SH-2-KEP", 2, models.DesignSideSingle)
+	got := reserveZipName(used, base, ".png")
 	want := "BR-SH-2-KEP_100001_1-3_2.png"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -26,9 +27,10 @@ func TestDesignFileName_PrefixesSKU(t *testing.T) {
 // e.g. a duplicated URL) must not overwrite each other — usedNames appends -2, -3…
 func TestDesignFileName_DedupsCollisions(t *testing.T) {
 	used := map[string]int{}
+	base := designFileBase("", "100001_1/1", "AAA", 1, models.DesignSideSingle)
 
-	first := designFileName("", "100001_1/1", "AAA", 1, models.DesignSideSingle, "a.png", used)
-	second := designFileName("", "100001_1/1", "AAA", 1, models.DesignSideSingle, "b.png", used)
+	first := reserveZipName(used, base, ".png")
+	second := reserveZipName(used, base, ".png")
 
 	if first != "AAA_100001_1-1_1.png" {
 		t.Errorf("first: got %q", first)
@@ -44,8 +46,8 @@ func TestDesignFileName_DedupsCollisions(t *testing.T) {
 func TestDesignFileName_SidesShareInternalCode(t *testing.T) {
 	used := map[string]int{}
 
-	front := designFileName("Batch_101001", "100001_2/3", "WDHWB-10IN", 2, models.DesignSideFront, "f.pdf", used)
-	back := designFileName("Batch_101001", "100001_2/3", "WDHWB-10IN", 2, models.DesignSideBack, "b.pdf", used)
+	front := reserveZipName(used, designFileBase("Batch_101001", "100001_2/3", "WDHWB-10IN", 2, models.DesignSideFront), ".pdf")
+	back := reserveZipName(used, designFileBase("Batch_101001", "100001_2/3", "WDHWB-10IN", 2, models.DesignSideBack), ".pdf")
 
 	if front != "Batch_101001/WDHWB-10IN_100001_2-3_2_FRONT.pdf" {
 		t.Errorf("front: got %q", front)

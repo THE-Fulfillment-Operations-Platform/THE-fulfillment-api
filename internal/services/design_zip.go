@@ -49,7 +49,8 @@ type DesignZipQuery struct {
 // StreamDesignAssetsZip streams ONLY the original design files (front + back) of
 // design-queue items into a ZIP — never the mockup and never the production
 // print/cut files. Every file goes into a single folder (see DesignAssetsFolder)
-// and is named "SKU_INTERNALCODE_QUANTITY[_SIDE].EXT" (see designFileName), written
+// and is named "SKU_INTERNALCODE_QUANTITY[_SIDE].EXT" (see designFileBase; the
+// extension comes from the downloaded file itself, not from the link), written
 // in SKU order. See
 // DesignZipQuery for how the item set is chosen. A single file that fails to
 // download is skipped (not fatal) so one broken URL doesn't abandon the rest of
@@ -79,6 +80,7 @@ func (s *OrderService) StreamDesignAssetsZip(ctx context.Context, w io.Writer, q
 	client := newSafeAssetClient(30 * time.Second)
 	usedNames := map[string]int{}
 	written := 0
+	failed := make([]string, 0)
 
 	// Write in SKU order so the archive's entry order matches the order the
 	// extracted folder will show (see sortDesignItemsBySKU).
@@ -90,9 +92,11 @@ func (s *OrderService) StreamDesignAssetsZip(ctx context.Context, w io.Writer, q
 
 	for _, it := range ordered {
 		for _, a := range designAssetsForItem(it) {
-			entryName := designFileName(folder, it.InternalCode, it.SKUCode, it.Quantity, a.side, a.url, usedNames)
-			if err := writeURLToZipEntry(ctx, client, zw, a.url, entryName); err != nil {
-				// Skip a single broken/blocked asset rather than aborting the whole ZIP.
+			entryBase := designFileBase(folder, it.InternalCode, it.SKUCode, it.Quantity, a.side)
+			if err := writeURLToZipEntry(ctx, client, zw, a.url, entryBase, usedNames); err != nil {
+				// Skip a single broken/blocked asset rather than aborting the whole ZIP —
+				// but record it, so the note inside says which item is missing and why.
+				failed = append(failed, describeAssetFailure(it, a, err))
 				continue
 			}
 			written++
@@ -100,7 +104,10 @@ func (s *OrderService) StreamDesignAssetsZip(ctx context.Context, w io.Writer, q
 	}
 
 	if written == 0 {
-		return apperr.Unprocessable("Không có file design nào để tải (kiểm tra link design của các đơn đã chọn)")
+		return apperr.Unprocessable(noDesignFilesMessage(failed))
+	}
+	if err := writeZipErrorNote(zw, folder, failed); err != nil {
+		return err
 	}
 	return zw.Close()
 }

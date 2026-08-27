@@ -1,12 +1,14 @@
 package services
 
 import (
+	"archive/zip"
+	"errors"
 	"fmt"
-	"net/url"
-	"path"
+	"io"
 	"sort"
 	"strings"
 
+	"the-fulfillment/backend/internal/apperr"
 	"the-fulfillment/backend/internal/models"
 )
 
@@ -60,31 +62,19 @@ func sanitizeFileToken(token string) string {
 	return out
 }
 
-// extFromURL extracts a file extension from a URL path, defaulting to .bin when
-// the URL has none (e.g. a Google-Drive share link).
-func extFromURL(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		u = &url.URL{Path: rawURL}
-	}
-	ext := path.Ext(u.Path)
-	if ext == "" {
-		return ".bin"
-	}
-	return ext
-}
-
-// designFileName builds the "SKU_INTERNALCODE_QUANTITY[_SIDE].EXT" name required
-// for design downloads (e.g. WDHWB-10IN_100001_1-3_2_FRONT.pdf), where INTERNALCODE
-// is the item's internal (QR) code and QUANTITY is the item's ordered quantity —
-// so a designer opening a file sees exactly which order/SKU it belongs to. The SKU
-// leads the name on purpose: a file explorer sorts the extracted folder by name, so
-// every file of the same SKU lands together instead of being scattered across
-// orders. Both sides of one item share the same prefix; SINGLE-side files carry
-// no side suffix. usedNames guards against overwriting when two files would
-// otherwise collide, appending -2, -3, … The optional folder prefixes the name.
-func designFileName(folder, internalCode, sku string, qty int, side models.DesignSide, rawURL string, usedNames map[string]int) string {
-	ext := extFromURL(rawURL)
+// designFileBase builds the extension-LESS "SKU_INTERNALCODE_QUANTITY[_SIDE]"
+// name required for design downloads (e.g. WDHWB-10IN_100001_1-3_2_FRONT), where
+// INTERNALCODE is the item's internal (QR) code and QUANTITY is the item's ordered
+// quantity — so a designer opening a file sees exactly which order/SKU it belongs
+// to. The SKU leads the name on purpose: a file explorer sorts the extracted folder
+// by name, so every file of the same SKU lands together instead of being scattered
+// across orders. Both sides of one item share the same prefix; SINGLE-side files
+// carry no side suffix. The optional folder prefixes the name.
+//
+// The extension is deliberately NOT part of this: it is only known once the asset
+// has been fetched and its real type resolved (see resolveAssetExt), so the caller
+// appends it with reserveZipName.
+func designFileBase(folder, internalCode, sku string, qty int, side models.DesignSide) string {
 	if qty < 1 {
 		qty = 1
 	}
@@ -95,22 +85,97 @@ func designFileName(folder, internalCode, sku string, qty int, side models.Desig
 	case models.DesignSideBack:
 		base += "_BACK"
 	}
-	name := base + ext
 	if folder != "" {
-		name = folder + "/" + name
+		base = folder + "/" + base
 	}
+	return base
+}
+
+// reserveZipName joins an extension-less entry base with its resolved extension
+// and guards against overwriting when two files would otherwise collide,
+// appending -2, -3, … Names are reserved only for assets that actually
+// downloaded, so a broken URL no longer burns a suffix.
+func reserveZipName(usedNames map[string]int, base, ext string) string {
+	name := base + ext
 	if count, ok := usedNames[name]; ok {
 		count++
 		usedNames[name] = count
-		name = fmt.Sprintf("%s-%d%s", strings.TrimSuffix(name, ext), count, ext)
-	} else {
-		usedNames[name] = 1
+		return fmt.Sprintf("%s-%d%s", base, count, ext)
 	}
+	usedNames[name] = 1
 	return name
 }
 
+// assetFailReason turns a download error into the one line that belongs in the
+// ZIP's error note: the user-facing message only, never the wrapped internals.
+func assetFailReason(err error) string {
+	var ae *apperr.Error
+	if errors.As(err, &ae) && ae.Message != "" {
+		return ae.Message
+	}
+	return "không tải được file"
+}
+
+// describeAssetFailure is one line of the error note: which product, which side,
+// why it failed, and the link to fix — everything needed to repair it without
+// hunting through the app first.
+func describeAssetFailure(it *models.OrderItem, a designAsset, err error) string {
+	side := ""
+	switch a.side {
+	case models.DesignSideFront:
+		side = " (mặt trước)"
+	case models.DesignSideBack:
+		side = " (mặt sau)"
+	}
+	return fmt.Sprintf("- %s · %s%s: %s\n  link: %s",
+		it.InternalCode, it.SKUCode, side, assetFailReason(err), a.url)
+}
+
+// noDesignFilesMessage explains an empty download. When every link failed for the
+// same reason, saying so beats the generic "check the links" — that reason is
+// usually the whole fix.
+func noDesignFilesMessage(failed []string) string {
+	base := "Không có file design nào để tải"
+	if len(failed) == 0 {
+		return base + " (kiểm tra link design của các đơn đã chọn)"
+	}
+	return fmt.Sprintf("%s — %d link lỗi. Ví dụ:\n%s", base, len(failed), failed[0])
+}
+
+// zipErrorNoteName is the note listing the design files that could not be
+// downloaded. It leads with "_" so a file explorer sorts it to the top of the
+// extracted folder — a designer must see it before starting work, otherwise a
+// silently missing file looks like an item that simply was not in the batch.
+const zipErrorNoteName = "_FILE-LOI.txt"
+
+// writeZipErrorNote adds the note to the archive. Called only when at least one
+// file DID download: with nothing to deliver the caller returns a real error
+// instead, so the user gets a message rather than a ZIP holding just a complaint.
+func writeZipErrorNote(zw *zip.Writer, folder string, failed []string) error {
+	if len(failed) == 0 {
+		return nil
+	}
+	name := zipErrorNoteName
+	if folder != "" {
+		name = folder + "/" + name
+	}
+	w, err := zw.Create(name)
+	if err != nil {
+		return apperr.Internal("could not write ZIP error note").Wrap(err)
+	}
+	body := fmt.Sprintf("KHÔNG TẢI ĐƯỢC %d FILE DESIGN\n\n%s\n\n"+
+		"Cách xử lý: mở đúng sản phẩm trong màn \"Chờ thiết kế\" và sửa lại link design.\n"+
+		"Link phải trỏ tới ĐÚNG MỘT FILE (không phải thư mục) và được chia sẻ ở chế độ\n"+
+		"\"Bất kỳ ai có đường liên kết\" thì máy chủ mới tải được.\n",
+		len(failed), strings.Join(failed, "\n"))
+	if _, err := io.WriteString(w, body); err != nil {
+		return apperr.Internal("could not write ZIP error note").Wrap(err)
+	}
+	return nil
+}
+
 // sortDesignItemsBySKU orders the items of a design ZIP the same way a file
-// explorer will order the extracted folder — by the name tokens designFileName
+// explorer will order the extracted folder — by the name tokens designFileBase
 // builds, SKU first then internal code. Without it the ZIP's entry order is the
 // query order (newest item first), so a designer browsing the archive before
 // extracting sees the files scattered across SKUs.

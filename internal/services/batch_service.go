@@ -2,13 +2,12 @@ package services
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"path"
 	"strings"
 	"time"
 
@@ -969,18 +968,24 @@ func (s *BatchService) StreamBatchAssetsZip(ctx context.Context, w io.Writer, ba
 		}
 		sortDesignItemsBySKU(ordered)
 
+		failed := make([]string, 0)
 		for _, it := range ordered {
 			for _, a := range designAssetsForItem(it) {
-				entryName := designFileName(designFolder, it.InternalCode, it.SKUCode, it.Quantity, a.side, a.url, usedNames)
-				if err := writeURLToZipEntry(ctx, client, zw, a.url, entryName); err != nil {
-					continue // skip one broken design file, keep the rest
+				entryBase := designFileBase(designFolder, it.InternalCode, it.SKUCode, it.Quantity, a.side)
+				if err := writeURLToZipEntry(ctx, client, zw, a.url, entryBase, usedNames); err != nil {
+					// Skip one broken design file, keep the rest — but list it in the note.
+					failed = append(failed, describeAssetFailure(it, a, err))
+					continue
 				}
 				written++
 			}
 		}
 
 		if written == 0 {
-			return apperr.Unprocessable("Không có file design nào để tải cho batch này")
+			return apperr.Unprocessable(noDesignFilesMessage(failed))
+		}
+		if err := writeZipErrorNote(zw, designFolder, failed); err != nil {
+			return err
 		}
 		return zw.Close()
 	}
@@ -1016,8 +1021,7 @@ func (s *BatchService) StreamBatchAssetsZip(ctx context.Context, w io.Writer, ba
 			if strings.TrimSpace(asset.url) == "" {
 				continue
 			}
-			entryName := zipEntryName(code, asset.type_, asset.url, usedNames)
-			if err := writeURLToZipEntry(ctx, client, zw, asset.url, entryName); err != nil {
+			if err := writeURLToZipEntry(ctx, client, zw, asset.url, code+"-"+asset.type_, usedNames); err != nil {
 				continue
 			}
 			manifest = append(manifest, fmt.Sprintf("%s,%s,%s", code, asset.type_, asset.url))
@@ -1040,11 +1044,20 @@ func (s *BatchService) StreamBatchAssetsZip(ctx context.Context, w io.Writer, ba
 	return zw.Close()
 }
 
-func writeURLToZipEntry(ctx context.Context, client *http.Client, zw *zip.Writer, rawURL, entryName string) error {
+// writeURLToZipEntry downloads one asset and writes it into the archive as
+// entryBase + the extension resolved from the response (see resolveAssetExt).
+// entryBase carries NO extension: the real type is only knowable after the fetch,
+// and naming an opaque download link ".bin" up front is what left designers with
+// files their OS would not open.
+func writeURLToZipEntry(ctx context.Context, client *http.Client, zw *zip.Writer, rawURL, entryBase string, usedNames map[string]int) error {
+	// A pasted share link points at a viewer page, not at the bytes — rewrite it
+	// to the direct-download URL before fetching (see normalizeAssetURL).
+	fetchURL := normalizeAssetURL(rawURL)
+
 	// Reject non-http(s) schemes and private/loopback hosts before dialing. The
 	// client's dial-time guard is the authoritative SSRF check (also covers
 	// redirects + rebinding); this gives an early, clear rejection.
-	u, err := validatePublicHTTPURL(rawURL)
+	u, err := validatePublicHTTPURL(fetchURL)
 	if err != nil {
 		return apperr.Unprocessable("Asset URL not allowed: " + err.Error())
 	}
@@ -1062,38 +1075,53 @@ func writeURLToZipEntry(ctx context.Context, client *http.Client, zw *zip.Writer
 	if resp.StatusCode != http.StatusOK {
 		return apperr.Internal(fmt.Sprintf("asset request failed: %s -> %d", rawURL, resp.StatusCode))
 	}
+	// Refuse an oversized file outright instead of silently truncating it at the
+	// cap and handing over a corrupt half-file.
+	if resp.ContentLength > maxAssetBytes {
+		return apperr.Unprocessable("file vượt quá giới hạn 100MB")
+	}
 
+	// The ORIGINAL url is passed on: it is the one that may carry a real extension
+	// (a Dropbox link keeps ".png" in its path) and the one a user must fix if the
+	// fetch turns out to be a web page.
+	return writeResponseToZipEntry(zw, resp, rawURL, entryBase, usedNames)
+}
+
+// writeResponseToZipEntry is the half of the download that needs no network, so
+// it can be tested directly: name the entry from what came back, then stream the
+// body into it.
+func writeResponseToZipEntry(zw *zip.Writer, resp *http.Response, rawURL, entryBase string, usedNames map[string]int) error {
+	// Peek at the first bytes so the type can be sniffed when neither the URL nor
+	// the headers name it — then put them back in front of the body.
+	head := make([]byte, sniffLen)
+	n, err := io.ReadFull(resp.Body, head)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return apperr.Internal("could not read asset").Wrap(err)
+	}
+	head = head[:n]
+
+	// A web page is never a design file: putting it in the ZIP is how a Drive
+	// viewer page ended up masquerading as artwork. Fail the asset instead.
+	if isHTMLResponse(resp.Header, head) {
+		return apperr.Unprocessable(assetFetchHint(rawURL))
+	}
+
+	entryName := reserveZipName(usedNames, entryBase, resolveAssetExt(rawURL, resp.Header, head))
 	entry, err := zw.Create(entryName)
 	if err != nil {
 		return apperr.Internal("could not write ZIP entry").Wrap(err)
 	}
 
 	// Cap per-asset size so a hostile/huge remote file can't exhaust resources.
-	if _, err = io.Copy(entry, io.LimitReader(resp.Body, maxAssetBytes)); err != nil {
+	body := io.MultiReader(bytes.NewReader(head), resp.Body)
+	if _, err = io.Copy(entry, io.LimitReader(body, maxAssetBytes)); err != nil {
 		return apperr.Internal("could not stream asset into ZIP").Wrap(err)
 	}
 	return nil
 }
 
-func zipEntryName(code, assetType, rawURL string, usedNames map[string]int) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		u = &url.URL{Path: rawURL}
-	}
-	ext := path.Ext(u.Path)
-	if ext == "" {
-		ext = ".bin"
-	}
-	name := fmt.Sprintf("%s-%s%s", code, assetType, ext)
-	if count, ok := usedNames[name]; ok {
-		count++
-		usedNames[name] = count
-		name = fmt.Sprintf("%s-%d%s", strings.TrimSuffix(name, ext), count, ext)
-	} else {
-		usedNames[name] = 1
-	}
-	return name
-}
+// sniffLen is what http.DetectContentType reads at most.
+const sniffLen = 512
 
 func sanitizeZipComponent(value string) string {
 	value = strings.TrimSpace(value)
