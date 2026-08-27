@@ -351,12 +351,22 @@ paths:
   /api/items:
     get:
       tags: [Items]
-      summary: Item view (filter store, sku, status, batch, date)
+      summary: Item view (filter seller, store, sku, status, batch, date)
       parameters:
         - { name: sku, in: query, schema: { type: string } }
         - { name: status, in: query, schema: { type: string, enum: [PENDING, PRINTED, CUT, QC_PASSED] } }
         - { name: design_status, in: query, schema: { type: string } }
         - { name: batch_id, in: query, schema: { type: integer } }
+        - name: seller_id
+          in: query
+          description: Chỉ lấy sản phẩm thuộc đơn của seller này.
+          schema: { type: integer }
+        - name: with_seller
+          in: query
+          description: >-
+            Trả kèm seller của đơn (order.seller). Tắt mặc định vì đây là một
+            round trip nữa tới DB; chỉ màn nào in tên seller mới bật.
+          schema: { type: boolean }
       responses: { '200': { description: OK } }
   /api/items/{id}:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]

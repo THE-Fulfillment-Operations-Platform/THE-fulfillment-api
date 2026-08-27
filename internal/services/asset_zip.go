@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"sort"
 	"strings"
 
 	"the-fulfillment/backend/internal/models"
@@ -73,11 +74,13 @@ func extFromURL(rawURL string) string {
 	return ext
 }
 
-// designFileName builds the "INTERNALCODE_SKU_QUANTITY[_SIDE].EXT" name required
-// for design downloads (e.g. 100001_1-3_WDHWB-10IN_2_FRONT.pdf), where INTERNALCODE
+// designFileName builds the "SKU_INTERNALCODE_QUANTITY[_SIDE].EXT" name required
+// for design downloads (e.g. WDHWB-10IN_100001_1-3_2_FRONT.pdf), where INTERNALCODE
 // is the item's internal (QR) code and QUANTITY is the item's ordered quantity —
-// so a designer opening a file sees exactly which order/SKU it belongs to. Both
-// sides of one item share the same internal-code prefix; SINGLE-side files carry
+// so a designer opening a file sees exactly which order/SKU it belongs to. The SKU
+// leads the name on purpose: a file explorer sorts the extracted folder by name, so
+// every file of the same SKU lands together instead of being scattered across
+// orders. Both sides of one item share the same prefix; SINGLE-side files carry
 // no side suffix. usedNames guards against overwriting when two files would
 // otherwise collide, appending -2, -3, … The optional folder prefixes the name.
 func designFileName(folder, internalCode, sku string, qty int, side models.DesignSide, rawURL string, usedNames map[string]int) string {
@@ -85,7 +88,7 @@ func designFileName(folder, internalCode, sku string, qty int, side models.Desig
 	if qty < 1 {
 		qty = 1
 	}
-	base := fmt.Sprintf("%s_%s_%d", sanitizeFileToken(internalCode), sanitizeFileToken(sku), qty)
+	base := fmt.Sprintf("%s_%s_%d", sanitizeFileToken(sku), sanitizeFileToken(internalCode), qty)
 	switch side {
 	case models.DesignSideFront:
 		base += "_FRONT"
@@ -104,4 +107,19 @@ func designFileName(folder, internalCode, sku string, qty int, side models.Desig
 		usedNames[name] = 1
 	}
 	return name
+}
+
+// sortDesignItemsBySKU orders the items of a design ZIP the same way a file
+// explorer will order the extracted folder — by the name tokens designFileName
+// builds, SKU first then internal code. Without it the ZIP's entry order is the
+// query order (newest item first), so a designer browsing the archive before
+// extracting sees the files scattered across SKUs.
+func sortDesignItemsBySKU(items []*models.OrderItem) {
+	sort.SliceStable(items, func(i, j int) bool {
+		si, sj := sanitizeFileToken(items[i].SKUCode), sanitizeFileToken(items[j].SKUCode)
+		if si != sj {
+			return si < sj
+		}
+		return sanitizeFileToken(items[i].InternalCode) < sanitizeFileToken(items[j].InternalCode)
+	})
 }

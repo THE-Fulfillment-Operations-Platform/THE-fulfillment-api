@@ -194,6 +194,11 @@ func itemFilterFrom(c *gin.Context) repositories.ItemFilter {
 		DateTo:           timeQueryPtr(c, "date_to"),
 		SortBy:           c.Query("sort"),
 		SortDir:          c.Query("order"),
+		// ?with_seller=1 — kèm seller của đơn. Mặc định tắt vì đó là một round
+		// trip nữa tới DB ở đầu kia internet, và phần lớn màn đọc /api/items
+		// (hàng chờ thiết kế, chọn hàng gom batch) không in tên seller. Màn Đơn
+		// hàng thì có cột Seller và bộ lọc theo seller nên nó tự bật.
+		WithSeller: c.Query("with_seller") == "1" || c.Query("with_seller") == "true",
 	}
 }
 

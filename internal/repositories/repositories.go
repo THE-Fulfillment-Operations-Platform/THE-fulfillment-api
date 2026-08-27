@@ -11,8 +11,18 @@ type Page struct {
 	PageSize int
 }
 
-// Normalize clamps page/pageSize to sane defaults.
+// PageSizeAll is the page size the UI sends for "Tất cả": give me every matching
+// row in one page. It reaches GORM as Limit(-1), which cancels the LIMIT clause,
+// so no repository needs a special case.
+const PageSizeAll = -1
+
+// Normalize clamps page/pageSize to sane defaults. A negative page size is the
+// explicit "Tất cả" request: it survives untouched (never clamped to 200) and
+// pins the page to 1, because there is only one page.
 func (p Page) Normalize() Page {
+	if p.PageSize < 0 {
+		return Page{Page: 1, PageSize: PageSizeAll}
+	}
 	if p.Page < 1 {
 		p.Page = 1
 	}
@@ -25,8 +35,17 @@ func (p Page) Normalize() Page {
 	return p
 }
 
-// Offset computes the SQL offset.
-func (p Page) Offset() int { return (p.Page - 1) * p.PageSize }
+// All reports whether this page asks for the whole result set.
+func (p Page) All() bool { return p.PageSize < 0 }
+
+// Offset computes the SQL offset. "Tất cả" starts at row 0 — computing it from a
+// negative page size would otherwise produce a bogus negative offset.
+func (p Page) Offset() int {
+	if p.All() {
+		return 0
+	}
+	return (p.Page - 1) * p.PageSize
+}
 
 // Repositories bundles every repository so services receive a single dependency.
 type Repositories struct {

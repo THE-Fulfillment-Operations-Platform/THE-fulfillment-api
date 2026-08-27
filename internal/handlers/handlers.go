@@ -51,7 +51,14 @@ func pageFrom(c *gin.Context) repositories.Page {
 func metaFor(p repositories.Page, total int64) *response.Meta {
 	p = p.Normalize()
 	totalPages := 0
-	if p.PageSize > 0 {
+	switch {
+	case p.All():
+		// "Tất cả" fits everything on one page; reporting 0 pages would make the
+		// pager render "Trang 1 / 0" and disable both nav buttons for no reason.
+		if total > 0 {
+			totalPages = 1
+		}
+	case p.PageSize > 0:
 		totalPages = int((total + int64(p.PageSize) - 1) / int64(p.PageSize))
 	}
 	return &response.Meta{Page: p.Page, PageSize: p.PageSize, Total: total, TotalPages: totalPages}

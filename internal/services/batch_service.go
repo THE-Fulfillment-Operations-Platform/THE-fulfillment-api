@@ -930,9 +930,9 @@ func BatchZipName(batch *models.Batch) string {
 // StreamBatchAssetsZip streams a batch's asset URLs into a ZIP archive.
 //
 // When designOnly is true it bundles ONLY the original design files (front + back)
-// into a single "Batch_<code>" folder, each named "INTERNALCODE_SKU_QUANTITY[_SIDE].EXT"
-// (see designFileName) — no mockup, no print/cut — matching the "download design"
-// requirement. When false it keeps
+// into a single "Batch_<code>" folder, each named "SKU_INTERNALCODE_QUANTITY[_SIDE].EXT"
+// (see designFileName) and written in SKU order — no mockup, no print/cut —
+// matching the "download design" requirement. When false it keeps
 // the full production bundle (design, mockup, print, cut) with the legacy flat
 // naming plus a manifest, so the existing "Download ZIP" on the batch board is
 // unchanged. A single broken/blocked asset URL is skipped (recorded), not fatal.
@@ -956,13 +956,20 @@ func (s *BatchService) StreamBatchAssetsZip(ctx context.Context, w io.Writer, ba
 	// designer can tell one batch's pull from another; matches BatchZipName's .zip.
 	designFolder := "Batch_" + sanitizeZipComponent(batch.Code)
 
-	for _, bi := range batch.Items {
-		it := bi.OrderItem
-		if it == nil || itemCancelled(it.CancellationStatus) {
-			continue
+	if designOnly {
+		// Written in SKU order so the archive matches how the extracted folder
+		// sorts (see sortDesignItemsBySKU) — batch.Items is in batch-line order.
+		ordered := make([]*models.OrderItem, 0, len(batch.Items))
+		for _, bi := range batch.Items {
+			it := bi.OrderItem
+			if it == nil || itemCancelled(it.CancellationStatus) {
+				continue
+			}
+			ordered = append(ordered, it)
 		}
+		sortDesignItemsBySKU(ordered)
 
-		if designOnly {
+		for _, it := range ordered {
 			for _, a := range designAssetsForItem(it) {
 				entryName := designFileName(designFolder, it.InternalCode, it.SKUCode, it.Quantity, a.side, a.url, usedNames)
 				if err := writeURLToZipEntry(ctx, client, zw, a.url, entryName); err != nil {
@@ -970,6 +977,17 @@ func (s *BatchService) StreamBatchAssetsZip(ctx context.Context, w io.Writer, ba
 				}
 				written++
 			}
+		}
+
+		if written == 0 {
+			return apperr.Unprocessable("Không có file design nào để tải cho batch này")
+		}
+		return zw.Close()
+	}
+
+	for _, bi := range batch.Items {
+		it := bi.OrderItem
+		if it == nil || itemCancelled(it.CancellationStatus) {
 			continue
 		}
 
@@ -1008,20 +1026,15 @@ func (s *BatchService) StreamBatchAssetsZip(ctx context.Context, w io.Writer, ba
 	}
 
 	if written == 0 {
-		if designOnly {
-			return apperr.Unprocessable("Không có file design nào để tải cho batch này")
-		}
 		return apperr.Unprocessable("No assets available for batch ZIP download")
 	}
 
-	if !designOnly {
-		m, err := zw.Create("manifest.txt")
-		if err != nil {
-			return apperr.Internal("could not write ZIP manifest").Wrap(err)
-		}
-		if _, err := io.WriteString(m, strings.Join(manifest, "\n")); err != nil {
-			return apperr.Internal("could not write ZIP manifest").Wrap(err)
-		}
+	m, err := zw.Create("manifest.txt")
+	if err != nil {
+		return apperr.Internal("could not write ZIP manifest").Wrap(err)
+	}
+	if _, err := io.WriteString(m, strings.Join(manifest, "\n")); err != nil {
+		return apperr.Internal("could not write ZIP manifest").Wrap(err)
 	}
 
 	return zw.Close()

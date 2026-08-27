@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"the-fulfillment/backend/internal/apperr"
+	"the-fulfillment/backend/internal/models"
 	"the-fulfillment/backend/internal/repositories"
 )
 
@@ -48,7 +49,8 @@ type DesignZipQuery struct {
 // StreamDesignAssetsZip streams ONLY the original design files (front + back) of
 // design-queue items into a ZIP — never the mockup and never the production
 // print/cut files. Every file goes into a single folder (see DesignAssetsFolder)
-// and is named "INTERNALCODE_SKU_QUANTITY[_SIDE].EXT" (see designFileName). See
+// and is named "SKU_INTERNALCODE_QUANTITY[_SIDE].EXT" (see designFileName), written
+// in SKU order. See
 // DesignZipQuery for how the item set is chosen. A single file that fails to
 // download is skipped (not fatal) so one broken URL doesn't abandon the rest of
 // the archive. It fails only when no design file could be written.
@@ -78,8 +80,15 @@ func (s *OrderService) StreamDesignAssetsZip(ctx context.Context, w io.Writer, q
 	usedNames := map[string]int{}
 	written := 0
 
+	// Write in SKU order so the archive's entry order matches the order the
+	// extracted folder will show (see sortDesignItemsBySKU).
+	ordered := make([]*models.OrderItem, 0, len(items))
 	for i := range items {
-		it := &items[i]
+		ordered = append(ordered, &items[i])
+	}
+	sortDesignItemsBySKU(ordered)
+
+	for _, it := range ordered {
 		for _, a := range designAssetsForItem(it) {
 			entryName := designFileName(folder, it.InternalCode, it.SKUCode, it.Quantity, a.side, a.url, usedNames)
 			if err := writeURLToZipEntry(ctx, client, zw, a.url, entryName); err != nil {
