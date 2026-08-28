@@ -48,6 +48,9 @@ type Services struct {
 	// TrackingSync is always present; it reports Enabled()=false when no provider
 	// is configured, so callers never branch on nil.
 	TrackingSync *TrackingSyncService
+	// Thumb is always present too; it reports Enabled()=false when no cache
+	// directory is configured, and then simply serves nothing.
+	Thumb *ThumbService
 }
 
 // TrackingOptions configures the 24hTrack shipment-tracking integration. A nil
@@ -59,9 +62,10 @@ type TrackingOptions struct {
 }
 
 // New builds the service bundle.
-func New(repo *repositories.Repositories, jwt *auth.Manager, carrier shipping.Carrier, track TrackingOptions) *Services {
+func New(repo *repositories.Repositories, jwt *auth.Manager, carrier shipping.Carrier, track TrackingOptions, thumbs ThumbOptions) *Services {
 	audit := NewAuditService(repo)
 	trackingSync := NewTrackingSyncService(repo, audit, track.Client, track.Tag, track.Resolve)
+	thumb := NewThumbService(repo, thumbs)
 	return &Services{
 		Auth:         &AuthService{repo: repo, jwt: jwt, audit: audit},
 		User:         &UserService{repo: repo, audit: audit},
@@ -72,11 +76,12 @@ func New(repo *repositories.Repositories, jwt *auth.Manager, carrier shipping.Ca
 		Order:        &OrderService{repo: repo, audit: audit, tracking: trackingSync},
 		Review:       &ReviewService{repo: repo, audit: audit},
 		Batch:        &BatchService{repo: repo, audit: audit},
-		QC:           &QCService{repo: repo, audit: audit},
+		QC:           &QCService{repo: repo, audit: audit, thumb: thumb},
 		Packing:      &PackingService{repo: repo, audit: audit, carrier: carrier, tracking: trackingSync},
 		Note:         &NoteService{repo: repo, audit: audit},
 		Audit:        audit,
 		Admin:        &AdminService{repo: repo, audit: audit},
 		TrackingSync: trackingSync,
+		Thumb:        thumb,
 	}
 }

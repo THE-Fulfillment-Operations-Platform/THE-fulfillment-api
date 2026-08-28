@@ -19,6 +19,10 @@ import (
 type QCService struct {
 	repo  *repositories.Repositories
 	audit *AuditService
+	// thumb serves cached, shrunk copies of seller mockups. Nil (or disabled) is
+	// a supported state: the scan payload then carries no thumbnail URL and the
+	// station falls back to loading the mockup from its origin.
+	thumb *ThumbService
 }
 
 // ScanRef identifies an item by its tem code or internal id.
@@ -64,13 +68,13 @@ func (s *QCService) findItemByID(id uint) (*models.OrderItem, error) {
 
 // QCScanResult is everything the QC station needs to compare product vs mockup.
 type QCScanResult struct {
-	ItemID        uint   `json:"item_id"`
-	ItemCode      string `json:"item_code"`
-	OrderCode     string `json:"order_code"`
-	StoreOrderID  string `json:"store_order_id"`
-	SKUCode       string `json:"sku_code"`
-	Quantity      int    `json:"quantity"`
-	MaterialName  string `json:"material_name"` // Loại VL
+	ItemID       uint   `json:"item_id"`
+	ItemCode     string `json:"item_code"`
+	OrderCode    string `json:"order_code"`
+	StoreOrderID string `json:"store_order_id"`
+	SKUCode      string `json:"sku_code"`
+	Quantity     int    `json:"quantity"`
+	MaterialName string `json:"material_name"` // Loại VL
 	// MaterialDescription is the spec text of the material(s) the item is produced
 	// in (e.g. "Gỗ 5mm 3 lớp - kích thước 4 inch in UV dán vào nhau") — shown next
 	// to the product name so QC can check size/material against the physical item.
@@ -79,13 +83,18 @@ type QCScanResult struct {
 	// SKUDescription is the catalog product description for the SKU — richer, more
 	// stable product spec text for QC to check against (falls back to nothing when
 	// the SKU has none). SKUProductName is the catalog product name.
-	SKUDescription string                `json:"sku_description"`
-	SKUProductName string                `json:"sku_product_name"`
-	ImageCode      string                `json:"image_code"` // Mã ảnh
-	EngraveText    string                `json:"engrave_text"`
-	DesignURL      string                `json:"design_url"` // Link ảnh / design (front/single)
-	BackDesignURL  string                `json:"back_design_url"`
-	MockupURL      string                `json:"mockup_url"`
+	SKUDescription string `json:"sku_description"`
+	SKUProductName string `json:"sku_product_name"`
+	ImageCode      string `json:"image_code"` // Mã ảnh
+	EngraveText    string `json:"engrave_text"`
+	DesignURL      string `json:"design_url"` // Link ảnh / design (front/single)
+	BackDesignURL  string `json:"back_design_url"`
+	MockupURL      string `json:"mockup_url"`
+	// MockupThumbURL points at our own cached, screen-sized copy of MockupURL.
+	// The station renders this and keeps MockupURL for the "open in a new tab"
+	// link, which should still lead to the seller's full-resolution original.
+	// Empty when thumbnailing is off or the item has no mockup.
+	MockupThumbURL string                `json:"mockup_thumb_url"`
 	PrintFileURL   string                `json:"print_file_url"`
 	CutFileURL     string                `json:"cut_file_url"`
 	InternalStatus models.InternalStatus `json:"internal_status"`
@@ -108,13 +117,14 @@ func (s *QCService) Scan(actor Actor, ref ScanRef) (*QCScanResult, error) {
 	}
 	res := &QCScanResult{
 		ItemID: item.ID, ItemCode: item.InternalCode, SKUCode: item.SKUCode,
-		Quantity: item.Quantity,
+		Quantity:      item.Quantity,
 		QCDescription: item.QCDescription, ImageCode: item.ImageCode,
 		EngraveText: item.EngraveText, DesignURL: item.DesignURL, BackDesignURL: item.BackDesignURL,
 		MockupURL:    item.MockupURL,
 		PrintFileURL: item.PrintFileURL, CutFileURL: item.CutFileURL,
 		InternalStatus: item.InternalStatus,
 	}
+	res.MockupThumbURL = s.thumb.SignedURL(item.ID, item.MockupURL)
 	if item.Order != nil {
 		res.OrderCode = item.Order.InternalCode
 		res.StoreOrderID = item.Order.StoreOrderID
@@ -138,7 +148,36 @@ func (s *QCService) Scan(actor Actor, ref ScanRef) (*QCScanResult, error) {
 		res.Batches = append(res.Batches, b)
 	}
 	s.audit.Log(actor, "QC_SCAN", "order_item", &item.ID, "Scanned item "+item.InternalCode+" for QC", nil)
+	s.warmTrayThumbnails(item)
 	return res, nil
+}
+
+// warmTrayThumbnails pre-builds the mockup thumbnails for the rest of the tray
+// the scanned item came from. QC does not scan random items — it works through a
+// batch, one piece after another — so the item on screen is a reliable predictor
+// of the next dozen. Doing this at scan time means only the first piece of a
+// tray ever waits for an upstream fetch.
+//
+// Best-effort throughout: a failed lookup costs a slower scan, nothing more.
+func (s *QCService) warmTrayThumbnails(item *models.OrderItem) {
+	if !s.thumb.Enabled() || item == nil {
+		return
+	}
+	batchIDs := make([]uint, 0, len(item.BatchItems))
+	for _, bi := range item.BatchItems {
+		if bi.Scrapped() {
+			continue
+		}
+		batchIDs = append(batchIDs, bi.BatchID)
+	}
+	if len(batchIDs) == 0 {
+		return
+	}
+	mockups, err := s.repo.OrderItem.MockupsForBatches(batchIDs)
+	if err != nil {
+		return
+	}
+	s.thumb.Warm(mockups)
 }
 
 // itemMaterialNames returns a comma-separated list of the distinct material

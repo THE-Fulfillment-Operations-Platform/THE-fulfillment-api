@@ -744,6 +744,46 @@ func (r *OrderItemRepository) OrderIDByCode(code string) (orderID uint, found bo
 	return out[0], true, nil
 }
 
+// ItemMockup pairs an item with the seller mockup URL QC compares against.
+type ItemMockup struct {
+	ItemID    uint   `gorm:"column:id"`
+	MockupURL string `gorm:"column:mockup_url"`
+}
+
+// MockupURLByID plucks just the item's mockup URL. The thumbnail cache calls
+// this only when it has to fetch a picture it does not hold yet; a cache hit
+// answers from the file name alone and never reaches the database.
+func (r *OrderItemRepository) MockupURLByID(id uint) (string, error) {
+	var out []string
+	if err := r.db.Model(&models.OrderItem{}).Where("id = ?", id).Pluck("mockup_url", &out).Error; err != nil {
+		return "", err
+	}
+	if len(out) == 0 {
+		return "", nil
+	}
+	return out[0], nil
+}
+
+// MockupsForBatches lists the (item, mockup URL) pairs produced in the given
+// batches. QC works a tray at a time, so scanning one item tells us which
+// mockups the operator is about to ask for — that is what the thumbnail warmer
+// pre-builds. Scrapped parts are excluded: those pieces were thrown away and
+// will never reach the QC station.
+func (r *OrderItemRepository) MockupsForBatches(batchIDs []uint) ([]ItemMockup, error) {
+	if len(batchIDs) == 0 {
+		return nil, nil
+	}
+	var out []ItemMockup
+	err := r.db.Model(&models.OrderItem{}).
+		Distinct("order_items.id", "order_items.mockup_url").
+		Joins("JOIN batch_items bi ON bi.order_item_id = order_items.id"+
+			" AND bi.deleted_at IS NULL AND bi.scrapped_at IS NULL").
+		Where("bi.batch_id IN ?", batchIDs).
+		Where("order_items.mockup_url <> ''").
+		Find(&out).Error
+	return out, err
+}
+
 // FindForBatching bulk-loads items with exactly the associations batch creation
 // checks (order review status, SKU material set) — one query set for the whole
 // selection instead of a fully-preloaded FindByID per item.

@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"errors"
 	"log"
 	"log/slog"
@@ -76,7 +78,21 @@ func main() {
 		log.Printf("tracking: 24hTrack integration on (tag=%s, interval=%s, batch=%d, resolve=%v)",
 			cfg.Track24hTag, cfg.Track24hSyncInterval, cfg.Track24hBatchSize, cfg.Track24hResolve)
 	}
-	svc := services.New(repo, jwtManager, carrier, trackOpts)
+	// Mockup thumbnail cache for the QC station. Its signing key is derived from
+	// the JWT secret rather than configured separately: there is no second secret
+	// to deploy or rotate, and a JWT-secret rotation invalidates outstanding
+	// thumbnail URLs too — which is the correct behaviour, since those URLs are
+	// bearer credentials of their own.
+	thumbKey := hmac.New(sha256.New, []byte(cfg.JWTSecret))
+	thumbKey.Write([]byte("ffm-thumb-url-v1"))
+	thumbOpts := services.ThumbOptions{
+		Dir:    cfg.ThumbCacheDir,
+		MaxPx:  cfg.ThumbMaxPx,
+		URLTTL: cfg.ThumbURLTTL,
+		Secret: thumbKey.Sum(nil),
+	}
+
+	svc := services.New(repo, jwtManager, carrier, trackOpts, thumbOpts)
 	h := handlers.New(svc)
 	router := routes.New(cfg, h, jwtManager)
 
@@ -101,6 +117,13 @@ func main() {
 	// Shipment tracking sync. Self-disabling when no provider is configured, so
 	// there is no second flag to keep in step with the client above.
 	maintenance.NewTrackingScheduler(svc.TrackingSync, cfg.Track24hSyncInterval, cfg.Track24hBatchSize).Start(purgeCtx)
+
+	// Evict mockup thumbnails nobody has looked at in a month, so the cache
+	// tracks what is actually in production rather than growing forever.
+	if svc.Thumb.Enabled() {
+		svc.Thumb.StartSweeper(purgeCtx, cfg.ThumbSweepInterval)
+		log.Printf("thumbnails: mockup cache on (dir=%s, max=%dpx)", cfg.ThumbCacheDir, cfg.ThumbMaxPx)
+	}
 
 	// Dev convenience: free the port if a previous run left an orphaned process
 	// holding it (a `go run` restart gotcha). No-op in production.

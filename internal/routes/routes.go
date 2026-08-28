@@ -96,6 +96,12 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	// (10 attempts/minute); successful logins are well under that.
 	api.POST("/auth/login", middleware.RateLimit(10, time.Minute), h.Login)
 
+	// Cached mockup thumbnails for the QC station. Public by necessity — an <img>
+	// tag cannot send the bearer token — so the URL carries its own HMAC
+	// signature, item scope and expiry, minted by the QC scan response. See
+	// handlers.ThumbnailAsset.
+	api.GET("/assets/thumb/:name", h.ThumbnailAsset)
+
 	// Authenticated routes.
 	authd := api.Group("")
 	authd.Use(middleware.Auth(jwt))

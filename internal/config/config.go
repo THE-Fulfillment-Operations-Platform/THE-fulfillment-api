@@ -100,6 +100,21 @@ type Config struct {
 	// tracking number yet, ask the provider whether a parcel was registered under
 	// this store order id. Only useful once shipments are tagged that way.
 	Track24hResolve bool
+
+	// Mockup thumbnail cache. Seller mockups live on Google Drive and other
+	// third-party hosts; fetching them straight from the browser is what made the
+	// QC station wait seconds per scan. The API caches shrunk copies on local
+	// disk instead. An empty ThumbCacheDir turns the whole thing off and the
+	// station goes back to loading mockups from their origin.
+	ThumbCacheDir string
+	// ThumbMaxPx is the longest edge of a cached thumbnail. The QC frame is
+	// ~450 CSS px, so this covers a 2x display with room to spare.
+	ThumbMaxPx int
+	// ThumbURLTTL is how long a signed thumbnail URL stays valid. It only has to
+	// outlive the screen it was rendered into.
+	ThumbURLTTL time.Duration
+	// ThumbSweepInterval is how often unused thumbnails are evicted from disk.
+	ThumbSweepInterval time.Duration
 }
 
 // Load reads configuration from a .env file (if present) and the process
@@ -176,6 +191,15 @@ func Load() *Config {
 		// once the client's own inter-call floor is applied.
 		Track24hBatchSize: getEnvAsInt("TRACK24H_BATCH_SIZE", 120),
 		Track24hResolve:   getEnvAsBool("TRACK24H_RESOLVE", true),
+
+		// Defaults are chosen so the cache is ON out of the box: it is a pure
+		// latency win and its failure mode is "as slow as before", never "broken".
+		// Point THUMB_CACHE_DIR at a mounted volume in Docker so a redeploy does
+		// not start from a cold cache.
+		ThumbCacheDir:      getEnv("THUMB_CACHE_DIR", "./data/thumbs"),
+		ThumbMaxPx:         getEnvAsInt("THUMB_MAX_PX", 900),
+		ThumbURLTTL:        time.Duration(getEnvAsInt("THUMB_URL_TTL_HOURS", 24)) * time.Hour,
+		ThumbSweepInterval: time.Duration(getEnvAsInt("THUMB_SWEEP_INTERVAL_HOURS", 24)) * time.Hour,
 	}
 
 	// Credentials are what actually make the integration work; a TRACK24H_ENABLED

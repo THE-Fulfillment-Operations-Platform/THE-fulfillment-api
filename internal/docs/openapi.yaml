@@ -500,6 +500,31 @@ paths:
               type: object
               properties: { code: { type: string }, item_id: { type: integer } }
       responses: { '200': { description: OK } }
+  /api/assets/thumb/{name}:
+    get:
+      tags: [QC]
+      summary: Ảnh mockup đã thu nhỏ, phục vụ trạm QC
+      description: >-
+        Trả bản sao mockup đã thu nhỏ và lưu đệm trên đĩa của API, thay cho việc
+        trình duyệt tải thẳng từ Google Drive (chậm hàng giây với file nặng).
+        Route này KHÔNG dùng bearer token — thẻ <img> không gửi được header
+        Authorization — nên chính URL là chứng thư: chữ ký HMAC gắn với đúng một
+        item và có hạn dùng, do phản hồi /api/qc/scan cấp qua trường
+        mockup_thumb_url. Sai chữ ký, hết hạn, hoặc không dựng được ảnh đều trả
+        404 và màn QC tự lùi về link gốc.
+      security: []
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string }, description: "<hash>.jpg" }
+        - { name: i, in: query, required: true, schema: { type: integer }, description: item id }
+        - { name: e, in: query, required: true, schema: { type: integer }, description: hạn dùng (unix) }
+        - { name: s, in: query, required: true, schema: { type: string }, description: chữ ký HMAC }
+      responses:
+        '200':
+          description: OK
+          content:
+            image/jpeg:
+              schema: { type: string, format: binary }
+        '404': { description: Không có ảnh để phục vụ (chữ ký sai/hết hạn, hoặc không dựng được) }
   /api/qc/pass:
     post:
       tags: [QC]
