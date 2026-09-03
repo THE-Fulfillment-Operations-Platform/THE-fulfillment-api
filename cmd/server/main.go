@@ -92,7 +92,7 @@ func main() {
 		Secret: thumbKey.Sum(nil),
 	}
 
-	svc := services.New(repo, jwtManager, carrier, trackOpts, thumbOpts)
+	svc := services.New(repo, jwtManager, carrier, trackOpts, thumbOpts, cfg.AppBaseURL)
 	h := handlers.New(svc)
 	router := routes.New(cfg, h, jwtManager)
 

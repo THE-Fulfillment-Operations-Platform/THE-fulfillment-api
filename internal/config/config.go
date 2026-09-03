@@ -28,6 +28,11 @@ type Config struct {
 	AppEnv  string
 	AppName string
 	Port    string
+	// AppBaseURL is the public web-app origin (the Nuxt frontend). It is only
+	// used to build human-clickable links in exported files (e.g. the "Link
+	// design" column of the batch-links sheet); nothing security-relevant
+	// depends on it.
+	AppBaseURL string
 
 	// Database
 	DBHost     string
@@ -126,9 +131,10 @@ func Load() *Config {
 	}
 
 	cfg := &Config{
-		AppEnv:  getEnv("APP_ENV", "development"),
-		AppName: getEnv("APP_NAME", "THE Fulfillment API"),
-		Port:    getEnv("PORT", "8080"),
+		AppEnv:     getEnv("APP_ENV", "development"),
+		AppName:    getEnv("APP_NAME", "THE Fulfillment API"),
+		Port:       getEnv("PORT", "8080"),
+		AppBaseURL: getEnv("APP_BASE_URL", "https://fulfillment.bacgiangdecor.com"),
 
 		DBHost:     getEnv("DB_HOST", "localhost"),
 		DBPort:     getEnv("DB_PORT", "5432"),
@@ -315,7 +321,27 @@ func (c *Config) Validate() error {
 	if demoWithDefaultPw {
 		log.Println("config: WARNING — demo users seeded with the default password (dev only; disable or change before production)")
 	}
+	// A dev run pointed at a REMOTE database is almost always a forgotten env
+	// file, and the cost is real: boot alone runs AutoMigrate and the seeder
+	// against live customer data. Cheap to say out loud, expensive to discover
+	// afterwards — so say it loudly enough to notice in a scrolling log.
+	if !c.isLocalDB() {
+		log.Printf("config: ******************************************************************")
+		log.Printf("config: WARNING — APP_ENV=%s nhưng DB_HOST=%s (KHÔNG phải máy local).", c.AppEnv, c.DBHost)
+		log.Printf("config: Server sẽ chạy migrate/seed trên database NÀY. Nếu đây là DB thật")
+		log.Printf("config: của khách, dừng ngay (Ctrl+C) và chạy lại bằng: make run")
+		log.Printf("config: ******************************************************************")
+	}
 	return nil
+}
+
+// isLocalDB reports whether the configured database lives on this machine.
+func (c *Config) isLocalDB() bool {
+	switch strings.ToLower(strings.TrimSpace(c.DBHost)) {
+	case "localhost", "127.0.0.1", "::1", "host.docker.internal", "db", "postgres":
+		return true
+	}
+	return false
 }
 
 // DSN builds the PostgreSQL connection string for GORM.

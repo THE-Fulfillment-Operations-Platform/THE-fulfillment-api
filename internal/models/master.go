@@ -86,11 +86,26 @@ func (SKU) TableName() string { return "skus" }
 // (sku_id, material_id) keeps the material set clean per SKU.
 type SKUMaterial struct {
 	Base
-	SKUID           uint     `json:"sku_id" gorm:"column:sku_id;index:idx_sku_material,unique;not null"`
-	MaterialID      uint     `json:"material_id" gorm:"index:idx_sku_material,unique;not null"`
-	Material        Material `json:"material,omitempty" gorm:"foreignKey:MaterialID"`
-	QuantityPerUnit int      `json:"quantity_per_unit" gorm:"not null;default:1"`
-	Note            string   `json:"note" gorm:"size:255"`
+	SKUID      uint     `json:"sku_id" gorm:"column:sku_id;index:idx_sku_material,unique;not null"`
+	MaterialID uint     `json:"material_id" gorm:"index:idx_sku_material,unique;not null"`
+	Material   Material `json:"material,omitempty" gorm:"foreignKey:MaterialID"`
+	// QuantityPerUnit is how much of this material ONE product consumes — a bill
+	// of materials figure. It is NOT the production quota.
+	QuantityPerUnit int `json:"quantity_per_unit" gorm:"not null;default:1"`
+	// ProductsPerUnit is the production quota of this (SKU, material) PAIR: how
+	// many products of THIS SKU one unit of the material (one sheet / one lot)
+	// yields. It is the inverse concept of QuantityPerUnit and deliberately a
+	// separate column: the same mica sheet yields 10 small trays but only 4 large
+	// ones, so a quota that lives on the material alone is wrong the moment two
+	// SKUs share it. nil = this pair has no quota of its own and falls back to
+	// Material.ProductsPerUnit (which is how every pre-existing row behaves).
+	//
+	// DIRECTION IS SETTLED (khách xác nhận 2026-09-01): "sản phẩm trên một tấm",
+	// i.e. products OUT of one unit — never "material needed for one product".
+	// The field next door means the opposite, so if this ever reads backwards in
+	// a report, the reading is wrong, not the number.
+	ProductsPerUnit *int   `json:"products_per_unit"`
+	Note            string `json:"note" gorm:"size:255"`
 }
 
 func (SKUMaterial) TableName() string { return "sku_materials" }

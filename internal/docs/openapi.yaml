@@ -122,12 +122,42 @@ paths:
     post:
       tags: [Users]
       summary: Tạo user (ADMIN/OWNER)
-      responses: { '201': { description: Created } }
+      description: >-
+        Email trùng một tài khoản ĐÃ XOÁ bị từ chối 409 với code
+        `USER_DELETED_EMAIL`, message nêu rõ tài khoản cũ là ai (họ tên + vai
+        trò). Gửi lại kèm `restore_deleted: true` thì hệ thống KHÔI PHỤC chính
+        tài khoản đó — giữ nguyên id, ghi đè họ tên/vai trò/mật khẩu mới — và
+        ghi audit `USER_RESTORE` kèm thông tin cũ.
+        Hai bước là cố ý: users.email là unique KHÔNG kèm điều kiện deleted_at
+        nên không thể chèn hàng thứ hai, mà khôi phục thì trao lại toàn bộ lịch
+        sử của người cũ (batch đã tạo, lượt QC, nhật ký) cho tài khoản đang tạo
+        — nếu hộp thư đã chuyển cho người khác thì đó là gán nhầm việc.
+        Email đang có người dùng thật vẫn bị từ chối 409 `CONFLICT` như cũ.
+      responses:
+        '201': { description: Created }
+        '409': { description: 'Email đang dùng (CONFLICT), hoặc thuộc tài khoản đã xoá (USER_DELETED_EMAIL — gửi lại với restore_deleted=true để khôi phục)' }
   /api/users/{id}:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
     get: { tags: [Users], summary: Chi tiết user, responses: { '200': { description: OK } } }
     put: { tags: [Users], summary: Cập nhật user, responses: { '200': { description: OK } } }
-    delete: { tags: [Users], summary: Xóa user, responses: { '200': { description: OK } } }
+    delete:
+      tags: [Users]
+      summary: Xoá user (ADMIN/OWNER) — xoá mềm, giữ truy vết
+      description: >-
+        Xoá MỀM: tài khoản biến khỏi danh sách và không đăng nhập được nữa,
+        nhưng hàng dữ liệu vẫn còn nên audit log, batch đã tạo và bản ghi QC của
+        người đó không bị mồ côi. Tuyển lại đúng email này sau đó sẽ khôi phục
+        chính tài khoản cũ (xem POST /api/users).
+        Từ chối ba trường hợp: tự xoá tài khoản đang đăng nhập (422), xoá OWNER
+        cuối cùng (422 — không còn ai quản trị hệ thống), và ADMIN xoá một OWNER
+        (403 — chỉ OWNER mới xoá được OWNER).
+        Muốn tạm dừng truy cập mà vẫn giữ tài khoản thì dùng PUT với
+        `is_active=false` thay vì xoá.
+      responses:
+        '200': { description: Đã xoá }
+        '403': { description: ADMIN không được xoá OWNER }
+        '404': { description: Không tìm thấy user }
+        '422': { description: Tự xoá chính mình / OWNER cuối cùng }
   /api/sellers:
     get: { tags: [Sellers], summary: Danh sách seller, responses: { '200': { description: OK } } }
     post: { tags: [Sellers], summary: Tạo seller, responses: { '201': { description: Created } } }
@@ -157,11 +187,28 @@ paths:
     post:
       tags: [Catalog]
       summary: Tạo SKU (single hoặc combo nhiều material)
+      description: >-
+        Mỗi phần tử `materials[]` là một cặp (SKU, NVL) với HAI con số khác nhau:
+        `quantity_per_unit` = một sản phẩm ăn bao nhiêu đơn vị NVL (định lượng
+        vật tư), và `products_per_unit` = ĐỊNH MỨC SẢN XUẤT của cặp này — một
+        đơn vị NVL (một tấm/lot) ra được bao nhiêu sản phẩm của SKU này. Định
+        mức là căn cứ chia batch: cùng một tấm mica ra 10 khay nhỏ nhưng chỉ 4
+        khay to, nên nó không thể nằm ở NVL. Chỉ OWNER đặt được (role khác gửi
+        lên bị bỏ qua); bỏ field = giữ nguyên giá trị đang lưu; ≤0 = xoá, cặp
+        rơi về `Material.products_per_unit` làm mặc định.
       responses: { '201': { description: Created } }
   /api/skus/{id}:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
     get: { tags: [Catalog], summary: Chi tiết SKU, responses: { '200': { description: OK } } }
-    put: { tags: [Catalog], summary: Cập nhật SKU + material set, responses: { '200': { description: OK } } }
+    put:
+      tags: [Catalog]
+      summary: Cập nhật SKU + material set
+      description: >-
+        Gửi `materials[]` là thay TOÀN BỘ material set. Định mức
+        `products_per_unit` của cặp nào không gửi trong payload thì được giữ
+        nguyên (màn mapping chỉ gửi material id, không được phép xoá định mức
+        OWNER đã đặt); chỉ OWNER mới đổi/xoá được.
+      responses: { '200': { description: OK } }
     delete: { tags: [Catalog], summary: Xóa SKU, responses: { '200': { description: OK } } }
   /api/orders/import:
     post:
@@ -417,6 +464,93 @@ paths:
                 due_date: { type: string }
                 note: { type: string }
       responses: { '201': { description: Created } }
+  /api/batches/auto:
+    post:
+      tags: [Batches]
+      summary: Tự tạo batch từ toàn bộ pool design-ready (OWNER/ADMIN/OPS/DESIGNER)
+      description: >-
+        Hệ thống tự phân loại theo NVL, tự chia theo ĐỊNH MỨC CỦA CẶP (SKU, NVL)
+        — `SKUMaterial.products_per_unit`, rơi về `Material.products_per_unit`
+        khi cặp chưa khai — rồi tự sinh mã #101xxx và tạo batch; người vận hành
+        không chọn từng sản phẩm, không đặt tên. Mỗi sản phẩm chiếm 1/định mức
+        của một đơn vị NVL nên một batch đầy theo MỨC CHIẾM DỤNG, không theo
+        tổng số sản phẩm (10 khay nhỏ và 4 khay to cùng là một tấm). NVL nào không gom được
+        (pool quá lớn, lỗi giữa chừng) được trả về trong `skipped` kèm lý do;
+        material lỗi rollback riêng, không ảnh hưởng material khác.
+      responses:
+        '200': { description: 'created[] (mỗi NVL: batch gốc + mã các batch sản xuất + số sản phẩm), skipped[], total_batches, total_items' }
+  /api/batches/links/export.xlsx:
+    get:
+      tags: [Batches]
+      summary: Xuất Excel bàn làm việc designer — mỗi dòng một batch chờ file sản xuất
+      description: >-
+        Gồm mọi batch PENDING chưa đóng trực tiếp chứa item (batch mẹ bị loại).
+        Cột: Phiên bản mẫu (batch-links-v1, trên từng dòng nên sort không phá),
+        Batch ID (bất biến — căn cứ đối chiếu khi nhập lại), Mã batch, Chất
+        liệu, Số item, Số sản phẩm, Link design (trang chi tiết batch — nơi tải
+        ZIP design theo luồng sẵn có), Link in, Link cắt (giá trị hiện tại nếu
+        đã có — upload lại không sửa gì thành no-op).
+      responses:
+        '200': { description: File .xlsx }
+  /api/batches/links/import/preview:
+    post:
+      tags: [Batches]
+      summary: Xem trước import link in/cắt từ Excel — KHÔNG ghi dữ liệu
+      description: >-
+        Đối chiếu từng dòng bằng Batch ID (kiểm tra thêm Mã batch khớp) — không
+        bao giờ theo vị trí dòng hay đoán theo tên. Mỗi dòng trả về dữ liệu
+        hiện tại, dữ liệu sẽ ghi, hành động (ASSIGN/REPLACE/UNCHANGED) và mức
+        (OK/WARNING/ERROR kèm mã lỗi ổn định). Chỉ một dòng lỗi chặn là
+        can_commit=false cho cả file — không âm thầm nhập một nửa.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary, description: .xlsx/.xlsm/.csv theo mẫu batch-links-v1 }
+      responses:
+        '200': { description: 'summary{total_rows, ok, warnings, errors, assign, replace, unchanged}, rows[], can_commit' }
+        '400': { description: File sai mẫu / thiếu cột bắt buộc / quá 1000 dòng }
+  /api/batches/links/import/commit:
+    post:
+      tags: [Batches]
+      summary: Xác nhận import link — MỘT transaction cho cả file, all-or-nothing
+      description: >-
+        Khoá mọi batch liên quan (theo thứ tự id), kiểm tra lại toàn bộ điều
+        kiện của preview, so link hiện tại với link đã thấy lúc preview
+        (expected_*) — lệch là huỷ TOÀN BỘ lần nhập và yêu cầu xem trước lại.
+        Cặp link in+cắt ghi nguyên tử qua cùng một lõi với PUT /links; dòng
+        REPLACE cần `reason`. Dòng trùng dữ liệu hiện tại là no-op, không tạo
+        audit giả. Audit ghi người xác nhận, tên file, phiên bản mẫu và các
+        batch đã đổi.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rows]
+              properties:
+                source_filename: { type: string }
+                reason: { type: string, maxLength: 255, description: Bắt buộc khi có dòng REPLACE }
+                rows:
+                  type: array
+                  items:
+                    type: object
+                    required: [batch_id, batch_code, print_url, cut_url]
+                    properties:
+                      batch_id: { type: integer }
+                      batch_code: { type: string }
+                      print_url: { type: string }
+                      cut_url: { type: string }
+                      expected_print_url: { type: string }
+                      expected_cut_url: { type: string }
+      responses:
+        '200': { description: 'updated, unchanged, updated_batch_codes[]' }
+        '422': { description: Batch đổi trạng thái/link sau preview, mã không khớp, thiếu lý do thay thế — cả lần nhập bị huỷ }
   /api/batches/{id}:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
     get: { tags: [Batches], summary: Batch detail (item, SKU, mockup, file, status), responses: { '200': { description: OK } } }
@@ -431,6 +565,53 @@ paths:
       responses:
         '200': { description: Đã xoá }
         '422': { description: Batch đã vào sản xuất / batch con / đã đóng }
+  /api/batches/{id}/links:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    put:
+      tags: [Batches]
+      summary: Nộp bộ file sản xuất — cặp link in + cắt nguyên tử (OWNER/ADMIN/OPS/DESIGNER)
+      description: >-
+        Lưu CẢ HAI link trong một transaction (khoá batch, upsert PRINT + CUT,
+        fan-out xuống print_file_url/cut_file_url của mọi item còn hiệu lực) —
+        lỗi bất kỳ rollback toàn bộ, không bao giờ có link in mới + link cắt cũ.
+        Chỉ batch PENDING, chưa đóng, không phải batch mẹ. Thay link hiện có
+        (REPLACE) bắt buộc `reason`. Cặp trùng hệt hiện tại là no-op (UNCHANGED),
+        không audit. Audit BATCH_PRODUCTION_PACKAGE_SET giữ URL cũ + mới + lý do.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [print_url, cut_url]
+              properties:
+                print_url: { type: string }
+                cut_url: { type: string }
+                reason: { type: string, maxLength: 255 }
+      responses:
+        '200': { description: 'links[] (cả PRINT và CUT), action = ASSIGN|REPLACE|UNCHANGED' }
+        '422': { description: Batch mẹ / đã đóng / đã bắt đầu sản xuất (bộ file khoá) / hết item hợp lệ / thiếu lý do thay thế }
+    patch:
+      tags: [Batches]
+      summary: Sửa MỘT link (PRINT hoặc CUT) — đường dự phòng, cùng luật khoá
+      description: >-
+        Giữ để tương thích; luật giống PUT: chỉ batch PENDING chưa đóng, không
+        phải batch mẹ; thay bằng URL khác bắt buộc `reason`; audit giữ URL cũ,
+        URL mới và lý do. UI chính dùng PUT (cặp nguyên tử).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, url]
+              properties:
+                kind: { type: string, enum: [PRINT, CUT] }
+                url: { type: string }
+                reason: { type: string, maxLength: 255 }
+      responses:
+        '200': { description: BatchLink }
+        '422': { description: Batch khoá (mẹ/đóng/đã sản xuất) hoặc thiếu lý do thay thế }
   /api/batches/{id}/assets.zip:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
     get:

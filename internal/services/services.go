@@ -61,8 +61,9 @@ type TrackingOptions struct {
 	Resolve bool
 }
 
-// New builds the service bundle.
-func New(repo *repositories.Repositories, jwt *auth.Manager, carrier shipping.Carrier, track TrackingOptions, thumbs ThumbOptions) *Services {
+// New builds the service bundle. appBaseURL is the public web-app origin used
+// for human-clickable links in exported files.
+func New(repo *repositories.Repositories, jwt *auth.Manager, carrier shipping.Carrier, track TrackingOptions, thumbs ThumbOptions, appBaseURL string) *Services {
 	audit := NewAuditService(repo)
 	trackingSync := NewTrackingSyncService(repo, audit, track.Client, track.Tag, track.Resolve)
 	thumb := NewThumbService(repo, thumbs)
@@ -75,7 +76,7 @@ func New(repo *repositories.Repositories, jwt *auth.Manager, carrier shipping.Ca
 		MasterImport: &MasterImportService{repo: repo, audit: audit},
 		Order:        &OrderService{repo: repo, audit: audit, tracking: trackingSync},
 		Review:       &ReviewService{repo: repo, audit: audit},
-		Batch:        &BatchService{repo: repo, audit: audit},
+		Batch:        &BatchService{repo: repo, audit: audit, appBaseURL: appBaseURL},
 		QC:           &QCService{repo: repo, audit: audit, thumb: thumb},
 		Packing:      &PackingService{repo: repo, audit: audit, carrier: carrier, tracking: trackingSync},
 		Note:         &NoteService{repo: repo, audit: audit},

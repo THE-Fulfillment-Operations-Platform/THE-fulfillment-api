@@ -202,8 +202,15 @@ func (s *CatalogService) DeleteMaterial(actor Actor, id uint) error {
 
 // SKUMaterialInput links a SKU to a material with a per-unit quantity.
 type SKUMaterialInput struct {
-	MaterialID      uint   `json:"material_id" binding:"required"`
-	QuantityPerUnit int    `json:"quantity_per_unit"`
+	MaterialID uint `json:"material_id" binding:"required"`
+	// QuantityPerUnit: how much of the material ONE product consumes.
+	QuantityPerUnit int `json:"quantity_per_unit"`
+	// ProductsPerUnit: the production quota of THIS pair — how many products of
+	// this SKU one unit of the material yields. The inverse concept of
+	// QuantityPerUnit, and like the material-level quota it is OWNER-only.
+	// Omitted leaves an existing quota untouched; ≤0 clears it (the pair then
+	// falls back to Material.ProductsPerUnit).
+	ProductsPerUnit *int   `json:"products_per_unit"`
 	Note            string `json:"note"`
 }
 
@@ -231,7 +238,13 @@ type SKUUpdateInput struct {
 	Materials   []SKUMaterialInput `json:"materials" binding:"omitempty,dive"`
 }
 
-func (s *CatalogService) buildMaterials(in []SKUMaterialInput) ([]models.SKUMaterial, error) {
+// buildMaterials validates a SKU's material set. The material set is replaced
+// wholesale, so `existing` (the pair quotas already stored for this SKU) is
+// carried over for any pair whose payload omits the quota — otherwise the
+// mapping screen, which only ever submits material ids, would wipe every quota
+// an OWNER had set. Setting or clearing a quota stays OWNER-only, mirroring the
+// material-level lever.
+func (s *CatalogService) buildMaterials(actor Actor, in []SKUMaterialInput, existing map[uint]*int) ([]models.SKUMaterial, error) {
 	seen := map[uint]bool{}
 	out := make([]models.SKUMaterial, 0, len(in))
 	for _, m := range in {
@@ -246,9 +259,27 @@ func (s *CatalogService) buildMaterials(in []SKUMaterialInput) ([]models.SKUMate
 		if qty < 1 {
 			qty = 1
 		}
-		out = append(out, models.SKUMaterial{MaterialID: m.MaterialID, QuantityPerUnit: qty, Note: m.Note})
+		quota := existing[m.MaterialID]
+		if m.ProductsPerUnit != nil && actor.Role == models.RoleOwner {
+			quota = normalizeQuota(m.ProductsPerUnit)
+		}
+		out = append(out, models.SKUMaterial{
+			MaterialID: m.MaterialID, QuantityPerUnit: qty, ProductsPerUnit: quota, Note: m.Note,
+		})
 	}
 	return out, nil
+}
+
+// pairQuotasOf snapshots a SKU's current per-pair quotas, keyed by material.
+func pairQuotasOf(sku *models.SKU) map[uint]*int {
+	out := map[uint]*int{}
+	if sku == nil {
+		return out
+	}
+	for i := range sku.Materials {
+		out[sku.Materials[i].MaterialID] = sku.Materials[i].ProductsPerUnit
+	}
+	return out
 }
 
 // CreateSKU creates a SKU and its material set. A SKU with more than one material
@@ -258,7 +289,7 @@ func (s *CatalogService) CreateSKU(actor Actor, in SKUInput) (*models.SKU, error
 	if _, err := s.repo.SKU.FindByCode(in.Code); err == nil {
 		return nil, apperr.Conflict("A SKU with this code already exists")
 	}
-	mats, err := s.buildMaterials(in.Materials)
+	mats, err := s.buildMaterials(actor, in.Materials, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +344,7 @@ func (s *CatalogService) UpdateSKU(actor Actor, id uint, in SKUUpdateInput) (*mo
 		sku.IsActive = *in.IsActive
 	}
 	if len(in.Materials) > 0 {
-		mats, err := s.buildMaterials(in.Materials)
+		mats, err := s.buildMaterials(actor, in.Materials, pairQuotasOf(sku))
 		if err != nil {
 			return nil, err
 		}

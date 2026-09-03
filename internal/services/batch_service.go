@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"strings"
 	"time"
@@ -25,6 +26,10 @@ import (
 type BatchService struct {
 	repo  *repositories.Repositories
 	audit *AuditService
+	// appBaseURL is the public web app origin, used for the "Link design"
+	// column of the exported batch-links sheet. Empty (as in tests) falls back
+	// to a relative path.
+	appBaseURL string
 }
 
 // CreateBatchInput creates one batch for a single material from selected items.
@@ -59,10 +64,11 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 		priority = models.PriorityNormal
 	}
 
-	// Production quota of this material (0 = unlimited → never split).
-	quota := 0
-	if material.ProductsPerUnit != nil {
-		quota = *material.ProductsPerUnit
+	// The quota is per (SKU, material) pair — items of different SKUs take up
+	// different shares of the same sheet — with the material's own quota as the
+	// fallback for pairs that never declared one.
+	quotaFor := func(it *models.OrderItem) int {
+		return resolveProductionQuota(it.SKU, material)
 	}
 
 	var rootBatch *models.Batch // the batch returned to the caller (flat batch or parent)
@@ -127,7 +133,7 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 			return apperr.Unprocessable("Không gom được sản phẩm nào vào batch: " + describeSkips(in.OrderItemIDs, reasons, label))
 		}
 
-		groups := planBatchSplit(eligible, quota)
+		groups := planBatchSplitByQuota(eligible, quotaFor)
 
 		// newBatch builds a batch carrying the shared attributes; createWithItems
 		// persists a batch, stamps its code, attaches items and records history.
@@ -242,36 +248,86 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 	return full, skipped, nil
 }
 
-// planBatchSplit partitions items into groups, each holding at most `quota`
-// products (sum of Quantity), never splitting a single item across groups (an
-// item whose own quantity exceeds the quota gets its own over-quota group).
-// quota ≤ 0 means unlimited → a single group. Mirrors the web app's
-// utils/batch.ts planBatchSplit so the split preview and the created batches
-// always agree.
-func planBatchSplit(items []*models.OrderItem, quota int) [][]*models.OrderItem {
+// resolveProductionQuota returns the production quota that applies to one
+// (SKU, material) pair: how many products of that SKU a single unit of the
+// material yields. The pair's own quota wins; a pair that does not declare one
+// falls back to the material's default (which is what every row created before
+// per-pair quotas existed relies on). 0 means "no quota anywhere" → unlimited.
+//
+// The quota MUST be resolved per pair, not per material: the same mica sheet
+// yields ten small trays but only four large ones, so batching every SKU of a
+// material against one number silently overfills or wastes sheets.
+func resolveProductionQuota(sku *models.SKU, material *models.Material) int {
+	if sku != nil && material != nil {
+		for i := range sku.Materials {
+			link := &sku.Materials[i]
+			if link.MaterialID != material.ID {
+				continue
+			}
+			if link.ProductsPerUnit != nil && *link.ProductsPerUnit > 0 {
+				return *link.ProductsPerUnit
+			}
+			break
+		}
+	}
+	if material != nil && material.ProductsPerUnit != nil && *material.ProductsPerUnit > 0 {
+		return *material.ProductsPerUnit
+	}
+	return 0
+}
+
+// itemProducts is how many products one order line represents (a line always
+// counts as at least one).
+func itemProducts(it *models.OrderItem) int {
+	if it.Quantity < 1 {
+		return 1
+	}
+	return it.Quantity
+}
+
+// planBatchSplitByQuota partitions items into groups, each fitting inside ONE
+// unit of the material, never splitting a single order line across groups.
+//
+// Products of different SKUs are not interchangeable, so a group is not "at most
+// N products": each product takes up 1/quota of a unit — a tray at 10 per sheet
+// takes a tenth, one at 4 per sheet takes a quarter — and a group is full when
+// those shares add up to one whole unit. quotaFor returning 0 means that SKU has
+// no quota on this material and takes up nothing.
+//
+// The running total is exact rational arithmetic (math/big.Rat), not floating
+// point: at the boundary that actually decides the split, 1/3+1/3+1/3 must be
+// exactly one sheet, and a float would make it 0.999… or 1.000…2 and quietly
+// open a second batch (or overfill the first).
+//
+// A single line that on its own exceeds the quota keeps its own over-quota group
+// — splitting one order line across batches is a business decision the customer
+// has not made yet, so the line stays whole and visible instead.
+func planBatchSplitByQuota(items []*models.OrderItem, quotaFor func(*models.OrderItem) int) [][]*models.OrderItem {
 	if len(items) == 0 {
 		return nil
 	}
-	if quota <= 0 {
-		return [][]*models.OrderItem{items}
-	}
 	var groups [][]*models.OrderItem
 	var current []*models.OrderItem
-	count := 0
+	used := new(big.Rat) // share of one material unit consumed by `current`
+	one := new(big.Rat).SetInt64(1)
+
 	for _, it := range items {
-		q := it.Quantity
-		if q < 1 {
-			q = 1
+		quota := quotaFor(it)
+		share := new(big.Rat) // 0 → unlimited quota, this line takes up nothing
+		if quota > 0 {
+			share.SetFrac64(int64(itemProducts(it)), int64(quota))
 		}
-		// Start a new group when the current one is non-empty and adding this item
-		// would exceed the quota.
-		if len(current) > 0 && count+q > quota {
+		next := new(big.Rat).Add(used, share)
+		// Start a new unit when the current one is non-empty and this line no
+		// longer fits in it.
+		if len(current) > 0 && next.Cmp(one) > 0 {
 			groups = append(groups, current)
 			current = nil
-			count = 0
+			used = new(big.Rat)
+			next = share
 		}
 		current = append(current, it)
-		count += q
+		used = next
 	}
 	if len(current) > 0 {
 		groups = append(groups, current)
@@ -589,6 +645,9 @@ func (s *BatchService) Delete(actor Actor, batchID uint) error {
 type SetBatchLinkInput struct {
 	Kind string `json:"kind" binding:"required"` // PRINT | CUT
 	URL  string `json:"url" binding:"required"`
+	// Reason is required when the call REPLACES an existing link with a
+	// different URL — swapping a production file is a deliberate act.
+	Reason string `json:"reason"`
 }
 
 // SetBatchLink attaches a print or cut link to a whole batch. The link is entered
@@ -613,15 +672,18 @@ func (s *BatchService) SetBatchLink(actor Actor, batchID uint, in SetBatchLinkIn
 	if !isValidHTTPURL(rawURL) {
 		return nil, apperr.BadRequest("URL không hợp lệ (phải là http hoặc https)")
 	}
+	reason := strings.TrimSpace(in.Reason)
+	if len(reason) > maxLinkReasonLen {
+		return nil, apperr.BadRequest(fmt.Sprintf("Lý do quá dài (tối đa %d ký tự)", maxLinkReasonLen))
+	}
 	batch, err := s.Get(batchID)
 	if err != nil {
 		return nil, err
 	}
-	if batch.IsParent {
-		return nil, apperr.Unprocessable("Batch mẹ không chứa item sản xuất. Hãy cập nhật link trên từng batch con.")
-	}
-	if batch.ClosedAt != nil {
-		return nil, apperr.Unprocessable("Batch " + batch.Code + " đã đóng — không sửa link sản xuất nữa.")
+	// Same lock rules as the pair endpoint: parent / closed / past-PENDING
+	// batches never take a link change (production already ran on the old file).
+	if err := batchLinkLockedGuard(batch); err != nil {
+		return nil, err
 	}
 
 	now := time.Now()
@@ -633,6 +695,7 @@ func (s *BatchService) SetBatchLink(actor Actor, batchID uint, in SetBatchLinkIn
 
 	var link *models.BatchLink
 	action := "BATCH_LINK_ADD"
+	oldURL := ""
 	// Saving the link and stamping it onto the items is one unit of work: a batch
 	// whose link says one thing while its items say another is worse than neither.
 	if err := s.repo.DB.Transaction(func(tx *gorm.DB) error {
@@ -648,8 +711,8 @@ func (s *BatchService) SetBatchLink(actor Actor, batchID uint, in SetBatchLinkIn
 		if len(locked) == 0 {
 			return apperr.NotFound("Batch not found")
 		}
-		if locked[0].ClosedAt != nil {
-			return apperr.Unprocessable("Batch " + locked[0].Code + " vừa bị huỷ/đóng — không sửa link sản xuất nữa.")
+		if err := batchLinkLockedGuard(&locked[0]); err != nil {
+			return err
 		}
 
 		existing, err := txRepo.Batch.FindLink(batchID, kind)
@@ -663,6 +726,12 @@ func (s *BatchService) SetBatchLink(actor Actor, batchID uint, in SetBatchLinkIn
 			}
 		} else {
 			action = "BATCH_LINK_UPDATE"
+			oldURL = existing.URL
+			// Swapping a production file for a DIFFERENT one needs a reason —
+			// the audit keeps who, what and why. Re-saving the same URL doesn't.
+			if existing.URL != rawURL && reason == "" {
+				return apperr.Unprocessable("Batch đã có link này — cần lý do khi thay thế bằng link khác.")
+			}
 			existing.URL = rawURL
 			existing.UpdatedByID = actor.IDPtr()
 			existing.LinkUpdatedAt = now
@@ -685,7 +754,7 @@ func (s *BatchService) SetBatchLink(actor Actor, batchID uint, in SetBatchLinkIn
 	}
 	s.audit.Log(actor, action, "batch", &batchID,
 		fmt.Sprintf("Set %s link on batch %d", kind, batchID),
-		models.JSONMap{"kind": string(kind), "url": rawURL})
+		models.JSONMap{"kind": string(kind), "url": rawURL, "old_url": oldURL, "reason": reason})
 
 	links, _ := s.repo.Batch.LinksForBatch(batchID)
 	for i := range links {

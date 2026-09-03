@@ -57,6 +57,43 @@ func (r *UserRepository) Delete(id uint) error {
 	return r.db.Delete(&models.User{}, id).Error
 }
 
+// FindDeletedByEmail looks up a SOFT-DELETED user by email. users.email is a
+// plain unique index (no deleted_at predicate), so a deleted row still occupies
+// its email: creating "the same person" again has to find that row and restore
+// it rather than insert a second one and hit the constraint.
+func (r *UserRepository) FindDeletedByEmail(email string) (*models.User, error) {
+	var u models.User
+	err := r.db.Unscoped().Where("email = ? AND deleted_at IS NOT NULL", email).First(&u).Error
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+// RestoreWith un-deletes a user row and overwrites it with the details of the
+// account being (re-)created. Keeping the row — and therefore the id — means
+// every audit entry, batch and QC record that points at this person still
+// resolves to them instead of dangling.
+func (r *UserRepository) RestoreWith(u *models.User) error {
+	return r.db.Unscoped().Model(&models.User{}).Where("id = ?", u.ID).
+		Updates(map[string]any{
+			"deleted_at":    nil,
+			"password_hash": u.PasswordHash,
+			"full_name":     u.FullName,
+			"role":          u.Role,
+			"seller_id":     u.SellerID,
+			"is_active":     u.IsActive,
+		}).Error
+}
+
+// CountByRole counts the live (not soft-deleted) users holding a role. The
+// user-delete guard uses it to refuse removing the last OWNER.
+func (r *UserRepository) CountByRole(role models.Role) (int64, error) {
+	var n int64
+	err := r.db.Model(&models.User{}).Where("role = ?", role).Count(&n).Error
+	return n, err
+}
+
 func (r *UserRepository) ExistsByEmail(email string) (bool, error) {
 	var count int64
 	err := r.db.Model(&models.User{}).Where("email = ?", email).Count(&count).Error

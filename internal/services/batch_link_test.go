@@ -26,7 +26,8 @@ func TestSetBatchLink_AddAndReplace(t *testing.T) {
 		t.Fatalf("trimmed URL = %q", first.URL)
 	}
 
-	replaced, err := svc.SetBatchLink(Actor{ID: 8}, batch.ID, SetBatchLinkInput{Kind: "PRINT", URL: "https://files/print-v2"})
+	// Replacing with a DIFFERENT URL is a deliberate act and now carries a reason.
+	replaced, err := svc.SetBatchLink(Actor{ID: 8}, batch.ID, SetBatchLinkInput{Kind: "PRINT", URL: "https://files/print-v2", Reason: "đổi file in"})
 	if err != nil {
 		t.Fatalf("replace link: %v", err)
 	}

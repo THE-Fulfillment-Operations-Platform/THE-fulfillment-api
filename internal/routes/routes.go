@@ -285,7 +285,18 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		batches.GET("/:id/production-template.xlsx", middleware.RequireRoles(roleInternal...), h.ExportProductionTemplate)
 		batches.GET("/:id/assets.zip", middleware.RequireRoles(roleInternal...), h.DownloadBatchAssetsZip)
 		batches.POST("", middleware.RequireRoles(roleDesignOps...), h.CreateBatch)
+		// Tự gom cả pool design-ready thành batch theo NVL + định mức: hệ thống
+		// tự chọn sản phẩm và tự sinh mã, người vận hành chỉ bấm một nút.
+		batches.POST("/auto", middleware.RequireRoles(roleDesignOps...), h.AutoCreateBatches)
+		// Bàn làm việc Excel của designer: xuất mỗi dòng một batch (Batch ID bất
+		// biến + mã + link hiện tại), điền link in/cắt rồi upload lại theo cặp
+		// preview → commit. Cùng nhóm quyền với sửa link thủ công.
+		batches.GET("/links/export.xlsx", middleware.RequireRoles(roleDesignOps...), h.ExportBatchLinksXLSX)
+		batches.POST("/links/import/preview", middleware.RequireRoles(roleDesignOps...), h.PreviewBatchLinkImport)
+		batches.POST("/links/import/commit", middleware.RequireRoles(roleDesignOps...), h.CommitBatchLinkImport)
 		batches.PATCH("/:id/links", middleware.RequireRoles(roleDesignOps...), h.SetBatchLink)
+		// PUT thay cả CẶP link in+cắt nguyên tử (một transaction, fan-out cả hai).
+		batches.PUT("/:id/links", middleware.RequireRoles(roleDesignOps...), h.SetBatchLinkPair)
 		// Delete mirrors create's roles: the team that groups batches un-groups a
 		// mistaken one. The service only ever deletes a batch production has not
 		// touched, so this is "undo create", not data destruction.

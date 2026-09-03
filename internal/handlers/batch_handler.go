@@ -2,10 +2,12 @@ package handlers
 
 import (
 	"net/http"
+	"path/filepath"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
+	"the-fulfillment/backend/internal/apperr"
 	"the-fulfillment/backend/internal/repositories"
 	"the-fulfillment/backend/internal/response"
 	"the-fulfillment/backend/internal/services"
@@ -184,6 +186,103 @@ func (h *Handlers) ScrapBatch(c *gin.Context) {
 		return
 	}
 	res, err := h.svc.Batch.Scrap(actor(c), id, in)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, res)
+}
+
+// AutoCreateBatches batches the whole design-ready pool in one deliberate
+// action: the system groups by material, splits by quota and generates codes —
+// nobody picks rows or types names. POST /api/batches/auto
+func (h *Handlers) AutoCreateBatches(c *gin.Context) {
+	res, err := h.svc.Batch.AutoCreateBatches(actor(c))
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, res)
+}
+
+// SetBatchLinkPair saves a batch's print + cut links as one atomic package.
+// PUT /api/batches/:id/links
+func (h *Handlers) SetBatchLinkPair(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	var in services.SetBatchLinkPairInput
+	if !bindJSON(c, &in) {
+		return
+	}
+	res, err := h.svc.Batch.SetBatchLinkPair(actor(c), id, in)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, res)
+}
+
+// ExportBatchLinksXLSX streams the designer worksheet: one row per open PENDING
+// batch, with immutable Batch ID + code + current links.
+// GET /api/batches/links/export.xlsx
+func (h *Handlers) ExportBatchLinksXLSX(c *gin.Context) {
+	data, filename, err := h.svc.Batch.ExportBatchLinksXLSX()
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
+	c.Data(http.StatusOK, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", data)
+}
+
+// PreviewBatchLinkImport parses the uploaded batch-links sheet and returns the
+// dry-run comparison without writing anything.
+// POST /api/batches/links/import/preview (multipart: file=<xlsx|xlsm|csv>)
+func (h *Handlers) PreviewBatchLinkImport(c *gin.Context) {
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		response.Fail(c, apperr.BadRequest(`Thiếu file upload (field "file")`))
+		return
+	}
+	f, err := fileHeader.Open()
+	if err != nil {
+		response.Fail(c, apperr.BadRequest("Không mở được file upload"))
+		return
+	}
+	defer f.Close()
+
+	var rows []services.BatchLinkImportRow
+	switch strings.ToLower(filepath.Ext(fileHeader.Filename)) {
+	case ".xlsx", ".xlsm":
+		rows, err = services.ParseBatchLinkImportXLSX(f)
+	case ".xls":
+		response.Fail(c, apperr.BadRequest("Định dạng .xls (Excel cũ) chưa hỗ trợ — lưu lại dạng .xlsx hoặc CSV"))
+		return
+	default:
+		rows, err = services.ParseBatchLinkImportCSV(f)
+	}
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	preview, err := h.svc.Batch.PreviewBatchLinkImport(actor(c), rows)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, preview)
+}
+
+// CommitBatchLinkImport applies a previewed batch-links import as one
+// all-or-nothing transaction. POST /api/batches/links/import/commit
+func (h *Handlers) CommitBatchLinkImport(c *gin.Context) {
+	var in services.BatchLinkImportCommitInput
+	if !bindJSON(c, &in) {
+		return
+	}
+	res, err := h.svc.Batch.CommitBatchLinkImport(actor(c), in)
 	if err != nil {
 		response.Fail(c, err)
 		return

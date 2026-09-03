@@ -1,5 +1,7 @@
 # Env
 .env
+# Cấu hình chạy local (Postgres trên máy) — không bao giờ commit.
+.env.local
 
 # Binaries
 /bin/

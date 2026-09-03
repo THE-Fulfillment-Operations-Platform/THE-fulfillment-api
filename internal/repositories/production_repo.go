@@ -258,6 +258,72 @@ func (r *BatchRepository) List(f BatchFilter) ([]models.Batch, int64, error) {
 // ---------- Batch links (print / cut) ----------
 
 // FindLink returns the live link of a given kind for a batch, or gorm.ErrRecordNotFound.
+// PendingLinkTargets lists the batches a designer can still attach production
+// files to: PENDING, not closed, and holding items themselves (flat or child —
+// never a parent, which aggregates children and carries no files). Ordered by
+// id so the exported sheet is stable between downloads.
+func (r *BatchRepository) PendingLinkTargets() ([]models.Batch, error) {
+	var rows []models.Batch
+	err := r.db.Preload("Material").Preload("Links").
+		Where("is_parent = ? AND closed_at IS NULL AND status = ?", false, models.StatusPending).
+		Order("id").Find(&rows).Error
+	return rows, err
+}
+
+// LinkImportRefs loads the batches an Excel import references — material and
+// links preloaded — keyed by id so file rows resolve by identifier, never by
+// position.
+func (r *BatchRepository) LinkImportRefs(ids []uint) (map[uint]*models.Batch, error) {
+	ids = dedupeIDs(ids)
+	out := make(map[uint]*models.Batch, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	var rows []models.Batch
+	if err := r.db.Preload("Material").Preload("Links").Where("id IN ?", ids).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		out[rows[i].ID] = &rows[i]
+	}
+	return out, nil
+}
+
+// BatchLiveCounts tallies one batch's live parts for the link export/preview.
+type BatchLiveCounts struct {
+	BatchID  uint
+	Items    int
+	Products int
+}
+
+// LiveItemProductCounts counts, per batch, the parts that still count — not
+// scrapped, order item not cancelled — and their product total (Σ quantity,
+// each item at least 1).
+func (r *BatchRepository) LiveItemProductCounts(ids []uint) (map[uint]BatchLiveCounts, error) {
+	ids = dedupeIDs(ids)
+	out := make(map[uint]BatchLiveCounts, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	var rows []BatchLiveCounts
+	err := r.db.Model(&models.BatchItem{}).
+		Select("batch_items.batch_id AS batch_id, COUNT(*) AS items, "+
+			"SUM(CASE WHEN order_items.quantity < 1 THEN 1 ELSE order_items.quantity END) AS products").
+		Joins("JOIN order_items ON order_items.id = batch_items.order_item_id AND order_items.deleted_at IS NULL").
+		Where("batch_items.batch_id IN ? AND batch_items.scrapped_at IS NULL", ids).
+		Where("order_items.cancellation_status NOT IN ?",
+			[]models.CancellationStatus{models.CancellationSeller, models.CancellationApproved}).
+		Group("batch_items.batch_id").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		out[row.BatchID] = row
+	}
+	return out, nil
+}
+
 func (r *BatchRepository) FindLink(batchID uint, kind models.BatchLinkKind) (*models.BatchLink, error) {
 	var l models.BatchLink
 	if err := r.db.Where("batch_id = ? AND kind = ?", batchID, kind).First(&l).Error; err != nil {

@@ -3,6 +3,7 @@ package services
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"gorm.io/gorm"
@@ -27,7 +28,17 @@ type CreateUserInput struct {
 	Role     models.Role `json:"role" binding:"required"`
 	SellerID *uint       `json:"seller_id"`
 	IsActive *bool       `json:"is_active"`
+	// RestoreDeleted confirms taking over a soft-deleted account that already
+	// owns this email. Without it such a create is refused with
+	// ErrCodeDeletedEmail so the operator sees WHOSE account it was first —
+	// restoring hands that person's entire history (batches created, QC checks,
+	// audit trail) to whoever is being created now.
+	RestoreDeleted bool `json:"restore_deleted"`
 }
+
+// ErrCodeDeletedEmail is the stable code the client keys off to offer
+// "khôi phục tài khoản cũ?" instead of showing a raw conflict.
+const ErrCodeDeletedEmail = "USER_DELETED_EMAIL"
 
 // UpdateUserInput is the update payload (all optional).
 type UpdateUserInput struct {
@@ -99,6 +110,40 @@ func (s *UserService) Create(actor Actor, in CreateUserInput) (*models.User, err
 		SellerID:     in.SellerID,
 		IsActive:     active,
 	}
+	// A soft-deleted account still owns its email (users.email is a plain unique
+	// index, with no deleted_at predicate), so inserting a second row with that
+	// address just hits the constraint and surfaces as an unreadable 500. The
+	// only way to reuse the address is to take the old row back over — and that
+	// hands the old account's whole history (batches it created, QC it signed
+	// off, its audit trail) to the person being created now. If the company
+	// reassigned the mailbox to someone else, that is the wrong person's work
+	// under the new name. So it is never silent: refuse once, name the account,
+	// and let the operator confirm.
+	prev, err := s.repo.User.FindDeletedByEmail(in.Email)
+	switch {
+	case err != nil && !errors.Is(err, gorm.ErrRecordNotFound):
+		return nil, apperr.Internal("user lookup failed").Wrap(err)
+	case prev != nil && !in.RestoreDeleted:
+		return nil, apperr.New(http.StatusConflict, ErrCodeDeletedEmail, fmt.Sprintf(
+			"Email này thuộc tài khoản %q (vai trò %s) đã bị xoá. Khôi phục sẽ dùng lại chính tài khoản đó và giữ toàn bộ lịch sử công việc của nó — nếu đây là người khác, hãy dùng email khác.",
+			prev.FullName, prev.Role))
+	case prev != nil:
+		u.ID = prev.ID
+		if err := s.repo.User.RestoreWith(u); err != nil {
+			return nil, apperr.Internal("could not restore user").Wrap(err)
+		}
+		restored, err := s.Get(prev.ID)
+		if err != nil {
+			return nil, err
+		}
+		s.audit.Log(actor, "USER_RESTORE", "user", &restored.ID,
+			"Restored previously deleted user "+restored.Email,
+			models.JSONMap{
+				"email": restored.Email, "role": string(restored.Role),
+				"previous_full_name": prev.FullName, "previous_role": string(prev.Role),
+			})
+		return restored, nil
+	}
 	if err := s.repo.User.Create(u); err != nil {
 		return nil, apperr.Internal("could not create user").Wrap(err)
 	}
@@ -161,14 +206,41 @@ func (s *UserService) Update(actor Actor, id uint, in UpdateUserInput) (*models.
 	return u, nil
 }
 
-// Delete soft-deletes a user.
+// Delete soft-deletes a user. The row itself stays: audit entries, batches and
+// QC records point at the person who did the work, and a hard delete would turn
+// all of that history into dangling ids.
+//
+// Three things it refuses, because each one locks somebody out of a system
+// nobody can reopen from inside the app:
+//   - deleting yourself (you lose your own session mid-shift),
+//   - deleting the last OWNER (OWNER is the gate for user admin, quotas and
+//     production corrections),
+//   - an ADMIN deleting an OWNER (an admin must not be able to clear away the
+//     supervision above them).
 func (s *UserService) Delete(actor Actor, id uint) error {
-	if _, err := s.Get(id); err != nil {
+	victim, err := s.Get(id)
+	if err != nil {
 		return err
+	}
+	if actor.ID != 0 && actor.ID == id {
+		return apperr.Unprocessable("Không thể xoá chính tài khoản đang đăng nhập — nhờ chủ sở hữu khác xoá giúp.")
+	}
+	if victim.Role == models.RoleOwner {
+		if actor.Role != models.RoleOwner {
+			return apperr.Forbidden("Chỉ chủ sở hữu (OWNER) mới xoá được một tài khoản OWNER.")
+		}
+		owners, err := s.repo.User.CountByRole(models.RoleOwner)
+		if err != nil {
+			return apperr.Internal("could not count owners").Wrap(err)
+		}
+		if owners <= 1 {
+			return apperr.Unprocessable("Đây là tài khoản OWNER duy nhất — tạo một OWNER khác trước khi xoá, nếu không sẽ không ai quản trị được hệ thống.")
+		}
 	}
 	if err := s.repo.User.Delete(id); err != nil {
 		return apperr.Internal("could not delete user").Wrap(err)
 	}
-	s.audit.Log(actor, "USER_DELETE", "user", &id, "Deleted user", nil)
+	s.audit.Log(actor, "USER_DELETE", "user", &id, "Deleted user "+victim.Email,
+		models.JSONMap{"email": victim.Email, "role": string(victim.Role), "full_name": victim.FullName})
 	return nil
 }
