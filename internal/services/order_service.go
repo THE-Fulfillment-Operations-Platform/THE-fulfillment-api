@@ -544,9 +544,13 @@ type SellerOrderView struct {
 	StoreOrderID string `json:"store_order_id"`
 	// StoreOrderDup: this store order id is shared by more than one order (repeated
 	// upload) — the seller UI flags it so they can spot an accidental re-send.
-	StoreOrderDup bool                `json:"store_order_dup"`
-	StoreName     string              `json:"store_name"`
-	Status        models.SellerStatus `json:"status"` // production phase (only meaningful once approved)
+	StoreOrderDup bool   `json:"store_order_dup"`
+	StoreName     string `json:"store_name"`
+	// Account is the storefront account the seller typed into the upload file —
+	// their own data, so it crosses back as-is. The seller list has an Account
+	// column beside the shop name.
+	Account string              `json:"account,omitempty"`
+	Status  models.SellerStatus `json:"status"` // production phase (only meaningful once approved)
 	// Review / cancellation state. The seller UI shows the review status until an
 	// order is APPROVED, then falls through to the production Status above.
 	ReviewStatus       models.ReviewStatus       `json:"review_status"`
@@ -647,25 +651,19 @@ func toSellerView(o models.Order, withItems, inProduction bool) SellerOrderView 
 	stage := orderCancelStage(o.SellerStatus, inProduction)
 	action := sellerCancelAction(o.ReviewStatus, o.CancellationStatus, stage)
 	activeItemCount := 0
-	skus := []SellerSKULine{}
-	skuIndex := map[string]int{}
 	for i := range o.Items {
-		if itemCancelled(o.Items[i].CancellationStatus) {
-			continue
+		if !itemCancelled(o.Items[i].CancellationStatus) {
+			activeItemCount++
 		}
-		activeItemCount++
-		code := o.Items[i].SKUCode
-		if at, seen := skuIndex[code]; seen {
-			skus[at].Quantity += o.Items[i].Quantity
-			continue
-		}
-		skuIndex[code] = len(skus)
-		skus = append(skus, SellerSKULine{SKUCode: code, Quantity: o.Items[i].Quantity})
 	}
+	// Cancelling a whole order cascades onto every line, so an order with no live
+	// line left is a cancelled order — summarise what it held instead of printing
+	// nothing. The seller may still be billed for it and needs to see what it was.
+	skus := sellerSKUSummary(o.Items, activeItemCount > 0)
 	v := SellerOrderView{
 		ID: o.ID, InternalCode: o.InternalCode, StoreOrderID: o.StoreOrderID,
 		StoreOrderDup: o.StoreOrderDup,
-		StoreName:     o.StoreName, Status: o.SellerStatus,
+		StoreName:     o.StoreName, Account: o.Account, Status: o.SellerStatus,
 		ReviewStatus: o.ReviewStatus, CancellationStatus: o.CancellationStatus, ReviewNote: o.ReviewNote,
 		CanCancel:              action == SellerActionCancel,
 		CanRequestCancellation: action == SellerActionRequest,
@@ -730,6 +728,26 @@ func toSellerView(o models.Order, withItems, inProduction bool) SellerOrderView 
 		}
 	}
 	return v
+}
+
+// sellerSKUSummary folds an order's lines into one entry per SKU with quantities
+// summed, in first-seen order. liveOnly skips cancelled lines.
+func sellerSKUSummary(items []models.OrderItem, liveOnly bool) []SellerSKULine {
+	out := []SellerSKULine{}
+	at := map[string]int{}
+	for i := range items {
+		if liveOnly && itemCancelled(items[i].CancellationStatus) {
+			continue
+		}
+		code := items[i].SKUCode
+		if j, seen := at[code]; seen {
+			out[j].Quantity += items[i].Quantity
+			continue
+		}
+		at[code] = len(out)
+		out = append(out, SellerSKULine{SKUCode: code, Quantity: items[i].Quantity})
+	}
+	return out
 }
 
 // SellerOrders returns the seller-scoped, sanitized order list.

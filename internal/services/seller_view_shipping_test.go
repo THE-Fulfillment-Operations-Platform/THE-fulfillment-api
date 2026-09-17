@@ -11,6 +11,7 @@ import (
 func shippingOrder() models.Order {
 	return models.Order{
 		InternalCode: "100001", StoreOrderID: "US-0925-008", SellerID: 1,
+		StoreName: "SpringCityShopArt", Account: "AM399",
 		ReviewStatus: models.ReviewApproved, SellerStatus: models.SellerStatusHandedOff,
 		ShippingName:     "McKenna Garland",
 		ShippingAddress1: "49 14th Ave SW",
@@ -89,5 +90,26 @@ func TestToSellerView_ListSummarisesLiveSKUs(t *testing.T) {
 	}
 	if v.ItemCount != 3 {
 		t.Errorf("item_count = %d, want 3", v.ItemCount)
+	}
+	if v.Account != "AM399" {
+		t.Errorf("account = %q, want AM399", v.Account)
+	}
+}
+
+// Cancelling a whole order cascades onto every line. The list must still say what
+// the order held — a seller billed for a cancelled order has to recognise it.
+func TestToSellerView_CancelledOrderKeepsSKUs(t *testing.T) {
+	o := shippingOrder()
+	o.ReviewStatus = models.ReviewCancelled
+	o.CancellationStatus = models.CancellationSeller
+	o.Items = []models.OrderItem{
+		{SKUCode: "CANVAS-16X20", Quantity: 2, CancellationStatus: models.CancellationSeller},
+		{SKUCode: "MUG-11OZ", Quantity: 1, CancellationStatus: models.CancellationSeller},
+	}
+	v := toSellerView(o, false, false)
+
+	want := []SellerSKULine{{SKUCode: "CANVAS-16X20", Quantity: 2}, {SKUCode: "MUG-11OZ", Quantity: 1}}
+	if len(v.SKUs) != len(want) || v.SKUs[0] != want[0] || v.SKUs[1] != want[1] {
+		t.Errorf("skus = %+v, want %+v", v.SKUs, want)
 	}
 }
