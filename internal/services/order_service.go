@@ -576,6 +576,12 @@ type SellerOrderView struct {
 	ItemCount                  int              `json:"item_count"`
 	CreatedAt                  time.Time        `json:"created_at"`
 	Items                      []SellerItemView `json:"items,omitempty"`
+	// SKUs is the one-line "what is in this order" summary the list prints beside
+	// the store order id: sellers tell orders apart by product, and several store
+	// order ids from one shop read almost alike. Live lines only, one entry per SKU
+	// with quantities summed. Items are already preloaded by the list query, so
+	// this costs no extra read.
+	SKUs []SellerSKULine `json:"skus"`
 
 	// Shipment tracking. A seller who uploaded an order is entitled to know where
 	// its parcel is — that is the whole point of collecting the journey — so the
@@ -610,6 +616,12 @@ type SellerOrderView struct {
 	Note             string `json:"note,omitempty"`
 }
 
+// SellerSKULine is one SKU of an order and how many of it the order holds.
+type SellerSKULine struct {
+	SKUCode  string `json:"sku_code"`
+	Quantity int    `json:"quantity"`
+}
+
 // SellerItemView only exposes product-level facts, not the factory pipeline.
 type SellerItemView struct {
 	ID                 uint                      `json:"id"`
@@ -635,10 +647,20 @@ func toSellerView(o models.Order, withItems, inProduction bool) SellerOrderView 
 	stage := orderCancelStage(o.SellerStatus, inProduction)
 	action := sellerCancelAction(o.ReviewStatus, o.CancellationStatus, stage)
 	activeItemCount := 0
+	skus := []SellerSKULine{}
+	skuIndex := map[string]int{}
 	for i := range o.Items {
-		if !itemCancelled(o.Items[i].CancellationStatus) {
-			activeItemCount++
+		if itemCancelled(o.Items[i].CancellationStatus) {
+			continue
 		}
+		activeItemCount++
+		code := o.Items[i].SKUCode
+		if at, seen := skuIndex[code]; seen {
+			skus[at].Quantity += o.Items[i].Quantity
+			continue
+		}
+		skuIndex[code] = len(skus)
+		skus = append(skus, SellerSKULine{SKUCode: code, Quantity: o.Items[i].Quantity})
 	}
 	v := SellerOrderView{
 		ID: o.ID, InternalCode: o.InternalCode, StoreOrderID: o.StoreOrderID,
@@ -652,6 +674,7 @@ func toSellerView(o models.Order, withItems, inProduction bool) SellerOrderView 
 		CancelStage:            o.CancelStage,
 		CancelBillable:         o.CancelBillable,
 		ItemCount:              activeItemCount, CreatedAt: o.CreatedAt,
+		SKUs:           skus,
 		TrackingNumber: o.TrackingNumber,
 		TrackingDetail: redactPartner(o.TrackingDetail),
 		// Location is only meaningful next to a real shipment state; showing

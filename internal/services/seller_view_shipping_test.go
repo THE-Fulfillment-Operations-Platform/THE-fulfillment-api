@@ -64,3 +64,30 @@ func TestToSellerView_ListOmitsRecipient(t *testing.T) {
 		}
 	}
 }
+
+// The list prints the SKUs beside the store order id so a seller can tell orders
+// apart by product. A repeated SKU is one entry with its quantities summed, and a
+// line the seller already cancelled is no longer part of what they will receive.
+func TestToSellerView_ListSummarisesLiveSKUs(t *testing.T) {
+	o := shippingOrder()
+	o.Items = []models.OrderItem{
+		{SKUCode: "CANVAS-16X20", Quantity: 1},
+		{SKUCode: "MUG-11OZ", Quantity: 2},
+		{SKUCode: "CANVAS-16X20", Quantity: 3},
+		{SKUCode: "POSTER-A3", Quantity: 1, CancellationStatus: models.CancellationSeller},
+	}
+	v := toSellerView(o, false, true)
+
+	want := []SellerSKULine{{SKUCode: "CANVAS-16X20", Quantity: 4}, {SKUCode: "MUG-11OZ", Quantity: 2}}
+	if len(v.SKUs) != len(want) {
+		t.Fatalf("skus = %+v, want %+v", v.SKUs, want)
+	}
+	for i := range want {
+		if v.SKUs[i] != want[i] {
+			t.Errorf("skus[%d] = %+v, want %+v", i, v.SKUs[i], want[i])
+		}
+	}
+	if v.ItemCount != 3 {
+		t.Errorf("item_count = %d, want 3", v.ItemCount)
+	}
+}
