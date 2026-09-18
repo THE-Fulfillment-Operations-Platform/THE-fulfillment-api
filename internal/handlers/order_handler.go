@@ -284,12 +284,7 @@ func (h *Handlers) DownloadDesignAssetsZip(c *gin.Context) {
 	c.Header("Content-Disposition", `attachment; filename="`+folder+`.zip"`)
 	c.Header("Content-Type", "application/zip")
 	if err := h.svc.Order.StreamDesignAssetsZip(c.Request.Context(), c.Writer, q, folder); err != nil {
-		// Only surface a JSON error if nothing has been streamed yet; once the ZIP
-		// body has started we can't switch to an error envelope.
-		if !c.Writer.Written() {
-			response.Fail(c, err)
-		}
-		return
+		failZipStream(c, err)
 	}
 }
 

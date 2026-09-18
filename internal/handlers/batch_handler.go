@@ -111,10 +111,7 @@ func (h *Handlers) DownloadBatchAssetsZip(c *gin.Context) {
 	c.Header("Content-Disposition", "attachment; filename=\""+filename+"\"")
 	c.Header("Content-Type", "application/zip")
 	if err := h.svc.Batch.StreamBatchAssetsZip(c.Request.Context(), c.Writer, id, designOnly); err != nil {
-		if !c.Writer.Written() {
-			response.Fail(c, err)
-		}
-		return
+		failZipStream(c, err)
 	}
 }
 

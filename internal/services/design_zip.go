@@ -74,8 +74,9 @@ func (s *OrderService) StreamDesignAssetsZip(ctx context.Context, w io.Writer, q
 		return err
 	}
 
+	// Closed only on success, never deferred — see StreamBatchAssetsZip: closing an
+	// empty archive writes 22 bytes and turns the "no file" error into an empty ZIP.
 	zw := zip.NewWriter(w)
-	defer func() { _ = zw.Close() }()
 
 	client := newSafeAssetClient(30 * time.Second)
 	usedNames := map[string]int{}

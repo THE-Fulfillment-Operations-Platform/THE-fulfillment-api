@@ -1010,8 +1010,11 @@ func (s *BatchService) StreamBatchAssetsZip(ctx context.Context, w io.Writer, ba
 		return err
 	}
 
+	// Closed only on the success paths below, never deferred: Close writes the
+	// end-of-archive record even for an empty archive, and those 22 bytes commit a
+	// 200 — the handler could then no longer turn "no file downloaded" into an
+	// error, and the user saved an empty Batch_<code>.zip instead of the reason.
 	zw := zip.NewWriter(w)
-	defer func() { _ = zw.Close() }()
 
 	// SSRF-safe client: refuses to connect to non-public IPs (see safeurl.go).
 	// Asset URLs come from seller import data, so a plain client would be an SSRF sink.

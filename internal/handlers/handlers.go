@@ -128,3 +128,17 @@ func bindJSON(c *gin.Context, dst interface{}) bool {
 	}
 	return true
 }
+
+// failZipStream reports a ZIP download that failed before any byte of the archive
+// went out. The attachment headers were set up front for the success path; left
+// in place they would label the JSON error "application/zip" and ask the browser
+// to save it as the archive. Once the body has started there is no way back to an
+// error envelope, so nothing is written then.
+func failZipStream(c *gin.Context, err error) {
+	if c.Writer.Written() {
+		return
+	}
+	c.Writer.Header().Del("Content-Disposition")
+	c.Writer.Header().Del("Content-Type")
+	response.Fail(c, err)
+}
