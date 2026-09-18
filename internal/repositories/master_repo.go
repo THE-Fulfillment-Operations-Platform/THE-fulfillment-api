@@ -149,6 +149,17 @@ func (r *SellerRepository) IdentityByID(id uint) (SellerIdentity, bool, error) {
 	return out[0], true, nil
 }
 
+// Identities loads id/code/name of every seller: the directory a multi-seller
+// import resolves its "Seller ID" column against.
+func (r *SellerRepository) Identities() ([]SellerIdentity, error) {
+	var out []SellerIdentity
+	err := r.db.Model(&models.Seller{}).
+		Select("id", "code", "name").
+		Order("id asc").
+		Scan(&out).Error
+	return out, err
+}
+
 func (r *SellerRepository) FindByCode(code string) (*models.Seller, error) {
 	code = models.NormalizeCode(code)
 	var s models.Seller

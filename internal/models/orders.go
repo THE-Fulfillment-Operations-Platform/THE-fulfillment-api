@@ -34,6 +34,9 @@ type ImportError struct {
 	ErrorCode    string `json:"error_code" gorm:"size:60"`
 	Message      string `json:"message" gorm:"size:255"`
 	Suggestion   string `json:"suggestion" gorm:"size:255"`
+	// SellerCode labels the row in a multi-seller preview, where one file's rows
+	// land on several sellers' jobs. Response-only: each job already has its seller.
+	SellerCode string `json:"seller_code,omitempty" gorm:"-"`
 }
 
 func (ImportError) TableName() string { return "import_errors" }

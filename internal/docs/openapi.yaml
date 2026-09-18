@@ -214,14 +214,22 @@ paths:
     post:
       tags: [Import]
       summary: Import đơn (JSON rows hoặc multipart CSV). commit=false để preview.
+      description: >-
+        Gửi `seller_id` để import cả file cho một seller, hoặc
+        `seller_mode=by_column` để mỗi dòng về đúng seller mà cột "Seller ID"
+        ghi (khớp theo MÃ seller; "6" khớp "006"). Chế độ by_column chỉ preview:
+        trả `sellers[]`, mỗi seller một `import_job_id`, commit từng job qua
+        /api/orders/import/commit. Dòng không khớp seller nào nằm trong `errors`
+        (SELLER_MISSING / SELLER_UNKNOWN / SELLER_AMBIGUOUS) và không thuộc job nào.
       requestBody:
         content:
           application/json:
             schema:
               type: object
-              required: [seller_id, rows]
+              required: [rows]
               properties:
                 seller_id: { type: integer }
+                seller_mode: { type: string, enum: [by_column] }
                 commit: { type: boolean }
                 filename: { type: string }
                 rows: { type: array, items: { $ref: '#/components/schemas/ImportRow' } }
@@ -230,6 +238,7 @@ paths:
               type: object
               properties:
                 seller_id: { type: integer }
+                seller_mode: { type: string, enum: [by_column] }
                 commit: { type: boolean }
                 file: { type: string, format: binary }
       responses:

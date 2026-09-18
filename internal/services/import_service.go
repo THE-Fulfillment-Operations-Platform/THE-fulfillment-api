@@ -597,21 +597,16 @@ func zipStateSwapped(zip, province string) bool {
 }
 
 // sellerRefMatches reports whether the file's "Seller ID" cell refers to the
-// seller this import is running for. An empty cell always matches — the column
-// is a cross-check, not a selector. Accepts the seller code (diacritics/spacing
-// normalised), the numeric id, or the seller name.
+// seller this import is running for. An empty cell always matches — here the
+// column is a cross-check, not a selector. Accepts the seller code (see
+// sameSellerCode) or the seller name — never the internal database id: a "6"
+// that Excel made out of "006" would otherwise pass for whichever seller has id 6.
 func sellerRefMatches(ref string, sel repositories.SellerIdentity) bool {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return true
 	}
-	if models.NormalizeCode(ref) == models.NormalizeCode(sel.Code) {
-		return true
-	}
-	if n, err := strconv.ParseUint(ref, 10, 64); err == nil && uint(n) == sel.ID {
-		return true
-	}
-	return strings.EqualFold(ref, strings.TrimSpace(sel.Name))
+	return sameSellerCode(ref, sel.Code) || strings.EqualFold(ref, strings.TrimSpace(sel.Name))
 }
 
 // skus is the pre-fetched SKUInfo map for the whole file (see skuInfoForRows).
@@ -716,27 +711,120 @@ func (s *ImportService) Preview(actor Actor, sellerID uint, source, filename str
 	if err != nil || !found {
 		return nil, apperr.BadRequest("seller_id does not reference an existing seller")
 	}
+	if err := checkImportShape(rows, hdr); err != nil {
+		return nil, err
+	}
+	skus, err := s.skuInfoForRows(rows)
+	if err != nil {
+		return nil, apperr.Internal("could not look up SKUs").Wrap(err)
+	}
+	file := inspectImportFile(rows, hdr)
+	res, err := s.previewSellerRows(actor, seller, source, filename, numberRows(rows), file, skus)
+	if err != nil {
+		return nil, err
+	}
+	res.Warnings = append(append([]models.ImportError{}, file.warnings...), res.Warnings...)
+	res.Headers = hdr
+	return res, nil
+}
+
+// checkImportShape rejects a file that cannot be previewed at all.
+func checkImportShape(rows []ImportRow, hdr HeaderReport) error {
 	if len(hdr.Missing) > 0 {
 		msg := "File sai template: thiếu cột " + strings.Join(hdr.Missing, ", ")
 		if len(hdr.Unknown) > 0 {
 			msg += ". Cột không nhận diện được: " + strings.Join(hdr.Unknown, ", ")
 		}
-		return nil, apperr.BadRequest(msg + ". Tải file mẫu mới ở nút \"Tải template\" rồi điền lại.")
+		return apperr.BadRequest(msg + ". Tải file mẫu mới ở nút \"Tải template\" rồi điền lại.")
 	}
 	if len(rows) == 0 {
-		return nil, apperr.BadRequest("no rows to import")
+		return apperr.BadRequest("no rows to import")
 	}
+	return nil
+}
 
-	// Prefetch the whole file's lookups in two queries: SKU info per distinct
-	// code, and which StoreOrderIDs already exist for this seller. The per-row
-	// loop below then never touches the database.
-	skus, err := s.skuInfoForRows(rows)
-	if err != nil {
-		return nil, apperr.Internal("could not look up SKUs").Wrap(err)
+// numberedRow keeps a row's line number in the uploaded file, so a row split off
+// into one seller's share still reports the number the operator sees.
+type numberedRow struct {
+	Number int
+	Row    ImportRow
+}
+
+func numberRows(rows []ImportRow) []numberedRow {
+	out := make([]numberedRow, len(rows))
+	for i, row := range rows {
+		out[i] = numberedRow{Number: i + 1, Row: row}
 	}
-	storeOrderIDs := make([]string, 0, len(rows))
+	return out
+}
+
+// importFileFacts is what the file says as a whole — reported once, whichever
+// seller its rows end up with.
+type importFileFacts struct {
+	hasDateColumn  bool
+	hasPhoneColumn bool
+	warnings       []models.ImportError // file-level notices, RowNumber 0
+}
+
+func inspectImportFile(rows []ImportRow, hdr HeaderReport) importFileFacts {
+	today := AppDateString(time.Now())
+	var f importFileFacts
+
+	// A missing COLUMN is one fact about the file; a missing CELL is a fact about
+	// one row. Reporting the first as the second buries the operator in one
+	// identical warning per line and trains them to ignore the warning panel.
+	// The data check covers the JSON/paste path, which has no header row at all.
+	f.hasDateColumn = hdr.Has(fOrderDate)
+	f.hasPhoneColumn = hdr.Has("ShippingPhone") || hdr.Has("Phone")
 	for _, row := range rows {
-		if id := strings.TrimSpace(row.StoreOrderID); id != "" {
+		if !f.hasDateColumn && strings.TrimSpace(row.OrderDateRaw) != "" {
+			f.hasDateColumn = true
+		}
+		if !f.hasPhoneColumn && row.RecipientPhone() != "" {
+			f.hasPhoneColumn = true
+		}
+	}
+	if !f.hasDateColumn {
+		f.warnings = append(f.warnings, models.ImportError{
+			Field: "DATE", ErrorCode: "DATE_COLUMN_MISSING",
+			Message:    "File không có cột DATE — tất cả đơn sẽ lấy ngày import (" + today + ")",
+			Suggestion: "Thêm cột DATE nếu muốn đơn nằm đúng ngày khách đặt",
+		})
+	}
+	if !f.hasPhoneColumn {
+		f.warnings = append(f.warnings, models.ImportError{
+			Field: "ShippingPhone", ErrorCode: "PHONE_COLUMN_MISSING",
+			Message:    "File không có số điện thoại người nhận ở bất kỳ dòng nào",
+			Suggestion: "Nhiều hãng vận chuyển bắt buộc có số — bổ sung cột ShippingPhone",
+		})
+	}
+	if len(hdr.Retired) > 0 {
+		f.warnings = append(f.warnings, models.ImportError{
+			Field: "Header", ErrorCode: "COL_RETIRED",
+			Message:    "Các cột không còn dùng, hệ thống bỏ qua: " + strings.Join(hdr.Retired, ", "),
+			Suggestion: "Có thể xoá các cột này khỏi file cho gọn",
+		})
+	}
+	if len(hdr.Unknown) > 0 {
+		f.warnings = append(f.warnings, models.ImportError{
+			Field: "Header", ErrorCode: "COL_UNKNOWN",
+			Message:    "Cột không nhận diện được (dữ liệu trong cột này KHÔNG được nhập): " + strings.Join(hdr.Unknown, ", "),
+			Suggestion: "Kiểm tra chính tả tên cột, hoặc tải lại file mẫu mới nhất",
+		})
+	}
+	return f
+}
+
+// previewSellerRows validates one seller's rows and stores them on a PREVIEW
+// job. It returns row-level warnings only; the file-level ones in file are the
+// caller's to report, once. skus is the SKU lookup for the whole file.
+func (s *ImportService) previewSellerRows(actor Actor, seller repositories.SellerIdentity, source, filename string, rows []numberedRow, file importFileFacts, skus map[string]repositories.SKUInfo) (*PreviewResult, error) {
+	sellerID := seller.ID
+	// Which StoreOrderIDs already exist for this seller — one query, so the
+	// per-row loop below never touches the database.
+	storeOrderIDs := make([]string, 0, len(rows))
+	for _, nr := range rows {
+		if id := strings.TrimSpace(nr.Row.StoreOrderID); id != "" {
 			storeOrderIDs = append(storeOrderIDs, id)
 		}
 	}
@@ -756,35 +844,7 @@ func (s *ImportService) Preview(actor Actor, sellerID uint, source, filename str
 
 	today := AppDateString(time.Now())
 	oldestSane := AppDateString(time.Now().AddDate(0, 0, -365))
-
-	// A missing COLUMN is one fact about the file; a missing CELL is a fact about
-	// one row. Reporting the first as the second buries the operator in one
-	// identical warning per line and trains them to ignore the warning panel.
-	// The data check covers the JSON/paste path, which has no header row at all.
-	hasDateColumn := hdr.Has(fOrderDate)
-	hasPhoneColumn := hdr.Has("ShippingPhone") || hdr.Has("Phone")
-	for _, row := range rows {
-		if !hasDateColumn && strings.TrimSpace(row.OrderDateRaw) != "" {
-			hasDateColumn = true
-		}
-		if !hasPhoneColumn && row.RecipientPhone() != "" {
-			hasPhoneColumn = true
-		}
-	}
-	if !hasDateColumn {
-		warnings = append(warnings, models.ImportError{
-			Field: "DATE", ErrorCode: "DATE_COLUMN_MISSING",
-			Message:    "File không có cột DATE — tất cả đơn sẽ lấy ngày import (" + today + ")",
-			Suggestion: "Thêm cột DATE nếu muốn đơn nằm đúng ngày khách đặt",
-		})
-	}
-	if !hasPhoneColumn {
-		warnings = append(warnings, models.ImportError{
-			Field: "ShippingPhone", ErrorCode: "PHONE_COLUMN_MISSING",
-			Message:    "File không có số điện thoại người nhận ở bất kỳ dòng nào",
-			Suggestion: "Nhiều hãng vận chuyển bắt buộc có số — bổ sung cột ShippingPhone",
-		})
-	}
+	hasDateColumn, hasPhoneColumn := file.hasDateColumn, file.hasPhoneColumn
 
 	mkWarn := func(rowNumber int, row ImportRow, field, code, msg, suggestion string) {
 		warnings = append(warnings, models.ImportError{
@@ -793,24 +853,9 @@ func (s *ImportService) Preview(actor Actor, sellerID uint, source, filename str
 		})
 	}
 
-	// File-level notices, reported once with RowNumber 0 rather than per row.
-	if len(hdr.Retired) > 0 {
-		warnings = append(warnings, models.ImportError{
-			Field: "Header", ErrorCode: "COL_RETIRED",
-			Message:    "Các cột không còn dùng, hệ thống bỏ qua: " + strings.Join(hdr.Retired, ", "),
-			Suggestion: "Có thể xoá các cột này khỏi file cho gọn",
-		})
-	}
-	if len(hdr.Unknown) > 0 {
-		warnings = append(warnings, models.ImportError{
-			Field: "Header", ErrorCode: "COL_UNKNOWN",
-			Message:    "Cột không nhận diện được (dữ liệu trong cột này KHÔNG được nhập): " + strings.Join(hdr.Unknown, ", "),
-			Suggestion: "Kiểm tra chính tả tên cột, hoặc tải lại file mẫu mới nhất",
-		})
-	}
-
-	for i, row := range rows {
-		if e := s.validateRow(i+1, row, skus, seller); e != nil {
+	for _, nr := range rows {
+		n, row := nr.Number, nr.Row
+		if e := s.validateRow(n, row, skus, seller); e != nil {
 			importErrors = append(importErrors, *e)
 			continue
 		}
@@ -825,27 +870,27 @@ func (s *ImportService) Preview(actor Actor, sellerID uint, source, filename str
 			// Only worth a row-level note when the file HAS the column and this row
 			// left it blank; the whole-file case was reported once, above.
 			if hasDateColumn {
-				mkWarn(i+1, row, "DATE", "DATE_EMPTY",
+				mkWarn(n, row, "DATE", "DATE_EMPTY",
 					"Cột DATE để trống — đơn sẽ lấy ngày import ("+today+")",
 					"Điền ngày đặt hàng nếu muốn đơn nằm đúng ngày của nó")
 			}
 			date = today
 		case ambiguous:
-			mkWarn(i+1, row, "DATE", "DATE_AMBIGUOUS",
+			mkWarn(n, row, "DATE", "DATE_AMBIGUOUS",
 				"Ngày \""+strings.TrimSpace(row.OrderDateRaw)+"\" đọc theo kiểu ngày/tháng → "+date+" (có thể khách định ghi tháng/ngày)",
 				"Ghi rõ dạng 2026-08-20 để không nhầm")
 		case date > today:
-			mkWarn(i+1, row, "DATE", "DATE_FUTURE",
+			mkWarn(n, row, "DATE", "DATE_FUTURE",
 				"Ngày đặt "+date+" nằm ở tương lai so với hôm nay ("+today+")",
 				"Kiểm tra lại năm/tháng trong file")
 		case date < oldestSane:
-			mkWarn(i+1, row, "DATE", "DATE_TOO_OLD",
+			mkWarn(n, row, "DATE", "DATE_TOO_OLD",
 				"Ngày đặt "+date+" cách đây hơn 1 năm",
 				"Kiểm tra lại năm trong file")
 		}
 		if prev, ok := orderDates[key]; ok {
 			if prev != date {
-				mkWarn(i+1, row, "DATE", "DATE_CONFLICT",
+				mkWarn(n, row, "DATE", "DATE_CONFLICT",
 					"Cùng ORDER ID nhưng DATE khác nhau ("+prev+" vs "+date+") — đơn sẽ dùng "+prev,
 					"Sửa cho các dòng cùng ORDER ID có cùng ngày")
 			}
@@ -859,7 +904,7 @@ func (s *ImportService) Preview(actor Actor, sellerID uint, source, filename str
 		// — but flag the row so staff can confirm with the customer it isn't an
 		// accidental re-send.
 		if existingStoreOrders[strings.TrimSpace(row.StoreOrderID)] {
-			mkWarn(i+1, row, "StoreOrderID", "ORD_DUPLICATE",
+			mkWarn(n, row, "StoreOrderID", "ORD_DUPLICATE",
 				"ORDER ID đã tồn tại cho seller này — không chặn, kiểm tra kẻo trùng",
 				"Xác nhận với khách nếu đây là đơn đã có; nếu đúng là đơn mới thì bỏ qua")
 		}
@@ -868,14 +913,14 @@ func (s *ImportService) Preview(actor Actor, sellerID uint, source, filename str
 		// nhập mới biết chắc. Nhưng phải nói ra, vì không nói thì sai này lặng lẽ
 		// đi thẳng lên nhãn gửi hàng và chỉ lộ khi kiện bị trả về.
 		if zipStateSwapped(row.ShippingZip, row.ShippingProvince) {
-			mkWarn(i+1, row, "Zipcode", "ADDR_ZIP_STATE_SWAPPED",
+			mkWarn(n, row, "Zipcode", "ADDR_ZIP_STATE_SWAPPED",
 				"Có vẻ Zipcode và Mã vùng bị đảo cột: Zipcode=\""+strings.TrimSpace(row.ShippingZip)+
 					"\" (giống mã bang), Mã vùng=\""+strings.TrimSpace(row.ShippingProvince)+"\" (giống mã ZIP)",
 				"Đổi chỗ hai cột: Zipcode là mã bưu chính (số), Mã vùng là bang/tỉnh")
 		}
 		// No phone at all means the carrier has no way to reach the recipient.
 		if hasPhoneColumn && row.RecipientPhone() == "" {
-			mkWarn(i+1, row, "ShippingPhone", "PHONE_MISSING",
+			mkWarn(n, row, "ShippingPhone", "PHONE_MISSING",
 				"Đơn không có số điện thoại người nhận",
 				"Điền cột ShippingPhone — nhiều hãng vận chuyển bắt buộc có số")
 		}
@@ -909,7 +954,7 @@ func (s *ImportService) Preview(actor Actor, sellerID uint, source, filename str
 	return &PreviewResult{
 		ImportJobID: job.ID, Status: job.Status, TotalRows: len(rows),
 		OrderCount: len(orderSet), ValidRows: len(validRows), ErrorRows: len(importErrors),
-		Errors: importErrors, Warnings: warnings, Headers: hdr,
+		Errors: importErrors, Warnings: warnings,
 	}, nil
 }
 

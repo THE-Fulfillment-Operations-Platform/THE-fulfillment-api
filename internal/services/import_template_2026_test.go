@@ -367,8 +367,10 @@ func TestPreview_SellerIDMismatchBlocks(t *testing.T) {
 	svc := importSvc(db)
 	actor := Actor{ID: 1}
 
-	// The fixture seller is id=1, code "S1", name "Seller One".
-	accepted := []string{"", "S1", "s1", " S1 ", "1", "Seller One"}
+	// The fixture seller is id=1, code "S1", name "Seller One". Its database id
+	// ("1") is NOT a way to name it: the column holds seller codes, and an id
+	// match is how a "6" Excel made out of "006" would pass for seller #6.
+	accepted := []string{"", "S1", "s1", " S1 ", "Seller One"}
 	for _, ref := range accepted {
 		prev, err := svc.Preview(actor, 1, "XLSX", "f.xlsx",
 			[]ImportRow{templateRow("OK-1", "2026-08-20", ref)}, fullHeader())
@@ -380,16 +382,18 @@ func TestPreview_SellerIDMismatchBlocks(t *testing.T) {
 		}
 	}
 
-	prev, err := svc.Preview(actor, 1, "XLSX", "f.xlsx",
-		[]ImportRow{templateRow("BAD-1", "2026-08-20", "S2")}, fullHeader())
-	if err != nil {
-		t.Fatalf("preview: %v", err)
-	}
-	if prev.ErrorRows != 1 || len(prev.Errors) != 1 || prev.Errors[0].ErrorCode != "SELLER_MISMATCH" {
-		t.Fatalf("a foreign Seller ID must block the row, got %+v", prev.Errors)
-	}
-	if prev.ValidRows != 0 {
-		t.Fatalf("a mismatched row must not be committable, valid=%d", prev.ValidRows)
+	for _, ref := range []string{"S2", "1"} {
+		prev, err := svc.Preview(actor, 1, "XLSX", "f.xlsx",
+			[]ImportRow{templateRow("BAD-1", "2026-08-20", ref)}, fullHeader())
+		if err != nil {
+			t.Fatalf("preview: %v", err)
+		}
+		if prev.ErrorRows != 1 || len(prev.Errors) != 1 || prev.Errors[0].ErrorCode != "SELLER_MISMATCH" {
+			t.Fatalf("Seller ID %q must block the row, got %+v", ref, prev.Errors)
+		}
+		if prev.ValidRows != 0 {
+			t.Fatalf("a mismatched row must not be committable, valid=%d", prev.ValidRows)
+		}
 	}
 }
 

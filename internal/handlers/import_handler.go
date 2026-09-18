@@ -13,17 +13,34 @@ import (
 	"the-fulfillment/backend/internal/services"
 )
 
+// sellerModeByColumn asks an ops import to assign each row to the seller its
+// "Seller ID" column names, instead of importing the whole file for seller_id.
+const sellerModeByColumn = "by_column"
+
+// importUpload is what parseImportUpload read from the request.
+type importUpload struct {
+	rows     []services.ImportRow
+	hdr      services.HeaderReport
+	source   string
+	filename string
+	commit   bool
+	// sellerID / sellerMode are what the request ASKED for; the caller decides
+	// whether to trust them (Ops importing on behalf of sellers) or ignore them
+	// in favour of the authenticated seller (seller self-upload).
+	sellerID   uint
+	sellerMode string
+}
+
 // parseImportUpload extracts the import rows / source / filename / commit flag
-// from a multipart CSV/XLSX upload or a JSON body. It also returns any seller_id
-// present in the request; the caller decides whether to trust it (Ops importing
-// on behalf of a seller) or ignore it in favour of the authenticated seller
-// (seller self-upload). On error it writes the response and returns ok=false.
-func parseImportUpload(c *gin.Context) (rows []services.ImportRow, hdr services.HeaderReport, source, filename string, commit bool, bodySellerID uint, ok bool) {
+// from a multipart CSV/XLSX upload or a JSON body. On error it writes the
+// response and returns ok=false.
+func parseImportUpload(c *gin.Context) (up importUpload, ok bool) {
 	if strings.HasPrefix(c.ContentType(), "multipart/form-data") {
 		if sid, err := strconv.ParseUint(c.PostForm("seller_id"), 10, 64); err == nil {
-			bodySellerID = uint(sid)
+			up.sellerID = uint(sid)
 		}
-		commit, _ = strconv.ParseBool(c.PostForm("commit"))
+		up.sellerMode = strings.TrimSpace(c.PostForm("seller_mode"))
+		up.commit, _ = strconv.ParseBool(c.PostForm("commit"))
 
 		fileHeader, err := c.FormFile("file")
 		if err != nil {
@@ -37,17 +54,17 @@ func parseImportUpload(c *gin.Context) (rows []services.ImportRow, hdr services.
 		}
 		defer f.Close()
 
-		filename = fileHeader.Filename
-		switch strings.ToLower(filepath.Ext(filename)) {
+		up.filename = fileHeader.Filename
+		switch strings.ToLower(filepath.Ext(up.filename)) {
 		case ".xlsx", ".xlsm":
-			rows, hdr, err = services.ParseXLSX(f)
-			source = "XLSX"
+			up.rows, up.hdr, err = services.ParseXLSX(f)
+			up.source = "XLSX"
 		case ".xls":
 			response.Fail(c, apperr.BadRequest("Định dạng .xls (Excel cũ) chưa hỗ trợ — lưu lại dạng .xlsx hoặc CSV"))
 			return
 		default:
-			rows, hdr, err = services.ParseCSV(f)
-			source = "CSV"
+			up.rows, up.hdr, err = services.ParseCSV(f)
+			up.source = "CSV"
 		}
 		if err != nil {
 			response.Fail(c, err)
@@ -55,19 +72,21 @@ func parseImportUpload(c *gin.Context) (rows []services.ImportRow, hdr services.
 		}
 	} else {
 		var body struct {
-			SellerID uint                 `json:"seller_id"`
-			Commit   bool                 `json:"commit"`
-			Filename string               `json:"filename"`
-			Rows     []services.ImportRow `json:"rows" binding:"required,min=1"`
+			SellerID   uint                 `json:"seller_id"`
+			SellerMode string               `json:"seller_mode"`
+			Commit     bool                 `json:"commit"`
+			Filename   string               `json:"filename"`
+			Rows       []services.ImportRow `json:"rows" binding:"required,min=1"`
 		}
 		if !bindJSON(c, &body) {
 			return
 		}
-		bodySellerID = body.SellerID
-		commit = body.Commit
-		rows = body.Rows
-		source = "JSON"
-		filename = body.Filename
+		up.sellerID = body.SellerID
+		up.sellerMode = strings.TrimSpace(body.SellerMode)
+		up.commit = body.Commit
+		up.rows = body.Rows
+		up.source = "JSON"
+		up.filename = body.Filename
 		// A JSON body carries objects, not a header row: the client already did the
 		// column mapping. Nothing to report — and nothing to declare missing, or
 		// pasting rows through the API would fail the required-column check.
@@ -77,14 +96,14 @@ func parseImportUpload(c *gin.Context) (rows []services.ImportRow, hdr services.
 }
 
 // runImport previews (and optionally commits) an import for a resolved sellerID.
-func (h *Handlers) runImport(c *gin.Context, sellerID uint, rows []services.ImportRow, hdr services.HeaderReport, source, filename string, commit bool) {
+func (h *Handlers) runImport(c *gin.Context, sellerID uint, up importUpload) {
 	a := actor(c)
-	preview, err := h.svc.Import.Preview(a, sellerID, source, filename, rows, hdr)
+	preview, err := h.svc.Import.Preview(a, sellerID, up.source, up.filename, up.rows, up.hdr)
 	if err != nil {
 		response.Fail(c, err)
 		return
 	}
-	if !commit {
+	if !up.commit {
 		response.OK(c, preview)
 		return
 	}
@@ -97,20 +116,37 @@ func (h *Handlers) runImport(c *gin.Context, sellerID uint, rows []services.Impo
 }
 
 // ImportOrders (Ops/Admin) imports a seller's order file. seller_id comes from
-// the request so ops can import on behalf of any seller. POST /api/orders/import
+// the request so ops can import on behalf of any seller — or, with
+// seller_mode=by_column, each row goes to the seller its "Seller ID" column
+// names (one PREVIEW job per seller, committed job by job). POST /api/orders/import
 //
-//	multipart/form-data: file=<csv>, seller_id=<id>, commit=<bool>
+//	multipart/form-data: file=<csv>, seller_id=<id> | seller_mode=by_column, commit=<bool>
 //	application/json:     { "seller_id": 1, "commit": false, "rows": [ {...} ] }
 func (h *Handlers) ImportOrders(c *gin.Context) {
-	rows, hdr, source, filename, commit, bodySellerID, ok := parseImportUpload(c)
+	up, ok := parseImportUpload(c)
 	if !ok {
 		return
 	}
-	if bodySellerID == 0 {
+	if up.sellerMode == sellerModeByColumn {
+		// Preview only: one file becomes several jobs, and committing them in one
+		// call would half-succeed on a failure mid-way with no clean way back.
+		if up.commit {
+			response.Fail(c, apperr.BadRequest("seller_mode=by_column chỉ preview; commit từng import_job_id trong sellers[]"))
+			return
+		}
+		res, err := h.svc.Import.PreviewBySellerColumn(actor(c), up.source, up.filename, up.rows, up.hdr)
+		if err != nil {
+			response.Fail(c, err)
+			return
+		}
+		response.OK(c, res)
+		return
+	}
+	if up.sellerID == 0 {
 		response.Fail(c, apperr.BadRequest("seller_id is required"))
 		return
 	}
-	h.runImport(c, bodySellerID, rows, hdr, source, filename, commit)
+	h.runImport(c, up.sellerID, up)
 }
 
 // SellerImportOrders lets a seller upload their OWN order file. seller_id is
@@ -123,11 +159,11 @@ func (h *Handlers) SellerImportOrders(c *gin.Context) {
 	if !ok {
 		return
 	}
-	rows, hdr, source, filename, commit, _, ok := parseImportUpload(c)
+	up, ok := parseImportUpload(c)
 	if !ok {
 		return
 	}
-	h.runImport(c, sellerID, rows, hdr, source, filename, commit)
+	h.runImport(c, sellerID, up)
 }
 
 // DownloadOrderImportTemplate streams the order-import template as an .xlsx
