@@ -182,6 +182,36 @@ paths:
     get: { tags: [Catalog], summary: Chi tiết material, responses: { '200': { description: OK } } }
     put: { tags: [Catalog], summary: Cập nhật material, responses: { '200': { description: OK } } }
     delete: { tags: [Catalog], summary: Xóa material, responses: { '200': { description: OK } } }
+  /api/materials/pair-quota/export.xlsx:
+    get:
+      tags: [Catalog]
+      summary: Xuất Excel mọi cặp SKU–NVL kèm định mức hiện tại (OWNER)
+      description: >-
+        Mỗi dòng một cặp (SKU, NVL) của SKU đang dùng. Cột "Định mức" trống =
+        cặp chưa có định mức riêng (đang rơi về định mức mặc định của NVL, hoặc
+        không giới hạn → cả pool dồn một batch). Điền rồi import lại qua
+        /api/materials/pair-quota/import/*.
+      responses: { '200': { description: File .xlsx } }
+  /api/materials/pair-quota/import/preview:
+    post:
+      tags: [Catalog]
+      summary: Xem trước import định mức theo cặp SKU–NVL (OWNER, không ghi gì)
+      description: >-
+        Cột SKU + Loại VL (hoặc Mã NVL) + Định mức. Chỉ đặt định mức cho cặp đã
+        gán sẵn; ô Định mức trống = bỏ qua dòng, không xoá định mức cũ. Lỗi theo
+        dòng: SKU_NOT_FOUND, PAIR_NOT_MAPPED, PAIR_AMBIGUOUS, PAIR_CONFLICT,
+        QUOTA_INVALID, QUOTA_NOT_POSITIVE.
+      requestBody:
+        content:
+          multipart/form-data:
+            schema: { type: object, properties: { file: { type: string, format: binary } } }
+      responses: { '200': { description: Kế hoạch theo từng cặp + lỗi theo dòng } }
+  /api/materials/pair-quota/import/commit:
+    post:
+      tags: [Catalog]
+      summary: Áp dụng import định mức theo cặp SKU–NVL (OWNER)
+      description: Gửi lại `rows` của bước xem trước; phân tích lại rồi ghi các cặp hợp lệ, dòng lỗi bỏ qua.
+      responses: { '200': { description: Kết quả áp dụng } }
   /api/skus:
     get: { tags: [Catalog], summary: Danh sách SKU, responses: { '200': { description: OK } } }
     post:
