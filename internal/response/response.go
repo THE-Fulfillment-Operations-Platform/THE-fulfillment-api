@@ -67,7 +67,7 @@ func Fail(c *gin.Context, err error) {
 		}
 		c.JSON(ae.Status, Envelope{
 			Success: false,
-			Error:   &ErrorBody{Code: ae.Code, Message: ae.Message},
+			Error:   &ErrorBody{Code: ae.Code, Message: ae.Message, Details: ae.Details},
 		})
 		return
 	}

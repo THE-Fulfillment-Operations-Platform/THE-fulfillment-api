@@ -1,11 +1,14 @@
 package services
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"path"
 	"regexp"
 	"strings"
+
+	"the-fulfillment/backend/internal/apperr"
 )
 
 // A "share link" is not a download link. Pasting the Google-Drive link a seller
@@ -85,23 +88,85 @@ func isHTMLResponse(header http.Header, head []byte) bool {
 	return false
 }
 
-// assetFetchHint explains a link that returned a web page, in the terms of the
+// Reason codes for a design link that did not yield a file. The web app groups
+// the failed links by code and picks the "how to fix" line from it, so the codes
+// are a contract; the Vietnamese message beside each is what a person reads.
+const (
+	assetReasonDriveFolder    = "DRIVE_FOLDER"
+	assetReasonGoogleDoc      = "GOOGLE_DOC"
+	assetReasonDriveNotShared = "DRIVE_NOT_SHARED"
+	assetReasonWebPage        = "WEB_PAGE"
+	assetReasonLinkGone       = "LINK_GONE"
+	assetReasonLinkForbidden  = "LINK_FORBIDDEN"
+	assetReasonHTTPStatus     = "HTTP_STATUS"
+	assetReasonTooLarge       = "TOO_LARGE"
+	assetReasonBadURL         = "BAD_URL"
+	assetReasonUnreachable    = "UNREACHABLE"
+	assetReasonDownloadFailed = "DOWNLOAD_FAILED"
+)
+
+const driveFolderMessage = "Link là THƯ MỤC Google Drive, không phải một file"
+
+// assetLinkError is a per-link failure: skipped from the ZIP and reported by code.
+func assetLinkError(code, message string) *apperr.Error {
+	return apperr.New(http.StatusUnprocessableEntity, code, message)
+}
+
+// driveFolderPathRe matches every folder form Drive hands out: the plain
+// /drive/folders/<id>, the account-scoped /drive/u/<n>/folders/<id> a browser
+// signed into several accounts copies, and the mobile one. Matching only the
+// first form is how a batch of /drive/u/0/folders/ links got blamed on sharing.
+var driveFolderPathRe = regexp.MustCompile(`^/drive/(?:u/\d+/|mobile/)?folders/`)
+
+// isDriveFolderLink reports a link to a Drive FOLDER. It is decided from the URL
+// alone, before any fetch: a folder is never one file, whatever it is shared as.
+func isDriveFolderLink(rawURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || !isGoogleDriveHost(u.Hostname()) {
+		return false
+	}
+	return driveFolderPathRe.MatchString(u.Path) || u.Path == "/embeddedfolderview"
+}
+
+func isGoogleDriveHost(host string) bool {
+	host = strings.ToLower(host)
+	return host == "drive.google.com" || host == "docs.google.com" || host == "drive.usercontent.google.com"
+}
+
+// webPageReason explains a link that returned a web page, in the terms of the
 // person who has to fix it — whoever pasted the link.
-func assetFetchHint(rawURL string) string {
+func webPageReason(rawURL string) (code, message string) {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
-		return "link không trả về file"
+		return assetReasonWebPage, "Link không trả về file"
 	}
-	host := strings.ToLower(u.Hostname())
-	if host == "drive.google.com" || host == "docs.google.com" || host == "drive.usercontent.google.com" {
-		if strings.HasPrefix(u.Path, "/drive/folders/") {
-			return "link là THƯ MỤC Google Drive, không phải một file — cần dán link của đúng file design"
+	if isGoogleDriveHost(u.Hostname()) {
+		if isDriveFolderLink(rawURL) {
+			return assetReasonDriveFolder, driveFolderMessage
 		}
 		if base := path.Base(u.Path); base == "edit" || strings.HasPrefix(u.Path, "/document/") ||
 			strings.HasPrefix(u.Path, "/spreadsheets/") || strings.HasPrefix(u.Path, "/presentation/") {
-			return "link là tài liệu Google (Docs/Sheets/Slides), không phải file design"
+			return assetReasonGoogleDoc, "Link là tài liệu Google (Docs/Sheets/Slides), không phải file design"
 		}
-		return "Google Drive trả về trang web thay vì file — nhiều khả năng file chưa được chia sẻ ở chế độ \"Bất kỳ ai có đường liên kết\""
+		return assetReasonDriveNotShared, "Google Drive trả về trang đăng nhập thay vì file — nhiều khả năng file chưa được chia sẻ \"Bất kỳ ai có đường liên kết\""
 	}
-	return "link trả về trang web thay vì file — kiểm tra quyền chia sẻ hoặc dùng link tải trực tiếp"
+	return assetReasonWebPage, "Link trả về trang web thay vì file"
+}
+
+// assetFetchHint is webPageReason's sentence alone, for callers that only log it.
+func assetFetchHint(rawURL string) string {
+	_, message := webPageReason(rawURL)
+	return message
+}
+
+// httpStatusReason names a non-200 answer by what the person can do about it.
+func httpStatusReason(status int) (code, message string) {
+	switch status {
+	case http.StatusNotFound, http.StatusGone:
+		return assetReasonLinkGone, fmt.Sprintf("Link không còn tồn tại — file đã bị xoá hoặc đổi chỗ (HTTP %d)", status)
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return assetReasonLinkForbidden, fmt.Sprintf("Link chặn quyền truy cập (HTTP %d)", status)
+	default:
+		return assetReasonHTTPStatus, fmt.Sprintf("Máy chủ chứa file trả lỗi HTTP %d", status)
+	}
 }

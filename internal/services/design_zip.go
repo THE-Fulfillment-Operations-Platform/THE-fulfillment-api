@@ -6,7 +6,6 @@ import (
 	"io"
 	"time"
 
-	"the-fulfillment/backend/internal/apperr"
 	"the-fulfillment/backend/internal/models"
 	"the-fulfillment/backend/internal/repositories"
 )
@@ -81,7 +80,7 @@ func (s *OrderService) StreamDesignAssetsZip(ctx context.Context, w io.Writer, q
 	client := newSafeAssetClient(30 * time.Second)
 	usedNames := map[string]int{}
 	written := 0
-	failed := make([]string, 0)
+	failed := make([]assetFailure, 0)
 
 	// Write in SKU order so the archive's entry order matches the order the
 	// extracted folder will show (see sortDesignItemsBySKU).
@@ -105,7 +104,7 @@ func (s *OrderService) StreamDesignAssetsZip(ctx context.Context, w io.Writer, q
 	}
 
 	if written == 0 {
-		return apperr.Unprocessable(noDesignFilesMessage(failed))
+		return noDesignFilesError(failed)
 	}
 	if err := writeZipErrorNote(zw, folder, failed); err != nil {
 		return err

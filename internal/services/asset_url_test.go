@@ -3,6 +3,7 @@ package services
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"strings"
@@ -106,12 +107,48 @@ func TestWriteResponseToZipEntry_RejectsSniffedHTML(t *testing.T) {
 // The hint has to tell the user which mistake they made — folder vs unshared file
 // are different fixes.
 func TestAssetFetchHint(t *testing.T) {
-	folder := assetFetchHint("https://drive.google.com/drive/folders/1ZMpMiwFW6jb")
-	if !strings.Contains(folder, "THƯ MỤC") {
-		t.Errorf("folder link hint: got %q", folder)
+	for _, link := range []string{
+		"https://drive.google.com/drive/folders/1ZMpMiwFW6jb",
+		// The account-scoped form batch #101068 was full of: matching only the
+		// plain form blamed these folders on sharing settings.
+		"https://drive.google.com/drive/u/0/folders/1O_xR_Ovg",
+	} {
+		if folder := assetFetchHint(link); !strings.Contains(folder, "THƯ MỤC") {
+			t.Errorf("folder link hint for %s: got %q", link, folder)
+		}
 	}
 	file := assetFetchHint("https://drive.google.com/file/d/abc/view")
 	if !strings.Contains(file, "chia sẻ") {
 		t.Errorf("unshared file hint: got %q", file)
+	}
+}
+
+// A folder link is recognised from the URL alone, in every form Drive hands out,
+// and never mistaken for a file link or another host's path.
+func TestIsDriveFolderLink(t *testing.T) {
+	cases := map[string]bool{
+		"https://drive.google.com/drive/folders/1ZMp":                 true,
+		"https://drive.google.com/drive/u/0/folders/1O_xR_Ovg":        true,
+		"https://drive.google.com/drive/u/2/folders/1O_x?usp=sharing": true,
+		"https://drive.google.com/drive/mobile/folders/1O_x":          true,
+		"https://drive.google.com/embeddedfolderview?id=1O_x":         true,
+		"https://drive.google.com/file/d/abc/view":                    false,
+		"https://drive.google.com/uc?id=abc":                          false,
+		"https://files.example.com/drive/u/0/folders/abc":             false,
+		"not a url %%": false,
+	}
+	for link, want := range cases {
+		if got := isDriveFolderLink(link); got != want {
+			t.Errorf("isDriveFolderLink(%q) = %v, want %v", link, got, want)
+		}
+	}
+}
+
+// A folder link fails before any fetch: the nil client would panic if it dialed.
+func TestWriteURLToZipEntry_FolderLinkFailsWithoutFetching(t *testing.T) {
+	zw := zip.NewWriter(io.Discard)
+	err := writeURLToZipEntry(context.Background(), nil, zw, "https://drive.google.com/drive/u/0/folders/1O_x", "A_1", map[string]int{})
+	if code, _ := assetFailReason(err); code != assetReasonDriveFolder {
+		t.Fatalf("code = %q, want %q (err %v)", code, assetReasonDriveFolder, err)
 	}
 }

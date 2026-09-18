@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sort"
 	"strings"
 
@@ -106,40 +107,84 @@ func reserveZipName(usedNames map[string]int, base, ext string) string {
 	return name
 }
 
-// assetFailReason turns a download error into the one line that belongs in the
-// ZIP's error note: the user-facing message only, never the wrapped internals.
-func assetFailReason(err error) string {
-	var ae *apperr.Error
-	if errors.As(err, &ae) && ae.Message != "" {
-		return ae.Message
-	}
-	return "không tải được file"
+// assetFailure is one design file that could not be downloaded. It is a line of
+// the ZIP's error note when other files did come through, and a row of the web
+// app's error dialog when none did — hence the JSON tags.
+type assetFailure struct {
+	OrderID      uint   `json:"order_id"` // where the link is fixed (order detail page)
+	InternalCode string `json:"internal_code"`
+	SKU          string `json:"sku"`
+	Side         string `json:"side,omitempty"` // FRONT / BACK; empty for a one-sided item
+	Code         string `json:"code"`           // see the assetReason* constants
+	Reason       string `json:"reason"`
+	URL          string `json:"url"`
 }
 
-// describeAssetFailure is one line of the error note: which product, which side,
-// why it failed, and the link to fix — everything needed to repair it without
-// hunting through the app first.
-func describeAssetFailure(it *models.OrderItem, a designAsset, err error) string {
+// codeDesignDownloadFailed marks a design download where not one file came
+// through; its details (designDownloadFailure) list every failed link.
+const codeDesignDownloadFailed = "DESIGN_DOWNLOAD_FAILED"
+
+type designDownloadFailure struct {
+	Failed []assetFailure `json:"failed"`
+}
+
+// assetFailReason turns a download error into the code + sentence a person gets:
+// the user-facing message only, never the wrapped internals. A write to the ZIP
+// itself failing is not the link's fault, and says so generically.
+func assetFailReason(err error) (code, message string) {
+	var ae *apperr.Error
+	if errors.As(err, &ae) && ae.Message != "" && ae.Code != "INTERNAL" {
+		return ae.Code, ae.Message
+	}
+	return assetReasonDownloadFailed, "Tải file bị lỗi giữa chừng — thử tải lại"
+}
+
+// describeAssetFailure records which product, which side, why it failed and the
+// link to fix — everything needed to repair it without hunting through the app.
+func describeAssetFailure(it *models.OrderItem, a designAsset, err error) assetFailure {
+	f := assetFailure{OrderID: it.OrderID, InternalCode: it.InternalCode, SKU: it.SKUCode, URL: a.url}
+	if a.side == models.DesignSideFront || a.side == models.DesignSideBack {
+		f.Side = string(a.side)
+	}
+	f.Code, f.Reason = assetFailReason(err)
+	return f
+}
+
+func (f assetFailure) noteLine() string {
 	side := ""
-	switch a.side {
-	case models.DesignSideFront:
+	switch f.Side {
+	case string(models.DesignSideFront):
 		side = " (mặt trước)"
-	case models.DesignSideBack:
+	case string(models.DesignSideBack):
 		side = " (mặt sau)"
 	}
-	return fmt.Sprintf("- %s · %s%s: %s\n  link: %s",
-		it.InternalCode, it.SKUCode, side, assetFailReason(err), a.url)
+	return fmt.Sprintf("- %s · %s%s: %s\n  link: %s", f.InternalCode, f.SKU, side, f.Reason, f.URL)
 }
 
-// noDesignFilesMessage explains an empty download. When every link failed for the
-// same reason, saying so beats the generic "check the links" — that reason is
-// usually the whole fix.
-func noDesignFilesMessage(failed []string) string {
-	base := "Không có file design nào để tải"
+// noDesignFilesError is the answer to a download that produced nothing. The
+// message is one sentence for a toast; the details carry every failed link for a
+// UI that can show them. When every link failed for the same reason, the sentence
+// names it — that reason is usually the whole fix.
+func noDesignFilesError(failed []assetFailure) error {
+	base := "Không tải được file design nào"
 	if len(failed) == 0 {
-		return base + " (kiểm tra link design của các đơn đã chọn)"
+		return apperr.Unprocessable(base + " — các sản phẩm chưa có link design")
 	}
-	return fmt.Sprintf("%s — %d link lỗi. Ví dụ:\n%s", base, len(failed), failed[0])
+	msg := fmt.Sprintf("%s — %d link lỗi", base, len(failed))
+	if sameReason(failed) {
+		msg += ": " + failed[0].Reason
+	}
+	return apperr.New(http.StatusUnprocessableEntity, codeDesignDownloadFailed, msg).
+		WithDetails(designDownloadFailure{Failed: failed})
+}
+
+func sameReason(failed []assetFailure) bool {
+	for _, f := range failed[1:] {
+		if f.Reason != failed[0].Reason {
+			return false
+		}
+	}
+	return true
 }
 
 // zipErrorNoteName is the note listing the design files that could not be
@@ -151,7 +196,7 @@ const zipErrorNoteName = "_FILE-LOI.txt"
 // writeZipErrorNote adds the note to the archive. Called only when at least one
 // file DID download: with nothing to deliver the caller returns a real error
 // instead, so the user gets a message rather than a ZIP holding just a complaint.
-func writeZipErrorNote(zw *zip.Writer, folder string, failed []string) error {
+func writeZipErrorNote(zw *zip.Writer, folder string, failed []assetFailure) error {
 	if len(failed) == 0 {
 		return nil
 	}
@@ -163,11 +208,15 @@ func writeZipErrorNote(zw *zip.Writer, folder string, failed []string) error {
 	if err != nil {
 		return apperr.Internal("could not write ZIP error note").Wrap(err)
 	}
+	lines := make([]string, len(failed))
+	for i, f := range failed {
+		lines[i] = f.noteLine()
+	}
 	body := fmt.Sprintf("KHÔNG TẢI ĐƯỢC %d FILE DESIGN\n\n%s\n\n"+
 		"Cách xử lý: mở đúng sản phẩm trong màn \"Chờ thiết kế\" và sửa lại link design.\n"+
 		"Link phải trỏ tới ĐÚNG MỘT FILE (không phải thư mục) và được chia sẻ ở chế độ\n"+
 		"\"Bất kỳ ai có đường liên kết\" thì máy chủ mới tải được.\n",
-		len(failed), strings.Join(failed, "\n"))
+		len(failed), strings.Join(lines, "\n"))
 	if _, err := io.WriteString(w, body); err != nil {
 		return apperr.Internal("could not write ZIP error note").Wrap(err)
 	}

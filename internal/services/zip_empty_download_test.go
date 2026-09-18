@@ -3,8 +3,11 @@ package services
 import (
 	"bytes"
 	"context"
+	"io"
+	"strings"
 	"testing"
 
+	"the-fulfillment/backend/internal/apperr"
 	"the-fulfillment/backend/internal/models"
 )
 
@@ -39,6 +42,43 @@ func TestStreamBatchAssetsZip_NothingDownloadedWritesNoBytes(t *testing.T) {
 		}
 		if buf.Len() != 0 {
 			t.Fatalf("designOnly=%v: wrote %d bytes, want 0 — an empty ZIP hides the error", designOnly, buf.Len())
+		}
+	}
+}
+
+// TestStreamBatchAssetsZip_ReportsEveryFailedLink: batch #101068 thật — mọi item
+// trỏ vào cùng một THƯ MỤC Drive dạng /drive/u/0/folders/. Lỗi trả về phải gọi
+// đúng tên lý do (không phải "chưa chia sẻ") và kèm TỪNG link hỏng trong details
+// để web hiện bảng lỗi, không chỉ một ví dụ trong câu toast.
+func TestStreamBatchAssetsZip_ReportsEveryFailedLink(t *testing.T) {
+	db := newScrapDB(t)
+	svc := newBatchService(db)
+	_, ids := seedSplit(t, db, 0, 3)
+	const folder = "https://drive.google.com/drive/u/0/folders/1O_xR_Ovg"
+	if err := db.Model(&models.OrderItem{}).Where("id IN ?", ids).
+		Update("design_url", folder).Error; err != nil {
+		t.Fatalf("set design urls: %v", err)
+	}
+	batch, _, err := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	if err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+
+	err = svc.StreamBatchAssetsZip(context.Background(), io.Discard, batch.ID, true)
+	ae, ok := apperr.As(err)
+	if !ok || ae.Code != codeDesignDownloadFailed {
+		t.Fatalf("err = %v, want code %s", err, codeDesignDownloadFailed)
+	}
+	if !strings.Contains(ae.Message, "3 link lỗi") || !strings.Contains(ae.Message, "THƯ MỤC") {
+		t.Errorf("message must count the links and name the one shared reason: %q", ae.Message)
+	}
+	details, ok := ae.Details.(designDownloadFailure)
+	if !ok || len(details.Failed) != 3 {
+		t.Fatalf("details = %#v, want 3 failed links", ae.Details)
+	}
+	for _, f := range details.Failed {
+		if f.Code != assetReasonDriveFolder || f.URL != folder || f.InternalCode == "" || f.SKU == "" || f.OrderID == 0 {
+			t.Errorf("failed row incomplete: %+v", f)
 		}
 	}
 }

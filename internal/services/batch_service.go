@@ -1040,7 +1040,7 @@ func (s *BatchService) StreamBatchAssetsZip(ctx context.Context, w io.Writer, ba
 		}
 		sortDesignItemsBySKU(ordered)
 
-		failed := make([]string, 0)
+		failed := make([]assetFailure, 0)
 		for _, it := range ordered {
 			for _, a := range designAssetsForItem(it) {
 				entryBase := designFileBase(designFolder, it.InternalCode, it.SKUCode, it.Quantity, a.side)
@@ -1054,7 +1054,7 @@ func (s *BatchService) StreamBatchAssetsZip(ctx context.Context, w io.Writer, ba
 		}
 
 		if written == 0 {
-			return apperr.Unprocessable(noDesignFilesMessage(failed))
+			return noDesignFilesError(failed)
 		}
 		if err := writeZipErrorNote(zw, designFolder, failed); err != nil {
 			return err
@@ -1122,6 +1122,11 @@ func (s *BatchService) StreamBatchAssetsZip(ctx context.Context, w io.Writer, ba
 // and naming an opaque download link ".bin" up front is what left designers with
 // files their OS would not open.
 func writeURLToZipEntry(ctx context.Context, client *http.Client, zw *zip.Writer, rawURL, entryBase string, usedNames map[string]int) error {
+	// A folder is never one file, and Drive answers a folder link with a web page
+	// whatever it is shared as — say so without spending a fetch on it.
+	if isDriveFolderLink(rawURL) {
+		return assetLinkError(assetReasonDriveFolder, driveFolderMessage)
+	}
 	// A pasted share link points at a viewer page, not at the bytes — rewrite it
 	// to the direct-download URL before fetching (see normalizeAssetURL).
 	fetchURL := normalizeAssetURL(rawURL)
@@ -1131,7 +1136,7 @@ func writeURLToZipEntry(ctx context.Context, client *http.Client, zw *zip.Writer
 	// redirects + rebinding); this gives an early, clear rejection.
 	u, err := validatePublicHTTPURL(fetchURL)
 	if err != nil {
-		return apperr.Unprocessable("Asset URL not allowed: " + err.Error())
+		return assetLinkError(assetReasonBadURL, "Link không hợp lệ — phải là link http(s) công khai").Wrap(err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
@@ -1140,17 +1145,17 @@ func writeURLToZipEntry(ctx context.Context, client *http.Client, zw *zip.Writer
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return apperr.Internal("could not download asset").Wrap(err)
+		return assetLinkError(assetReasonUnreachable, "Không kết nối được tới link (hết thời gian chờ hoặc bị từ chối)").Wrap(err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return apperr.Internal(fmt.Sprintf("asset request failed: %s -> %d", rawURL, resp.StatusCode))
+		return assetLinkError(httpStatusReason(resp.StatusCode))
 	}
 	// Refuse an oversized file outright instead of silently truncating it at the
 	// cap and handing over a corrupt half-file.
 	if resp.ContentLength > maxAssetBytes {
-		return apperr.Unprocessable("file vượt quá giới hạn 100MB")
+		return assetLinkError(assetReasonTooLarge, "File vượt quá giới hạn 100MB")
 	}
 
 	// The ORIGINAL url is passed on: it is the one that may carry a real extension
@@ -1175,7 +1180,7 @@ func writeResponseToZipEntry(zw *zip.Writer, resp *http.Response, rawURL, entryB
 	// A web page is never a design file: putting it in the ZIP is how a Drive
 	// viewer page ended up masquerading as artwork. Fail the asset instead.
 	if isHTMLResponse(resp.Header, head) {
-		return apperr.Unprocessable(assetFetchHint(rawURL))
+		return assetLinkError(webPageReason(rawURL))
 	}
 
 	entryName := reserveZipName(usedNames, entryBase, resolveAssetExt(rawURL, resp.Header, head))

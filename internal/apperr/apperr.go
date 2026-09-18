@@ -16,6 +16,9 @@ type Error struct {
 	Code    string // stable machine-readable code, e.g. "NOT_FOUND"
 	Message string // human-readable message (safe to expose)
 	Err     error  // optional wrapped error (logged, never exposed)
+	// Details is an optional structured payload sent as error.details, for a UI
+	// that needs more than one sentence (e.g. every link a download failed on).
+	Details interface{}
 }
 
 func (e *Error) Error() string {
@@ -36,6 +39,13 @@ func New(status int, code, message string) *Error {
 func (e *Error) Wrap(err error) *Error {
 	clone := *e
 	clone.Err = err
+	return &clone
+}
+
+// WithDetails attaches a structured payload the client receives as error.details.
+func (e *Error) WithDetails(details interface{}) *Error {
+	clone := *e
+	clone.Details = details
 	return &clone
 }
 
