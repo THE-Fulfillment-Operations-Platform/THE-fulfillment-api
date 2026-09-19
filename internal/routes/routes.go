@@ -15,49 +15,25 @@ import (
 	"the-fulfillment/backend/internal/handlers"
 	"the-fulfillment/backend/internal/middleware"
 	"the-fulfillment/backend/internal/models"
+	"the-fulfillment/backend/internal/services"
 )
 
-// Role sets reused across route groups.
+// Most internal routes are guarded by permission ticks (see models/permissions.go):
+// perm(view(X)) / perm(manage(X)), where a route shared by several screens names
+// each screen that may use it. Roles still gate what is not a tick: user admin,
+// the OWNER-only levers, and destructive actions (role AND the screen's manage).
 var (
 	roleAdminOwner = []models.Role{models.RoleOwner, models.RoleAdmin}
-	roleOpsAdmin   = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps}
-	roleDesignOps  = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleDesigner}
-	roleProdOps    = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleProduction, models.RoleDesigner}
-	roleQCOps      = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleQC}
-	rolePackOps    = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RolePacking}
-	// Huỷ batch (cả tấm hỏng, vứt đi, làm lại) là việc của người đứng cạnh cái
-	// tấm đó: xưởng sản xuất phát hiện cắt/in hỏng, QC phát hiện cả tấm sai file.
-	// DESIGNER cố tình không có ở đây — họ gom batch và xoá batch chưa sản xuất,
-	// còn ghi bỏ vật liệu đã tiêu thì không.
-	roleScrapBatch = []models.Role{
-		models.RoleOwner, models.RoleAdmin, models.RoleOps,
-		models.RoleProduction, models.RoleQC,
-	}
-	// Roles that may hand finished goods to THE — mirrors canShipToCarrier in the
-	// service. SHIPPING belongs here (it is literally their desk); CS does not.
-	roleShipCarrier = []models.Role{
-		models.RoleOwner, models.RoleAdmin, models.RoleOps,
-		models.RolePacking, models.RoleShipping,
-	}
-	// Roles that may record a tracking number. CS is here because attaching the
-	// carrier's tracking number to a store order IS their job — they are the ones
-	// who receive it, and the shipping desk only sees parcels it dispatched itself.
-	roleShipOps = []models.Role{
-		models.RoleOwner, models.RoleAdmin, models.RoleOps,
-		models.RolePacking, models.RoleShipping, models.RoleCS,
-	}
-	// Every internal (non-seller) role — for read-only operational screens.
-	// CS is deliberately NOT in here: customer support has no business on the
-	// production board, the design queue or the batch screens. They get the
-	// order-facing routes below instead.
-	roleInternal = []models.Role{
+	// Every internal (non-seller) account — for reference data every screen
+	// reads, and the sidebar badges.
+	roleOrderRead = []models.Role{
 		models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleDesigner,
 		models.RoleProduction, models.RoleQC, models.RolePacking, models.RoleShipping,
+		models.RoleCS,
 	}
-	// Order-facing reads: everything roleInternal may see, plus CS. This is the
-	// customer-support surface — look an order up, read who it ships to, follow
-	// its parcel — and nothing else.
-	roleOrderRead = append(append([]models.Role{}, roleInternal...), models.RoleCS)
+	perm   = middleware.RequirePerm
+	view   = models.View
+	manage = models.Manage
 )
 
 // New builds the configured Gin engine.
@@ -102,13 +78,17 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	// handlers.ThumbnailAsset.
 	api.GET("/assets/thumb/:name", h.ThumbnailAsset)
 
-	// Authenticated routes.
+	// Authenticated routes. LoadAccess re-reads the caller's role and permission
+	// ticks from the database (cached ~30s), so every guard below judges the
+	// account as it is now, not as it was when the token was issued.
 	authd := api.Group("")
 	authd.Use(middleware.Auth(jwt))
+	authd.Use(middleware.LoadAccess(h.AccessLoader(), services.ErrAccessRevoked))
 
 	authd.GET("/me", h.Me)
 
-	// Users (admin/owner).
+	// Users (admin/owner). Deliberately role-gated, not a tick: whoever manages
+	// users could otherwise tick the rest for themselves.
 	users := authd.Group("/users", middleware.RequireRoles(roleAdminOwner...))
 	{
 		users.POST("", h.CreateUser)
@@ -117,9 +97,11 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		users.PUT("/:id", h.UpdateUser)
 		users.DELETE("/:id", h.DeleteUser)
 	}
+	// The tickable screens + each role's default ticks, for the user form.
+	authd.GET("/permission-catalog", middleware.RequireRoles(roleAdminOwner...), h.PermissionCatalog)
 
-	// Audit logs (admin/owner).
-	authd.GET("/audit-logs", middleware.RequireRoles(roleAdminOwner...), h.ListAuditLogs)
+	// Audit logs.
+	authd.GET("/audit-logs", perm(view(models.FeatAudit)), h.ListAuditLogs)
 
 	// Admin / danger zone (OWNER only). POST /api/admin/reset wipes
 	// order/production data so the catalog can be re-imported from scratch;
@@ -130,227 +112,259 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		admin.POST("/reset", h.ResetData)
 	}
 
-	// Sellers (ops/admin/owner write; internal read).
+	// Reference data (sellers, stores, materials, SKUs) is READ by nearly every
+	// screen — filters, pickers, labels — so reading it only needs an internal
+	// account. Writing it is Master Data's "manage"; deleting it additionally
+	// stays with ADMIN/OWNER.
+	masterManage := perm(manage(models.FeatMasterData))
+	adminOwner := middleware.RequireRoles(roleAdminOwner...)
+	internalRead := middleware.RequireRoles(roleOrderRead...)
+
 	sellers := authd.Group("/sellers")
 	{
-		sellers.GET("", middleware.RequireRoles(roleOrderRead...), h.ListSellers)
-		sellers.GET("/:id", middleware.RequireRoles(roleOrderRead...), h.GetSeller)
-		sellers.POST("", middleware.RequireRoles(roleOpsAdmin...), h.CreateSeller)
-		sellers.PUT("/:id", middleware.RequireRoles(roleOpsAdmin...), h.UpdateSeller)
-		sellers.DELETE("/:id", middleware.RequireRoles(roleAdminOwner...), h.DeleteSeller)
+		sellers.GET("", internalRead, h.ListSellers)
+		sellers.GET("/:id", internalRead, h.GetSeller)
+		sellers.POST("", masterManage, h.CreateSeller)
+		sellers.PUT("/:id", masterManage, h.UpdateSeller)
+		sellers.DELETE("/:id", adminOwner, masterManage, h.DeleteSeller)
 	}
 
-	// Stores.
 	stores := authd.Group("/stores")
 	{
-		stores.GET("", middleware.RequireRoles(roleInternal...), h.ListStores)
-		stores.GET("/:id", middleware.RequireRoles(roleInternal...), h.GetStore)
-		stores.POST("", middleware.RequireRoles(roleOpsAdmin...), h.CreateStore)
-		stores.PUT("/:id", middleware.RequireRoles(roleOpsAdmin...), h.UpdateStore)
-		stores.DELETE("/:id", middleware.RequireRoles(roleAdminOwner...), h.DeleteStore)
+		stores.GET("", internalRead, h.ListStores)
+		stores.GET("/:id", internalRead, h.GetStore)
+		stores.POST("", masterManage, h.CreateStore)
+		stores.PUT("/:id", masterManage, h.UpdateStore)
+		stores.DELETE("/:id", adminOwner, masterManage, h.DeleteStore)
 	}
 
-	// Materials (ops/admin/owner write; internal read). Quota import is OWNER-only
-	// because it sets the production quota, an OWNER-only lever.
+	// The material import used to be OWNER-only because it set the production
+	// quota, an OWNER-only lever. The quota is derived from sizes now (khách chốt
+	// 2026-09-18) and the import only carries sheet sizes — master data like the
+	// SKU import — so it takes Master Data's "manage" like every other write here.
 	materials := authd.Group("/materials")
 	{
-		materials.GET("", middleware.RequireRoles(roleInternal...), h.ListMaterials)
-		materials.GET("/import/template.xlsx", middleware.RequireRoles(models.RoleOwner), h.DownloadMaterialTemplate)
-		materials.POST("/import/preview", middleware.RequireRoles(models.RoleOwner), h.MaterialImportPreview)
-		materials.GET("/pair-quota/export.xlsx", middleware.RequireRoles(models.RoleOwner), h.ExportPairQuotas)
-		materials.POST("/pair-quota/import/preview", middleware.RequireRoles(models.RoleOwner), h.PairQuotaImportPreview)
-		materials.POST("/pair-quota/import/commit", middleware.RequireRoles(models.RoleOwner), h.PairQuotaImportCommit)
-		materials.POST("/import/commit", middleware.RequireRoles(models.RoleOwner), h.MaterialImportCommit)
-		materials.GET("/:id", middleware.RequireRoles(roleInternal...), h.GetMaterial)
-		materials.POST("", middleware.RequireRoles(roleOpsAdmin...), h.CreateMaterial)
-		materials.PUT("/:id", middleware.RequireRoles(roleOpsAdmin...), h.UpdateMaterial)
-		materials.DELETE("/:id", middleware.RequireRoles(roleAdminOwner...), h.DeleteMaterial)
-		materials.POST("/bulk-delete", middleware.RequireRoles(roleAdminOwner...), h.BulkDeleteMaterials)
+		materials.GET("", internalRead, h.ListMaterials)
+		materials.GET("/import/template.xlsx", masterManage, h.DownloadMaterialTemplate)
+		materials.POST("/import/preview", masterManage, h.MaterialImportPreview)
+		materials.POST("/import/commit", masterManage, h.MaterialImportCommit)
+		materials.GET("/:id", internalRead, h.GetMaterial)
+		materials.POST("", masterManage, h.CreateMaterial)
+		materials.PUT("/:id", masterManage, h.UpdateMaterial)
+		materials.DELETE("/:id", adminOwner, masterManage, h.DeleteMaterial)
+		materials.POST("/bulk-delete", adminOwner, masterManage, h.BulkDeleteMaterials)
 	}
 
-	// SKUs.
 	skus := authd.Group("/skus")
 	{
-		skus.GET("", middleware.RequireRoles(roleInternal...), h.ListSKUs)
-		skus.GET("/:id", middleware.RequireRoles(roleInternal...), h.GetSKU)
-		skus.POST("", middleware.RequireRoles(roleOpsAdmin...), h.CreateSKU)
-		skus.PUT("/:id", middleware.RequireRoles(roleOpsAdmin...), h.UpdateSKU)
-		skus.DELETE("/:id", middleware.RequireRoles(roleAdminOwner...), h.DeleteSKU)
-		skus.POST("/bulk-delete", middleware.RequireRoles(roleAdminOwner...), h.BulkDeleteSKUs)
-		skus.POST("/bulk-active", middleware.RequireRoles(roleOpsAdmin...), h.BulkSetSKUsActive)
+		skus.GET("", internalRead, h.ListSKUs)
+		skus.GET("/:id", internalRead, h.GetSKU)
+		skus.POST("", masterManage, h.CreateSKU)
+		skus.PUT("/:id", masterManage, h.UpdateSKU)
+		skus.DELETE("/:id", adminOwner, masterManage, h.DeleteSKU)
+		skus.POST("/bulk-delete", adminOwner, masterManage, h.BulkDeleteSKUs)
+		skus.POST("/bulk-active", masterManage, h.BulkSetSKUsActive)
 	}
 
-	// Orders + import (internal).
+	// Orders. The order list/detail feed several screens (orders, CS lookup,
+	// journeys, the ship queue, the dashboard) — any of them may read.
+	orderRead := perm(view(models.FeatOrders), view(models.FeatCS), view(models.FeatJourneys),
+		view(models.FeatDashboard), view(models.FeatShipQueue))
+	ordersManage := perm(manage(models.FeatOrders))
+	importManage := perm(manage(models.FeatImport))
+	shipManage := perm(manage(models.FeatShipQueue))
+	// Tracking is edited from the journeys board and from CS lookup.
+	trackingManage := perm(manage(models.FeatJourneys), manage(models.FeatCS))
 	orders := authd.Group("/orders")
 	{
-		orders.GET("", middleware.RequireRoles(roleOrderRead...), h.ListOrders)
-		orders.GET("/:id", middleware.RequireRoles(roleOrderRead...), h.GetOrder)
-		orders.POST("", middleware.RequireRoles(roleOpsAdmin...), h.CreateOrderDirect)
-		orders.GET("/import/template.xlsx", middleware.RequireRoles(roleOpsAdmin...), h.DownloadOrderImportTemplate)
-		orders.POST("/import", middleware.RequireRoles(roleOpsAdmin...), h.ImportOrders)
-		orders.POST("/import/commit", middleware.RequireRoles(roleOpsAdmin...), h.CommitImport)
+		orders.GET("", orderRead, h.ListOrders)
+		orders.GET("/:id", orderRead, h.GetOrder)
+		orders.POST("", perm(manage(models.FeatImport), manage(models.FeatOrders)), h.CreateOrderDirect)
+		orders.GET("/import/template.xlsx", importManage, h.DownloadOrderImportTemplate)
+		orders.POST("/import", importManage, h.ImportOrders)
+		orders.POST("/import/commit", importManage, h.CommitImport)
 		// Edit / cancel / delete — authorization is also re-checked in the service.
-		orders.PUT("/:id", middleware.RequireRoles(roleOpsAdmin...), h.UpdateOrder)
-		orders.POST("/:id/cancel", middleware.RequireRoles(roleOpsAdmin...), h.CancelOrder)
-		orders.DELETE("/:id", middleware.RequireRoles(roleAdminOwner...), h.DeleteOrder)
+		orders.PUT("/:id", ordersManage, h.UpdateOrder)
+		orders.POST("/:id/cancel", ordersManage, h.CancelOrder)
+		orders.DELETE("/:id", adminOwner, ordersManage, h.DeleteOrder)
+		orders.POST("/bulk-delete", adminOwner, ordersManage, h.BulkDeleteOrders)
 		// Send QC-finished orders to THE. This is the step that ends the factory
 		// flow and starts the shipping one; the packing-scan route below still
 		// exists for stations that use it. ship-scan is the station flow (scan one
 		// parcel, it ships); ship-to-carrier is the bulk fallback by order ids.
-		orders.POST("/ship-to-carrier", middleware.RequireRoles(roleShipCarrier...), h.ShipOrdersToCarrier)
-		orders.POST("/ship-scan", middleware.RequireRoles(roleShipCarrier...), h.ShipScannedOrder)
-		// Tracking: ops + the packing/shipping stations may set it.
-		orders.PATCH("/:id/tracking", middleware.RequireRoles(roleShipOps...), h.UpdateOrderTracking)
+		orders.POST("/ship-to-carrier", shipManage, h.ShipOrdersToCarrier)
+		orders.POST("/ship-scan", shipManage, h.ShipScannedOrder)
+		orders.PATCH("/:id/tracking", trackingManage, h.UpdateOrderTracking)
 		// Bulk tracking assignment from the CS Excel: template → preview (dry run,
-		// nothing written) → commit (only the confirmed assignments). Same roles as
+		// nothing written) → commit (only the confirmed assignments). Same guard as
 		// the single-order edit — this is the same act, many rows at once.
-		orders.GET("/tracking/import/template.xlsx", middleware.RequireRoles(roleShipOps...), h.DownloadTrackingImportTemplate)
-		orders.POST("/tracking/import", middleware.RequireRoles(roleShipOps...), h.PreviewTrackingImport)
-		orders.POST("/tracking/import/commit", middleware.RequireRoles(roleShipOps...), h.CommitTrackingImport)
-		// The shipment journey is read-only operational information — every
-		// internal role that can open an order may see where its parcel is.
-		orders.GET("/:id/tracking/events", middleware.RequireRoles(roleOrderRead...), h.GetOrderTracking)
+		orders.GET("/tracking/import/template.xlsx", trackingManage, h.DownloadTrackingImportTemplate)
+		orders.POST("/tracking/import", trackingManage, h.PreviewTrackingImport)
+		orders.POST("/tracking/import/commit", trackingManage, h.CommitTrackingImport)
+		// The shipment journey is read-only operational information — whoever
+		// can open the order may see where its parcel is.
+		orders.GET("/:id/tracking/events", orderRead, h.GetOrderTracking)
 		// Pulling from the provider costs quota and rate limit, so it stays with
-		// the roles that own tracking.
-		orders.POST("/:id/tracking/sync", middleware.RequireRoles(roleShipOps...), h.SyncOrderTracking)
+		// whoever owns tracking.
+		orders.POST("/:id/tracking/sync", trackingManage, h.SyncOrderTracking)
 	}
 
 	// Run one provider pass by hand instead of waiting for the scheduler.
-	authd.POST("/tracking/sync", middleware.RequireRoles(roleShipOps...), h.RunTrackingSync)
-	authd.GET("/import-jobs", middleware.RequireRoles(roleOpsAdmin...), h.ListImportJobs)
-	authd.GET("/import-jobs/:id", middleware.RequireRoles(roleOpsAdmin...), h.GetImportJob)
+	authd.POST("/tracking/sync", trackingManage, h.RunTrackingSync)
+	authd.GET("/import-jobs", perm(view(models.FeatImport)), h.ListImportJobs)
+	authd.GET("/import-jobs/:id", perm(view(models.FeatImport)), h.GetImportJob)
 
 	// Master-data setup: import the factory's legacy operational spreadsheet to
 	// seed Materials, SKUs and the SKU↔Material mapping (preview → commit).
-	masterData := authd.Group("/master-data", middleware.RequireRoles(roleOpsAdmin...))
+	masterData := authd.Group("/master-data", masterManage)
 	{
 		masterData.GET("/template.xlsx", h.DownloadMasterTemplate)
 		masterData.POST("/import/preview", h.MasterImportPreview)
 		masterData.POST("/import/commit", h.MasterImportCommit)
 		masterData.GET("/import-jobs", h.ListMasterImportJobs)
 		masterData.GET("/import-jobs/:id", h.GetMasterImportJob)
+		// Step 1 of the parent → child SKU setup: the parents themselves. Step 2
+		// is the import above, whose "SKU cha" column files children under them.
+		masterData.GET("/parents/template.xlsx", h.DownloadParentSKUTemplate)
+		masterData.POST("/parents/import/preview", h.ParentSKUImportPreview)
+		masterData.POST("/parents/import/commit", h.ParentSKUImportCommit)
 	}
 
-	// Order review / intake (Pending Review). Ops/Designer approve orders before
+	// Order review / intake (Pending Review): orders are approved here before
 	// they enter the design/production flow.
-	review := authd.Group("/review/orders", middleware.RequireRoles(roleDesignOps...))
+	reviewView := perm(view(models.FeatReview))
+	reviewManage := perm(manage(models.FeatReview))
+	review := authd.Group("/review/orders")
 	{
-		review.GET("", h.ListReviewOrders)
-		review.POST("/bulk-approve", h.BulkApproveReviewOrders)
-		review.GET("/:id", h.GetReviewOrder)
-		review.POST("/:id/approve", h.ApproveReviewOrder)
-		review.POST("/:id/reject", h.RejectReviewOrder)
-		review.POST("/:id/request-correction", h.RequestReviewCorrection)
+		review.GET("", reviewView, h.ListReviewOrders)
+		review.POST("/bulk-approve", reviewManage, h.BulkApproveReviewOrders)
+		review.GET("/:id", reviewView, h.GetReviewOrder)
+		review.POST("/:id/approve", reviewManage, h.ApproveReviewOrder)
+		review.POST("/:id/reject", reviewManage, h.RejectReviewOrder)
+		review.POST("/:id/request-correction", reviewManage, h.RequestReviewCorrection)
 	}
 
-	// Cancellation requests (ops/admin resolve seller-submitted requests).
-	cancellations := authd.Group("/cancellation-requests", middleware.RequireRoles(roleOpsAdmin...))
+	// Cancellation requests (resolve seller-submitted requests).
+	cancelView := perm(view(models.FeatCancellations))
+	cancelManage := perm(manage(models.FeatCancellations))
+	cancellations := authd.Group("/cancellation-requests")
 	{
-		cancellations.GET("", h.ListCancellationRequests)
-		cancellations.GET("/resolved", h.ListResolvedCancellations)
-		cancellations.POST("/:id/approve", h.ApproveCancellation)
-		cancellations.POST("/:id/reject", h.RejectCancellation)
-		cancellations.GET("/items", h.ListItemCancellationRequests)
-		cancellations.POST("/items/:id/approve", h.ApproveItemCancellation)
-		cancellations.POST("/items/:id/reject", h.RejectItemCancellation)
+		cancellations.GET("", cancelView, h.ListCancellationRequests)
+		cancellations.GET("/resolved", cancelView, h.ListResolvedCancellations)
+		cancellations.POST("/:id/approve", cancelManage, h.ApproveCancellation)
+		cancellations.POST("/:id/reject", cancelManage, h.RejectCancellation)
+		cancellations.GET("/items", cancelView, h.ListItemCancellationRequests)
+		cancellations.POST("/items/:id/approve", cancelManage, h.ApproveItemCancellation)
+		cancellations.POST("/items/:id/reject", cancelManage, h.RejectItemCancellation)
 	}
 
-	// Items + design queue.
+	// Items (the orders screen is item-level) + design edits, which the design
+	// queue and the review detail both make.
+	itemRead := perm(view(models.FeatOrders), view(models.FeatDashboard))
 	items := authd.Group("/items")
 	{
-		items.GET("", middleware.RequireRoles(roleInternal...), h.ListItems)
-		items.GET("/:id", middleware.RequireRoles(roleInternal...), h.GetItem)
-		items.PATCH("/:id/design", middleware.RequireRoles(roleDesignOps...), h.UpdateItemDesign)
+		items.GET("", itemRead, h.ListItems)
+		items.GET("/:id", itemRead, h.GetItem)
+		items.PATCH("/:id/design", perm(manage(models.FeatDesign), manage(models.FeatReview)), h.UpdateItemDesign)
 	}
 	// Sidebar badges — one request for all counters the caller's sidebar shows.
-	// roleOrderRead, not roleInternal: CS carries the notes badge, and refusing
-	// them here meant their sidebar poll 403'd every 30 seconds for the whole
+	// Open to every internal account: the counts are scoped by role inside, and
+	// refusing here made a sidebar poll 403 every 30 seconds for the whole
 	// session (silently — the badge treats any failure as "keep the old number").
-	authd.GET("/action-counts", middleware.RequireRoles(roleOrderRead...), h.ActionCounts)
+	authd.GET("/action-counts", internalRead, h.ActionCounts)
 
-	design := authd.Group("/design-queue", middleware.RequireRoles(roleDesignOps...))
+	// Design queue. The material buckets also feed "tạo batch" on the batch
+	// screen.
+	designView := perm(view(models.FeatDesign))
+	design := authd.Group("/design-queue")
 	{
-		design.GET("", h.DesignQueue)
-		design.POST("/set-ready", h.BulkSetDesignReady)
-		design.GET("/materials", h.DesignQueueMaterials)
-		design.GET("/skus", h.DesignQueueSKUs)
-		design.GET("/downloadable", h.DesignDownloadableItems)
-		design.GET("/assets.zip", h.DownloadDesignAssetsZip)
-		design.GET("/material-buckets", h.MaterialBuckets)
-		design.GET("/material/:materialId/items", h.DesignReadyItemsForMaterial)
+		design.GET("", designView, h.DesignQueue)
+		design.POST("/set-ready", perm(manage(models.FeatDesign)), h.BulkSetDesignReady)
+		design.GET("/materials", designView, h.DesignQueueMaterials)
+		design.GET("/skus", designView, h.DesignQueueSKUs)
+		design.GET("/downloadable", designView, h.DesignDownloadableItems)
+		design.GET("/assets.zip", designView, h.DownloadDesignAssetsZip)
+		design.GET("/material-buckets", perm(view(models.FeatDesign), manage(models.FeatBatches)), h.MaterialBuckets)
+		design.GET("/material/:materialId/items", perm(view(models.FeatDesign), manage(models.FeatBatches)), h.DesignReadyItemsForMaterial)
 	}
 
-	// Batches (designer creates; production drives status).
+	// Batches: the batch screen creates them (and their print/cut links); the
+	// production board drives their status; scrapping a ruined sheet is its own
+	// tick, held by the floor and QC rather than whoever groups batches.
+	batchRead := perm(view(models.FeatBatches), view(models.FeatProduction))
+	batchManage := perm(manage(models.FeatBatches))
 	batches := authd.Group("/batches")
 	{
-		batches.GET("", middleware.RequireRoles(roleInternal...), h.ListBatches)
-		batches.GET("/:id", middleware.RequireRoles(roleInternal...), h.GetBatch)
-		batches.GET("/:id/production-template.xlsx", middleware.RequireRoles(roleInternal...), h.ExportProductionTemplate)
-		batches.GET("/:id/assets.zip", middleware.RequireRoles(roleInternal...), h.DownloadBatchAssetsZip)
-		batches.POST("", middleware.RequireRoles(roleDesignOps...), h.CreateBatch)
+		batches.GET("", perm(view(models.FeatBatches), view(models.FeatProduction), view(models.FeatDashboard)), h.ListBatches)
+		batches.GET("/:id", batchRead, h.GetBatch)
+		batches.GET("/:id/production-template.xlsx", batchRead, h.ExportProductionTemplate)
+		batches.GET("/:id/assets.zip", batchRead, h.DownloadBatchAssetsZip)
+		batches.POST("", batchManage, h.CreateBatch)
 		// Tự gom cả pool design-ready thành batch theo NVL + định mức: hệ thống
 		// tự chọn sản phẩm và tự sinh mã, người vận hành chỉ bấm một nút.
-		batches.POST("/auto", middleware.RequireRoles(roleDesignOps...), h.AutoCreateBatches)
+		batches.POST("/auto", batchManage, h.AutoCreateBatches)
 		// Bàn làm việc Excel của designer: xuất mỗi dòng một batch (Batch ID bất
 		// biến + mã + link hiện tại), điền link in/cắt rồi upload lại theo cặp
-		// preview → commit. Cùng nhóm quyền với sửa link thủ công.
-		batches.GET("/links/export.xlsx", middleware.RequireRoles(roleDesignOps...), h.ExportBatchLinksXLSX)
-		batches.POST("/links/import/preview", middleware.RequireRoles(roleDesignOps...), h.PreviewBatchLinkImport)
-		batches.POST("/links/import/commit", middleware.RequireRoles(roleDesignOps...), h.CommitBatchLinkImport)
-		batches.PATCH("/:id/links", middleware.RequireRoles(roleDesignOps...), h.SetBatchLink)
+		// preview → commit. Cùng quyền với sửa link thủ công.
+		batches.GET("/links/export.xlsx", batchManage, h.ExportBatchLinksXLSX)
+		batches.POST("/links/import/preview", batchManage, h.PreviewBatchLinkImport)
+		batches.POST("/links/import/commit", batchManage, h.CommitBatchLinkImport)
+		batches.PATCH("/:id/links", batchManage, h.SetBatchLink)
 		// PUT thay cả CẶP link in+cắt nguyên tử (một transaction, fan-out cả hai).
-		batches.PUT("/:id/links", middleware.RequireRoles(roleDesignOps...), h.SetBatchLinkPair)
-		// Delete mirrors create's roles: the team that groups batches un-groups a
+		batches.PUT("/:id/links", batchManage, h.SetBatchLinkPair)
+		// Delete mirrors create: the team that groups batches un-groups a
 		// mistaken one. The service only ever deletes a batch production has not
 		// touched, so this is "undo create", not data destruction.
-		batches.DELETE("/:id", middleware.RequireRoles(roleDesignOps...), h.DeleteBatch)
-		batches.PATCH("/:id/status", middleware.RequireRoles(roleProdOps...), h.UpdateBatchStatus)
+		batches.DELETE("/:id", batchManage, h.DeleteBatch)
+		batches.PATCH("/:id/status", perm(manage(models.FeatProduction)), h.UpdateBatchStatus)
 		// Huỷ batch: ngược lại với xoá. Xoá là undo của lệnh gom (chưa ai đụng
 		// vào, xoá sạch dấu vết); huỷ là ghi nhận một tấm đã in/cắt hỏng thật.
-		batches.POST("/:id/scrap", middleware.RequireRoles(roleScrapBatch...), h.ScrapBatch)
+		batches.POST("/:id/scrap", perm(manage(models.FeatBatchScrap)), h.ScrapBatch)
 	}
 
-	// QC.
-	qc := authd.Group("/qc", middleware.RequireRoles(roleQCOps...))
+	// QC. "Xem" is scanning to look an item up; "Thao tác" is the verdict.
+	qc := authd.Group("/qc")
 	{
-		qc.POST("/scan", h.QCScan)
-		qc.POST("/pass", h.QCPass)
-		qc.POST("/fail", h.QCFail)
+		qc.POST("/scan", perm(view(models.FeatQC)), h.QCScan)
+		qc.POST("/pass", perm(manage(models.FeatQC)), h.QCPass)
+		qc.POST("/fail", perm(manage(models.FeatQC)), h.QCFail)
+		// Hạ QC (bấm nhầm) chặt hơn: cần thêm vai trò OWNER/ADMIN. Nó mở lại một
+		// cửa đã đóng, và ranh giới giữa "bấm nhầm" với "hàng hỏng nhưng ngại làm
+		// thủ tục huỷ" là thứ phải có người chịu trách nhiệm.
+		qc.POST("/undo", adminOwner, perm(manage(models.FeatQC)), h.QCUndoPass)
+		// Kết quả QC: đọc-only; màn Chờ gửi hàng cũng dựa vào nó để biết đơn nào
+		// đã QC đủ để lấy hàng.
+		qc.GET("/results", perm(view(models.FeatQCResults), view(models.FeatShipQueue)), h.QCResults)
 	}
-	// Hạ QC (bấm nhầm) nằm NGOÀI nhóm /qc ở trên vì nó chặt hơn: chỉ OWNER/ADMIN.
-	// Nó mở lại một cửa đã đóng, và ranh giới giữa "bấm nhầm" với "hàng hỏng
-	// nhưng ngại làm thủ tục huỷ" là thứ phải có người chịu trách nhiệm.
-	authd.POST("/qc/undo", middleware.RequireRoles(roleAdminOwner...), h.QCUndoPass)
 
-	// Kết quả QC: đọc-only, mở cho mọi vai trò nội bộ — đóng gói/OPS cần biết đơn
-	// nào đã QC đủ để lấy hàng, không chỉ tổ QC.
-	authd.GET("/qc/results", middleware.RequireRoles(roleInternal...), h.QCResults)
-
-	// Packing.
-	packing := authd.Group("/packing", middleware.RequireRoles(rolePackOps...))
+	// Packing (the older station flow, still reachable off-menu) belongs to
+	// the ship queue.
+	packing := authd.Group("/packing")
 	{
-		packing.POST("/scan", h.PackingScan)
-		packing.GET("/order/:id", h.GetOrderPackage)
+		packing.POST("/scan", shipManage, h.PackingScan)
+		packing.GET("/order/:id", perm(view(models.FeatShipQueue)), h.GetOrderPackage)
 	}
 
-	// Handoffs — creating a handoff is packing/shipping; listing is read-only and
-	// available to every internal role (the dashboard shows a handoff KPI).
+	// Handoffs — creating one is the ship queue's / journeys board's job;
+	// listing is read-only (the dashboard shows a handoff KPI).
 	handoffs := authd.Group("/handoffs")
 	{
-		handoffs.POST("", middleware.RequireRoles(roleShipOps...), h.CreateHandoff)
-		handoffs.GET("", middleware.RequireRoles(roleInternal...), h.ListHandoffs)
-		handoffs.POST("/:id/ship", middleware.RequireRoles(roleShipOps...), h.MarkHandoffShipped)
+		handoffManage := perm(manage(models.FeatShipQueue), manage(models.FeatJourneys))
+		handoffs.POST("", handoffManage, h.CreateHandoff)
+		handoffs.GET("", perm(view(models.FeatShipQueue), view(models.FeatJourneys), view(models.FeatDashboard)), h.ListHandoffs)
+		handoffs.POST("/:id/ship", handoffManage, h.MarkHandoffShipped)
 	}
 
-	// Notes / required attention (all internal roles).
-	notes := authd.Group("/notes", middleware.RequireRoles(roleOrderRead...))
+	// Notes / required attention.
+	notesManage := perm(manage(models.FeatNotes))
+	notes := authd.Group("/notes")
 	{
-		notes.POST("", h.CreateNote)
-		notes.GET("", h.ListNotes)
-		notes.GET("/:id", h.GetNote)
-		notes.PUT("/:id", h.UpdateNote)
-		notes.DELETE("/:id", h.DeleteNote)
-		notes.POST("/bulk-delete", h.BulkDeleteNotes)
+		notes.POST("", notesManage, h.CreateNote)
+		notes.GET("", perm(view(models.FeatNotes), view(models.FeatDashboard)), h.ListNotes)
+		notes.GET("/:id", perm(view(models.FeatNotes)), h.GetNote)
+		notes.PUT("/:id", notesManage, h.UpdateNote)
+		notes.DELETE("/:id", notesManage, h.DeleteNote)
+		notes.POST("/bulk-delete", notesManage, h.BulkDeleteNotes)
 	}
 
 	// Seller view (seller only — high-level status, no internal detail).

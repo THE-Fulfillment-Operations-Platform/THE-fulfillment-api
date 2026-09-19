@@ -18,6 +18,27 @@ type Actor struct {
 	Role     models.Role
 	SellerID *uint
 	IP       string
+	// Perms is the caller's effective permission set, filled from the request's
+	// access (see models.Access). nil means "the role's defaults" — what tests
+	// and internal callers that only know a role get.
+	Perms map[string]bool
+}
+
+// Can reports whether the actor holds perm (e.g. models.Manage(models.FeatOrders)).
+// OWNER holds everything.
+func (a Actor) Can(perm string) bool {
+	if a.Role == models.RoleOwner {
+		return true
+	}
+	if a.Perms != nil {
+		return a.Perms[perm]
+	}
+	for _, p := range models.RoleDefaultPerms(a.Role) {
+		if p == perm {
+			return true
+		}
+	}
+	return false
 }
 
 // IDPtr returns a pointer to the actor id, or nil for an anonymous actor.
@@ -33,6 +54,7 @@ func (a Actor) IDPtr() *uint {
 type Services struct {
 	Auth         *AuthService
 	User         *UserService
+	Access       *AccessService
 	Seller       *SellerService
 	Catalog      *CatalogService
 	Import       *ImportService
@@ -67,9 +89,11 @@ func New(repo *repositories.Repositories, jwt *auth.Manager, carrier shipping.Ca
 	audit := NewAuditService(repo)
 	trackingSync := NewTrackingSyncService(repo, audit, track.Client, track.Tag, track.Resolve)
 	thumb := NewThumbService(repo, thumbs)
+	access := NewAccessService(repo)
 	return &Services{
 		Auth:         &AuthService{repo: repo, jwt: jwt, audit: audit},
-		User:         &UserService{repo: repo, audit: audit},
+		User:         &UserService{repo: repo, audit: audit, access: access},
+		Access:       access,
 		Seller:       &SellerService{repo: repo, audit: audit},
 		Catalog:      &CatalogService{repo: repo, audit: audit},
 		Import:       &ImportService{repo: repo, audit: audit},

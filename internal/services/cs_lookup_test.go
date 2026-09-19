@@ -166,12 +166,12 @@ func TestCanEditTracking_IncludesCSOnly(t *testing.T) {
 		models.RoleDesigner, models.RoleProduction, models.RoleQC, models.RoleSeller,
 	}
 	for _, r := range allowed {
-		if !canEditTracking(r) {
+		if !canEditTracking(Actor{Role: r}) {
 			t.Errorf("%s should be allowed to edit tracking", r)
 		}
 	}
 	for _, r := range denied {
-		if canEditTracking(r) {
+		if canEditTracking(Actor{Role: r}) {
 			t.Errorf("%s must NOT be allowed to edit tracking", r)
 		}
 	}

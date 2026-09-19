@@ -28,16 +28,24 @@ func New(svc *services.Services) *Handlers {
 	return &Handlers{svc: svc}
 }
 
+// AccessLoader exposes the per-request access lookup to the router.
+func (h *Handlers) AccessLoader() middleware.AccessLoader { return h.svc.Access }
+
 // actor builds a services.Actor from the authenticated claims on the context.
 func actor(c *gin.Context) services.Actor {
 	claims := middleware.CurrentClaims(c)
 	if claims == nil {
 		return services.Actor{IP: c.ClientIP()}
 	}
-	return services.Actor{
+	a := services.Actor{
 		ID: claims.UserID, Email: claims.Email, Role: claims.Role,
 		SellerID: claims.SellerID, IP: c.ClientIP(),
 	}
+	// The token's role may be stale; LoadAccess read the current one.
+	if acc := middleware.CurrentAccess(c); acc != nil {
+		a.Role, a.SellerID, a.Perms = acc.Role, acc.SellerID, acc.Perms
+	}
+	return a
 }
 
 // pageFrom reads page/page_size query params.

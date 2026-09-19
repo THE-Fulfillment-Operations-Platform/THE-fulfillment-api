@@ -252,7 +252,7 @@ func (s *TrackingSyncService) SyncOrderByID(ctx context.Context, actor Actor, or
 	if !s.Enabled() {
 		return nil, apperr.Unprocessable("Tích hợp 24hTrack chưa được bật")
 	}
-	if !canEditTracking(actor.Role) {
+	if !canEditTracking(actor) {
 		return nil, apperr.Forbidden("Bạn không có quyền đồng bộ tracking")
 	}
 	order, err := s.repo.Order.FindByID(orderID)
@@ -598,7 +598,7 @@ func (s *TrackingSyncService) RunOnceForActor(ctx context.Context, actor Actor, 
 	if !s.Enabled() {
 		return SyncStats{}, apperr.Unprocessable("Tích hợp 24hTrack chưa được bật")
 	}
-	if !canEditTracking(actor.Role) {
+	if !canEditTracking(actor) {
 		return SyncStats{}, apperr.Forbidden("Bạn không có quyền đồng bộ tracking")
 	}
 	return s.RunOnce(ctx, batchSize), nil

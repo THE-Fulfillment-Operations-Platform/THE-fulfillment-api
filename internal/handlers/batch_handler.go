@@ -2,12 +2,10 @@ package handlers
 
 import (
 	"net/http"
-	"path/filepath"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
-	"the-fulfillment/backend/internal/apperr"
 	"the-fulfillment/backend/internal/repositories"
 	"the-fulfillment/backend/internal/response"
 	"the-fulfillment/backend/internal/services"
@@ -238,26 +236,17 @@ func (h *Handlers) ExportBatchLinksXLSX(c *gin.Context) {
 // dry-run comparison without writing anything.
 // POST /api/batches/links/import/preview (multipart: file=<xlsx|xlsm|csv>)
 func (h *Handlers) PreviewBatchLinkImport(c *gin.Context) {
-	fileHeader, err := c.FormFile("file")
-	if err != nil {
-		response.Fail(c, apperr.BadRequest(`Thiếu file upload (field "file")`))
-		return
-	}
-	f, err := fileHeader.Open()
-	if err != nil {
-		response.Fail(c, apperr.BadRequest("Không mở được file upload"))
+	src, _, f, ok := spreadsheetUpload(c)
+	if !ok {
 		return
 	}
 	defer f.Close()
 
 	var rows []services.BatchLinkImportRow
-	switch strings.ToLower(filepath.Ext(fileHeader.Filename)) {
-	case ".xlsx", ".xlsm":
+	var err error
+	if src == "XLSX" {
 		rows, err = services.ParseBatchLinkImportXLSX(f)
-	case ".xls":
-		response.Fail(c, apperr.BadRequest("Định dạng .xls (Excel cũ) chưa hỗ trợ — lưu lại dạng .xlsx hoặc CSV"))
-		return
-	default:
+	} else {
 		rows, err = services.ParseBatchLinkImportCSV(f)
 	}
 	if err != nil {

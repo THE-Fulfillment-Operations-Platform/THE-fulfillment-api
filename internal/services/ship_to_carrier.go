@@ -56,7 +56,7 @@ const MaxShipBatch = 200
 // item, and every live item has passed QC. Anything else is skipped with a
 // reason rather than silently dropped.
 func (s *PackingService) ShipOrdersToCarrier(actor Actor, orderIDs []uint) (*ShipToCarrierResult, error) {
-	if !canShipToCarrier(actor.Role) {
+	if !canShipToCarrier(actor) {
 		return nil, apperr.Forbidden("Bạn không có quyền gửi hàng cho THE")
 	}
 	orderIDs = dedupeIDs(orderIDs)
@@ -124,7 +124,7 @@ type ScannedShip struct {
 // bulk action. This turns "tick boxes, press send" into "scan the parcel" — the
 // scan itself is the confirmation.
 func (s *PackingService) ShipScannedOrder(actor Actor, code string) (*ScannedShip, error) {
-	if !canShipToCarrier(actor.Role) {
+	if !canShipToCarrier(actor) {
 		return nil, apperr.Forbidden("Bạn không có quyền gửi hàng cho THE")
 	}
 	code = strings.TrimSpace(code)
@@ -252,14 +252,11 @@ func (s *PackingService) shipOne(actor Actor, order *models.Order) (*models.Hand
 	return handoff, nil
 }
 
-// canShipToCarrier: sending finished goods out is an operations decision, so it
-// sits with the roles that own the order — not with QC or the print floor.
-func canShipToCarrier(role models.Role) bool {
-	switch role {
-	case models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RolePacking, models.RoleShipping:
-		return true
-	}
-	return false
+// canShipToCarrier: sending finished goods out is the "Chờ gửi hàng" screen's
+// action — by role default OWNER, ADMIN, OPS, PACKING and SHIPPING, not QC or
+// the print floor.
+func canShipToCarrier(a Actor) bool {
+	return a.Can(models.Manage(models.FeatShipQueue))
 }
 
 // (dedupeIDs lives in catalog_service.go — same job, same package.)

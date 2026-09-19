@@ -2,82 +2,57 @@ package handlers
 
 import (
 	"net/http"
-	"path/filepath"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 
-	"the-fulfillment/backend/internal/apperr"
 	"the-fulfillment/backend/internal/response"
 	"the-fulfillment/backend/internal/services"
 )
 
-// MasterImportPreview parses the factory's legacy operational spreadsheet and
-// returns the master-data plan (materials / SKUs / mappings to create, plus rows
-// needing review or missing a material). Nothing is written yet.
+// MasterImportPreview parses the SKU spreadsheet (step 2 of the parent → child
+// setup; also the factory's legacy operational file) and returns the plan:
+// materials / SKUs / mappings to create, children to file under their parents,
+// plus rows refused with a reason. Nothing is written yet.
 //
 // POST /api/master-data/import/preview
 //
 //	multipart/form-data: file=<csv|xlsx>
-//	application/json:     { "filename": "x.csv", "rows": [ { "sku": "...", "material": "..." } ] }
+//	application/json:     { "filename": "x.csv", "rows": [ { "sku", "material", "parent_sku", "length", "width", … } ] }
 func (h *Handlers) MasterImportPreview(c *gin.Context) {
-	a := actor(c)
-	contentType := c.ContentType()
-
 	var (
 		source   string
 		filename string
 		rows     []services.LegacyRow
 	)
-
-	if strings.HasPrefix(contentType, "multipart/form-data") {
-		fileHeader, err := c.FormFile("file")
-		if err != nil {
-			response.Fail(c, apperr.BadRequest("file form field is required"))
-			return
-		}
-		f, err := fileHeader.Open()
-		if err != nil {
-			response.Fail(c, apperr.BadRequest("could not open uploaded file"))
+	if isMultipart(c) {
+		src, name, f, ok := spreadsheetUpload(c)
+		if !ok {
 			return
 		}
 		defer f.Close()
-
-		filename = fileHeader.Filename
-		switch strings.ToLower(filepath.Ext(filename)) {
-		case ".xlsx", ".xlsm":
-			source = "XLSX"
-		case ".xls":
-			response.Fail(c, apperr.BadRequest("Định dạng .xls (Excel cũ) chưa hỗ trợ — lưu lại dạng .xlsx hoặc CSV"))
-			return
-		default:
-			source = "CSV"
-		}
-		parsed, err := services.ParseLegacyFile(source, f)
+		parsed, err := services.ParseLegacyFile(src, f)
 		if err != nil {
 			response.Fail(c, err)
 			return
 		}
-		rows = parsed
+		source, filename, rows = src, name, parsed
 	} else {
 		var body struct {
-			Filename string `json:"filename"`
-			Rows     []struct {
-				SKU      string `json:"sku"`
-				Material string `json:"material"`
-			} `json:"rows" binding:"required,min=1"`
+			Filename string               `json:"filename"`
+			Rows     []services.LegacyRow `json:"rows" binding:"required,min=1"`
 		}
 		if !bindJSON(c, &body) {
 			return
 		}
-		source = "JSON"
-		filename = body.Filename
-		for i, r := range body.Rows {
-			rows = append(rows, services.LegacyRow{RowNumber: i + 1, SKU: r.SKU, Material: r.Material})
+		source, filename, rows = "JSON", body.Filename, body.Rows
+		for i := range rows {
+			if rows[i].RowNumber == 0 {
+				rows[i].RowNumber = i + 1
+			}
 		}
 	}
 
-	preview, err := h.svc.MasterImport.Preview(a, source, filename, rows)
+	preview, err := h.svc.MasterImport.Preview(actor(c), source, filename, rows)
 	if err != nil {
 		response.Fail(c, err)
 		return
@@ -85,8 +60,7 @@ func (h *Handlers) MasterImportPreview(c *gin.Context) {
 	response.OK(c, preview)
 }
 
-// DownloadMasterTemplate streams the master-data import sample as an .xlsx
-// download (SKU + Loại VL columns split cleanly in Excel on any locale).
+// DownloadMasterTemplate streams the SKU import sample as an .xlsx download.
 // GET /api/master-data/template.xlsx
 func (h *Handlers) DownloadMasterTemplate(c *gin.Context) {
 	data, filename, err := h.svc.MasterImport.MasterTemplateXLSX()
@@ -140,4 +114,78 @@ func (h *Handlers) GetMasterImportJob(c *gin.Context) {
 		return
 	}
 	response.OK(c, job)
+}
+
+// ParentSKUImportPreview parses a step-1 file (SKU cha + Tên sản phẩm + Mô tả)
+// and returns the plan — create / update / no change per parent SKU, plus bad
+// rows. Nothing is written.
+//
+// POST /api/master-data/parents/import/preview
+//
+//	multipart/form-data: file=<csv|xlsx>
+//	application/json:     { "filename": "x.csv", "rows": [ { "sku": "...", "product_name": "..." } ] }
+func (h *Handlers) ParentSKUImportPreview(c *gin.Context) {
+	var (
+		filename string
+		rows     []services.ParentSKURow
+	)
+	if isMultipart(c) {
+		src, name, f, ok := spreadsheetUpload(c)
+		if !ok {
+			return
+		}
+		defer f.Close()
+		parsed, err := services.ParseParentSKUFile(src, f)
+		if err != nil {
+			response.Fail(c, err)
+			return
+		}
+		filename, rows = name, parsed
+	} else {
+		var body struct {
+			Filename string                  `json:"filename"`
+			Rows     []services.ParentSKURow `json:"rows" binding:"required,min=1"`
+		}
+		if !bindJSON(c, &body) {
+			return
+		}
+		filename, rows = body.Filename, body.Rows
+	}
+
+	pv, err := h.svc.MasterImport.PreviewParents(filename, rows)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, pv)
+}
+
+// ParentSKUImportCommit applies the step-1 plan; the client sends the previewed
+// rows back and they are re-analysed inside the transaction.
+// POST /api/master-data/parents/import/commit
+func (h *Handlers) ParentSKUImportCommit(c *gin.Context) {
+	var body struct {
+		Rows []services.ParentSKURow `json:"rows" binding:"required,min=1"`
+	}
+	if !bindJSON(c, &body) {
+		return
+	}
+	res, err := h.svc.MasterImport.CommitParents(actor(c), body.Rows)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, res)
+}
+
+// DownloadParentSKUTemplate streams the step-1 sample as an .xlsx.
+// GET /api/master-data/parents/template.xlsx
+func (h *Handlers) DownloadParentSKUTemplate(c *gin.Context) {
+	data, filename, err := h.svc.MasterImport.ParentTemplateXLSX()
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
+	c.Data(http.StatusOK, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", data)
 }

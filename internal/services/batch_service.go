@@ -249,31 +249,15 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 }
 
 // resolveProductionQuota returns the production quota that applies to one
-// (SKU, material) pair: how many products of that SKU a single unit of the
-// material yields. The pair's own quota wins; a pair that does not declare one
-// falls back to the material's default (which is what every row created before
-// per-pair quotas existed relies on). 0 means "no quota anywhere" → unlimited.
+// (SKU, material) pair: how many products of that SKU a single sheet of the
+// material yields, derived from the two sizes (models.ProductionQuota). 0 means
+// a size is missing on either side → no quota → unlimited.
 //
 // The quota MUST be resolved per pair, not per material: the same mica sheet
 // yields ten small trays but only four large ones, so batching every SKU of a
 // material against one number silently overfills or wastes sheets.
 func resolveProductionQuota(sku *models.SKU, material *models.Material) int {
-	if sku != nil && material != nil {
-		for i := range sku.Materials {
-			link := &sku.Materials[i]
-			if link.MaterialID != material.ID {
-				continue
-			}
-			if link.ProductsPerUnit != nil && *link.ProductsPerUnit > 0 {
-				return *link.ProductsPerUnit
-			}
-			break
-		}
-	}
-	if material != nil && material.ProductsPerUnit != nil && *material.ProductsPerUnit > 0 {
-		return *material.ProductsPerUnit
-	}
-	return 0
+	return models.ProductionQuota(sku, material)
 }
 
 // itemProducts is how many products one order line represents (a line always

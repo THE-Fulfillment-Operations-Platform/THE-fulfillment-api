@@ -76,3 +76,9 @@ func (h *Handlers) DeleteUser(c *gin.Context) {
 	}
 	response.OK(c, gin.H{"deleted": true})
 }
+
+// PermissionCatalog lists the tickable screens and each role's default ticks.
+// GET /api/permission-catalog
+func (h *Handlers) PermissionCatalog(c *gin.Context) {
+	response.OK(c, h.svc.User.PermissionCatalog())
+}

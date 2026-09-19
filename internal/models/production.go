@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"math/big"
+	"time"
+)
 
 // Batch is a production order grouped by a single material. A combo item that
 // uses several materials is split across several batches (one batch line per
@@ -31,10 +34,17 @@ type Batch struct {
 	// ScrappedCount is not stored: list/detail queries fill it so the UI can say
 	// "0 còn lại · 1 đã huỷ" instead of showing a batch that looks empty.
 	ScrappedCount int `json:"scrapped_count" gorm:"-"`
+	// MaterialUnits is how many sheets of the material this batch needs:
+	// ⌈Σ quantity / quota⌉ over its live parts, quota per product from the SKU's
+	// and the material's sizes. A parent reports its child count (each child is
+	// at most one sheet). nil when any part has no quota (a size is missing) —
+	// the list then shows "—" instead of a number nobody can vouch for. Not
+	// stored; list/detail queries fill it.
+	MaterialUnits *int `json:"material_units" gorm:"-"`
 
 	// ---- Parent/child batches (split by a material's production quota) ----
-	// A "parent" batch groups several "child" batches; each child holds at most
-	// Material.ProductsPerUnit products. A flat (un-split) batch leaves all of these
+	// A "parent" batch groups several "child" batches; each child fills at most
+	// ONE sheet of the material (see ProductionQuota). A flat (un-split) batch leaves all of these
 	// at their zero value. Children carry ParentBatchID + Sequence and hold the
 	// items; the parent holds no items and only aggregates the children.
 	ParentBatchID *uint   `json:"parent_batch_id" gorm:"index"`
@@ -45,6 +55,45 @@ type Batch struct {
 }
 
 func (Batch) TableName() string { return "batches" }
+
+// FillMaterialUnits computes MaterialUnits from the batch's loaded live parts:
+// ⌈Σ quantity / quota⌉ with each part's quota derived from its SKU's size and
+// `material` (the batch's own — passed in because a child batch loaded under
+// its parent carries no Material of its own). Items must be loaded with their
+// OrderItem and its SKU. A parent reports its child count. nil when any part
+// has no quota (a size is missing on either side) — the screen then shows "—"
+// instead of a number nobody can vouch for. The sum is added as exact
+// fractions: at the boundary where a sheet is precisely full, float rounding
+// would turn "one sheet" into two.
+func (b *Batch) FillMaterialUnits(material *Material) {
+	b.MaterialUnits = nil
+	if b.IsParent {
+		n := b.ChildCount
+		b.MaterialUnits = &n
+		return
+	}
+	sum := new(big.Rat)
+	for i := range b.Items {
+		it := b.Items[i].OrderItem
+		if it == nil {
+			return
+		}
+		quota := ProductionQuota(it.SKU, material)
+		if quota == 0 {
+			return
+		}
+		qty := it.Quantity
+		if qty < 1 {
+			qty = 1
+		}
+		sum.Add(sum, big.NewRat(int64(qty), int64(quota)))
+	}
+	// ⌈num/den⌉ in integers.
+	num, den := new(big.Int).Set(sum.Num()), sum.Denom()
+	num.Add(num, den).Sub(num, big.NewInt(1)).Quo(num, den)
+	n := int(num.Int64())
+	b.MaterialUnits = &n
+}
 
 // BatchItem is one (order item, material) production unit inside a batch. The
 // unique index on (order_item_id, material_id) prevents the same item-material

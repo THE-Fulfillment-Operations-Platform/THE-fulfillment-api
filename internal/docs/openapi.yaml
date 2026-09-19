@@ -176,56 +176,62 @@ paths:
     delete: { tags: [Stores], summary: Xóa store, responses: { '200': { description: OK } } }
   /api/materials:
     get: { tags: [Catalog], summary: Danh sách nguyên vật liệu, responses: { '200': { description: OK } } }
-    post: { tags: [Catalog], summary: Tạo material, responses: { '201': { description: Created } } }
+    post:
+      tags: [Catalog]
+      summary: Tạo material
+      description: >-
+        `length_mm` × `width_mm` là kích thước MỘT tấm NVL (mm) — cùng kích
+        thước SKU tạo ra định mức sản xuất của từng SKU trên NVL này (xem POST
+        /api/skus). Phải có cả hai hoặc bỏ trống cả hai. Định mức nhập tay
+        (`products_per_unit`) đã bỏ khỏi API.
+      responses: { '201': { description: Created } }
+  /api/materials/import/preview:
+    post:
+      tags: [Catalog]
+      summary: Import kích thước NVL — xem trước
+      description: >-
+        File CSV/XLSX cột `Loại VL` + `Dài (mm)` + `Rộng (mm)` (hoặc một cột
+        `D x R`) + `Mô tả` tuỳ chọn (multipart `file`), hoặc JSON `{ rows:
+        [{ material, length_mm, width_mm, description }] }`. Một NVL = một tên;
+        tên lặp trong file phải khớp nhau, hệ thống đang có nhiều NVL cùng tên
+        thì báo lỗi chứ không tự chọn. Ô trống không ghi đè. Cột `Định mức` của
+        mẫu cũ bị bỏ qua và nêu trong `notices`. Không ghi gì.
+      responses: { '200': { description: OK } }
+  /api/materials/import/commit:
+    post:
+      tags: [Catalog]
+      summary: Import kích thước NVL — áp dụng
+      description: Gửi lại `rows` đã xem trước; server phân tích lại trong transaction rồi tạo / cập nhật.
+      responses: { '200': { description: OK } }
+  /api/materials/import/template.xlsx:
+    get: { tags: [Catalog], summary: File mẫu import kích thước NVL, responses: { '200': { description: OK } } }
   /api/materials/{id}:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
     get: { tags: [Catalog], summary: Chi tiết material, responses: { '200': { description: OK } } }
     put: { tags: [Catalog], summary: Cập nhật material, responses: { '200': { description: OK } } }
     delete: { tags: [Catalog], summary: Xóa material, responses: { '200': { description: OK } } }
-  /api/materials/pair-quota/export.xlsx:
-    get:
-      tags: [Catalog]
-      summary: Xuất Excel mọi cặp SKU–NVL kèm định mức hiện tại (OWNER)
-      description: >-
-        Mỗi dòng một cặp (SKU, NVL) của SKU đang dùng. Cột "Định mức" trống =
-        cặp chưa có định mức riêng (đang rơi về định mức mặc định của NVL, hoặc
-        không giới hạn → cả pool dồn một batch). Điền rồi import lại qua
-        /api/materials/pair-quota/import/*.
-      responses: { '200': { description: File .xlsx } }
-  /api/materials/pair-quota/import/preview:
-    post:
-      tags: [Catalog]
-      summary: Xem trước import định mức theo cặp SKU–NVL (OWNER, không ghi gì)
-      description: >-
-        Cột SKU + Loại VL (hoặc Mã NVL) + Định mức. Chỉ đặt định mức cho cặp đã
-        gán sẵn; ô Định mức trống = bỏ qua dòng, không xoá định mức cũ. Lỗi theo
-        dòng: SKU_NOT_FOUND, PAIR_NOT_MAPPED, PAIR_AMBIGUOUS, PAIR_CONFLICT,
-        QUOTA_INVALID, QUOTA_NOT_POSITIVE.
-      requestBody:
-        content:
-          multipart/form-data:
-            schema: { type: object, properties: { file: { type: string, format: binary } } }
-      responses: { '200': { description: Kế hoạch theo từng cặp + lỗi theo dòng } }
-  /api/materials/pair-quota/import/commit:
-    post:
-      tags: [Catalog]
-      summary: Áp dụng import định mức theo cặp SKU–NVL (OWNER)
-      description: Gửi lại `rows` của bước xem trước; phân tích lại rồi ghi các cặp hợp lệ, dòng lỗi bỏ qua.
-      responses: { '200': { description: Kết quả áp dụng } }
   /api/skus:
     get: { tags: [Catalog], summary: Danh sách SKU, responses: { '200': { description: OK } } }
     post:
       tags: [Catalog]
       summary: Tạo SKU (single hoặc combo nhiều material)
       description: >-
-        Mỗi phần tử `materials[]` là một cặp (SKU, NVL) với HAI con số khác nhau:
-        `quantity_per_unit` = một sản phẩm ăn bao nhiêu đơn vị NVL (định lượng
-        vật tư), và `products_per_unit` = ĐỊNH MỨC SẢN XUẤT của cặp này — một
-        đơn vị NVL (một tấm/lot) ra được bao nhiêu sản phẩm của SKU này. Định
-        mức là căn cứ chia batch: cùng một tấm mica ra 10 khay nhỏ nhưng chỉ 4
-        khay to, nên nó không thể nằm ở NVL. Chỉ OWNER đặt được (role khác gửi
-        lên bị bỏ qua); bỏ field = giữ nguyên giá trị đang lưu; ≤0 = xoá, cặp
-        rơi về `Material.products_per_unit` làm mặc định.
+        Mỗi phần tử `materials[]` là một cặp (SKU, NVL): `quantity_per_unit` =
+        một sản phẩm ăn bao nhiêu đơn vị NVL (định lượng vật tư). ĐỊNH MỨC SẢN
+        XUẤT của cặp (một tấm NVL ra được bao nhiêu sản phẩm của SKU này) KHÔNG
+        phải là input — từ 2026-09-18 nó được TÍNH: ⌊diện tích tấm NVL / diện
+        tích sản phẩm⌋, tức ⌊(Material.length_mm × width_mm) / (SKU.length_mm ×
+        width_mm)⌋. Cùng một tấm mica ra 10 khay nhỏ nhưng chỉ 4 khay to, nên
+        định mức theo cặp; thiếu kích thước ở một trong hai bên = không có định
+        mức (batch không chẻ). Công thức là cận trên — bỏ qua mạch cắt và cách
+        xếp hình. Trường `products_per_unit` cũ không còn trong API.
+
+        `length_mm` × `width_mm` là kích thước D x R của sản phẩm, đơn vị mm
+        (làm tròn 0,01 mm), phải có cả hai hoặc bỏ trống cả hai.
+
+        Cha → con: `parent_id` xếp SKU vào dưới một SKU cha (vd cha "Hộp nhựa",
+        con "Hộp nhựa bé/lớn/vuông"). Đúng 2 tầng: SKU cha phải là SKU cấp trên
+        cùng; SKU đang có con thì không nhận cha.
       responses: { '201': { description: Created } }
   /api/skus/{id}:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
@@ -234,12 +240,42 @@ paths:
       tags: [Catalog]
       summary: Cập nhật SKU + material set
       description: >-
-        Gửi `materials[]` là thay TOÀN BỘ material set. Định mức
-        `products_per_unit` của cặp nào không gửi trong payload thì được giữ
-        nguyên (màn mapping chỉ gửi material id, không được phép xoá định mức
-        OWNER đã đặt); chỉ OWNER mới đổi/xoá được.
+        Gửi `materials[]` là thay TOÀN BỘ material set.
+
+        Mọi field đều là cập nhật từng phần: field không gửi = giữ nguyên (gửi
+        chuỗi rỗng mới xoá `product_name`/`description`). `parent_id`: bỏ field
+        = giữ, gửi 0 = tách khỏi SKU cha. `length_mm`/`width_mm`: bỏ = giữ, gửi
+        0 cả hai = bỏ kích thước; gửi một bên 0 bên kia có số bị từ chối.
       responses: { '200': { description: OK } }
-    delete: { tags: [Catalog], summary: Xóa SKU, responses: { '200': { description: OK } } }
+    delete:
+      tags: [Catalog]
+      summary: Xóa SKU
+      description: >-
+        SKU cha còn SKU con thì không xoá được — xoá (hoặc chuyển) các SKU con
+        trước, hoặc xoá cả cha lẫn toàn bộ con trong cùng một lần bulk-delete.
+      responses: { '200': { description: OK } }
+  /api/master-data/parents/import/preview:
+    post:
+      tags: [Catalog]
+      summary: "Import SKU cha (bước 1) — xem trước"
+      description: >-
+        File CSV/XLSX cột `SKU cha` + `Tên sản phẩm` + `Mô tả` (multipart
+        `file`), hoặc JSON `{ rows: [{ sku, product_name, description }] }`.
+        Trả từng SKU cha với action CREATE / UPDATE / NOCHANGE và số SKU con
+        đang có. Không ghi gì. Mã đang là SKU con bị báo lỗi (chỉ 2 tầng).
+      responses: { '200': { description: OK } }
+  /api/master-data/parents/import/commit:
+    post:
+      tags: [Catalog]
+      summary: "Import SKU cha (bước 1) — áp dụng"
+      description: >-
+        Gửi lại `rows` đã xem trước; server phân tích lại trong transaction rồi
+        tạo SKU cha mới / cập nhật tên, mô tả. Ô trống không xoá giá trị cũ.
+        Bước 2 là POST /api/master-data/import/preview với cột `SKU cha`,
+        `D (mm)`, `R (mm)`: SKU cha phải có sẵn, không thì dòng đó báo lỗi.
+      responses: { '200': { description: OK } }
+  /api/master-data/parents/template.xlsx:
+    get: { tags: [Catalog], summary: File mẫu import SKU cha, responses: { '200': { description: OK } } }
   /api/orders/import:
     post:
       tags: [Import]
@@ -509,8 +545,8 @@ paths:
       summary: Tự tạo batch từ toàn bộ pool design-ready (OWNER/ADMIN/OPS/DESIGNER)
       description: >-
         Hệ thống tự phân loại theo NVL, tự chia theo ĐỊNH MỨC CỦA CẶP (SKU, NVL)
-        — `SKUMaterial.products_per_unit`, rơi về `Material.products_per_unit`
-        khi cặp chưa khai — rồi tự sinh mã #101xxx và tạo batch; người vận hành
+        — tính từ kích thước: ⌊S_tấm / S_sản phẩm⌋, thiếu kích thước một bên thì
+        không chẻ — rồi tự sinh mã #101xxx và tạo batch; người vận hành
         không chọn từng sản phẩm, không đặt tên. Mỗi sản phẩm chiếm 1/định mức
         của một đơn vị NVL nên một batch đầy theo MỨC CHIẾM DỤNG, không theo
         tổng số sản phẩm (10 khay nhỏ và 4 khay to cùng là một tấm). NVL nào không gom được

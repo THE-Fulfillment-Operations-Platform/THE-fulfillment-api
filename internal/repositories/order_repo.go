@@ -127,6 +127,29 @@ func (r *OrderRepository) SoftDelete(id uint) error {
 	return r.db.Delete(&models.Order{}, id).Error
 }
 
+// SoftDeleteMany is SoftDelete for a set of orders, in one statement.
+func (r *OrderRepository) SoftDeleteMany(ids []uint) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return r.db.Where("id IN ?", ids).Delete(&models.Order{}).Error
+}
+
+// FindByIDsForDelete loads what a bulk delete needs to judge each order: its
+// items and their (live) batch rows — the inputs of orderInProduction.
+func (r *OrderRepository) FindByIDsForDelete(ids []uint) ([]models.Order, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var orders []models.Order
+	err := r.db.
+		Preload("Items").
+		Preload("Items.BatchItems").
+		Where("id IN ?", ids).
+		Find(&orders).Error
+	return orders, err
+}
+
 // UpdateTracking writes only the tracking columns (plus updated_at) so it can't
 // clobber concurrent edits to unrelated order fields.
 func (r *OrderRepository) UpdateTracking(id uint, fields map[string]interface{}) error {

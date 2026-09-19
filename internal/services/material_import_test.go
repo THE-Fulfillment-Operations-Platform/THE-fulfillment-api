@@ -36,210 +36,217 @@ func catalogSvc(db *gorm.DB) *CatalogService {
 
 func ptrInt(n int) *int { return &n }
 
-func TestParseQuotaCell(t *testing.T) {
-	cases := []struct {
-		in   string
-		want *int
-		ok   bool
-	}{
-		{"", nil, true}, // blank = unlimited
-		{"20", ptrInt(20), true},
-		{"20 sp/tấm", ptrInt(20), true}, // lenient: pull the number out
-		{"0", nil, true},                // ≤0 = unlimited
-		{"-5", nil, true},
-		{"abc", nil, false}, // no number → flagged
+// derefF prints a size for a failure message (nil-safe).
+func derefF(p *float64) any {
+	if p == nil {
+		return nil
 	}
-	for _, c := range cases {
-		got, ok := parseQuotaCell(c.in)
-		if ok != c.ok || !quotaEqual(got, c.want) {
-			t.Fatalf("parseQuotaCell(%q) = (%v, %v), want (%v, %v)", c.in, got, ok, c.want, c.ok)
-		}
-	}
+	return *p
 }
 
-func TestParseMaterialQuotaFile(t *testing.T) {
+// sizeRow is a MaterialImportRow with both sides declared.
+func sizeRow(row int, name string, l, w float64, desc string) MaterialImportRow {
+	return MaterialImportRow{RowNumber: row, Material: name, LengthMM: &l, WidthMM: &w, Description: desc}
+}
+
+func TestParseMaterialImportFile(t *testing.T) {
 	csv := strings.Join([]string{
-		"Loại VL,Định mức,Mô tả",
-		"Mica trong 3 ly,20,Mica 3mm",
-		"Gỗ 5 ly,,",  // blank quota + blank desc
-		"Hỏng,abc,x", // invalid quota → parse error
+		"Loại VL,Dài (mm),Rộng (mm),Mô tả,Định mức",
+		"Mica trong 3 ly,1220,2440,Mica 3mm,20",
+		"Gỗ 5 ly,,,,",       // blank size + blank desc
+		"Hỏng,4 ft,8 ft,x,", // not millimetres → parse error
 	}, "\n")
-	rows, perrs, err := ParseMaterialQuotaFile("CSV", strings.NewReader(csv))
+	rows, perrs, notices, err := ParseMaterialImportFile("CSV", strings.NewReader(csv))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	if len(rows) != 2 {
 		t.Fatalf("want 2 valid rows, got %d: %+v", len(rows), rows)
 	}
-	if rows[0].Material != "Mica trong 3 ly" || rows[0].Quota == nil || *rows[0].Quota != 20 {
+	if rows[0].Material != "Mica trong 3 ly" || !dimEq(rows[0].LengthMM, 1220) || !dimEq(rows[0].WidthMM, 2440) || rows[0].Description != "Mica 3mm" {
 		t.Fatalf("row0 wrong: %+v", rows[0])
 	}
-	if rows[0].Description != "Mica 3mm" {
-		t.Fatalf("row0 description not parsed: %+v", rows[0])
+	if rows[1].LengthMM != nil || rows[1].WidthMM != nil {
+		t.Fatalf("blank size should parse to nil, got %+v", rows[1])
 	}
-	if rows[1].Quota != nil {
-		t.Fatalf("blank quota should parse to nil, got %+v", rows[1])
+	if len(perrs) != 1 || perrs[0].ErrorCode != errDimInvalid {
+		t.Fatalf("want 1 DIM_INVALID error, got %+v", perrs)
 	}
-	if len(perrs) != 1 || perrs[0].ErrorCode != errQuotaInvalid {
-		t.Fatalf("want 1 QUOTA_INVALID error, got %+v", perrs)
+	// The old template's quota column is named, not silently swallowed.
+	if len(notices) != 1 || !strings.Contains(notices[0], "Định mức") {
+		t.Fatalf("want a notice about the ignored quota column, got %v", notices)
+	}
+
+	// A combined "D x R" column works too; a file with no size column at all is
+	// refused (that is the old quota template — nothing here to import).
+	rows, _, _, err = ParseMaterialImportFile("CSV", strings.NewReader("Loại VL,Kích thước (mm)\nMica,1220 x 2440\n"))
+	if err != nil || len(rows) != 1 || !dimEq(rows[0].LengthMM, 1220) || !dimEq(rows[0].WidthMM, 2440) {
+		t.Fatalf("combined size column: %+v (%v)", rows, err)
+	}
+	if _, _, _, err := ParseMaterialImportFile("CSV", strings.NewReader("Loại VL,Định mức\nMica,20\n")); err == nil {
+		t.Fatalf("a file without a size column must be refused")
 	}
 }
 
-// TestMaterialImport_PreviewCommit covers create (with quota + description),
-// create-blank (unlimited), quota update, description-only update, blank cells
-// never clearing an existing value, and two lines sharing a name but differing in
-// quota (separate materials, not a conflict).
+// TestMaterialImport_PreviewCommit covers create (with size + description),
+// create-blank (no size), size update, description-only update, and blank cells
+// never clearing an existing value.
 func TestMaterialImport_PreviewCommit(t *testing.T) {
 	db := newCatalogDB(t)
 	svc := catalogSvc(db)
 	owner := Actor{ID: 1, Role: models.RoleOwner}
 
-	// Existing materials.
-	if err := db.Create(&models.Material{Code: "MICA-TRONG-3-LY", Name: "Mica trong 3 ly", ProductsPerUnit: ptrInt(15)}).Error; err != nil {
-		t.Fatalf("seed: %v", err)
+	seed := func(code, name string, l, w float64) *models.Material {
+		m := &models.Material{Code: code, Name: name, LengthMM: &l, WidthMM: &w}
+		if err := db.Create(m).Error; err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		return m
 	}
-	if err := db.Create(&models.Material{Code: "KEEP", Name: "Giữ nguyên", ProductsPerUnit: ptrInt(30)}).Error; err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if err := db.Create(&models.Material{Code: "DESC-ONLY", Name: "Mô tả mới", ProductsPerUnit: ptrInt(8)}).Error; err != nil {
-		t.Fatalf("seed: %v", err)
+	mica := seed("MICA-TRONG-3-LY", "Mica trong 3 ly", 600, 900)
+	keep := seed("KEEP", "Giữ nguyên", 100, 100)
+	descOnly := seed("DESC-ONLY", "Mô tả mới", 50, 50)
+
+	rows := []MaterialImportRow{
+		sizeRow(1, "Mica trong 3 ly", 1220, 2440, ""),                             // update size
+		sizeRow(2, "Gỗ 5 ly", 600, 900, "Gỗ tốt"),                                 // create w/ size + desc
+		{RowNumber: 3, Material: "Acrylic"},                                       // create, no size, no desc
+		{RowNumber: 4, Material: "Giữ nguyên"},                                    // blank → no change
+		{RowNumber: 5, Material: "Mô tả mới", Description: "Ghi chú"},             // desc-only update, size untouched
+		{RowNumber: 6, Material: "Nửa vời", LengthMM: ptrFloat(100)},              // one side only → error
+		{RowNumber: 7, Material: "", LengthMM: ptrFloat(1), WidthMM: ptrFloat(1)}, // no name → error
 	}
 
-	rows := []MaterialQuotaRow{
-		{RowNumber: 1, Material: "Mica trong 3 ly", Quota: ptrInt(20)},                // update 15→20
-		{RowNumber: 2, Material: "Gỗ 5 ly", Quota: ptrInt(12), Description: "Gỗ tốt"}, // create w/ quota + desc
-		{RowNumber: 3, Material: "Acrylic", Quota: nil},                               // create, unlimited, no desc
-		{RowNumber: 4, Material: "Giữ nguyên", Quota: nil},                            // blank → no change (keep 30)
-		{RowNumber: 5, Material: "Mô tả mới", Quota: nil, Description: "Ghi chú"},     // desc-only update, quota untouched
-		{RowNumber: 6, Material: "Hai loại", Quota: ptrInt(5)},                        // same name, different quota ↓
-		{RowNumber: 7, Material: "Hai loại", Quota: ptrInt(9)},
-	}
-
-	pv, err := svc.PreviewMaterialImport("quota.csv", rows, nil)
+	pv, err := svc.PreviewMaterialImport("nvl.csv", rows, nil, nil)
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
-	if pv.Summary.NewMaterials != 4 {
-		t.Fatalf("new = %d, want 4 (Gỗ, Acrylic + both 'Hai loại' variants)", pv.Summary.NewMaterials)
+	if s := pv.Summary; s.NewMaterials != 2 || s.Updates != 2 || s.Unchanged != 1 || s.ErrorRows != 2 {
+		t.Fatalf("summary = %+v, want 2 new / 2 updates / 1 unchanged / 2 errors", s)
 	}
-	if pv.Summary.Updates != 2 {
-		t.Fatalf("updates = %d, want 2 (Mica quota + Mô tả mới desc)", pv.Summary.Updates)
+	codes := map[string]string{}
+	for _, e := range pv.Errors {
+		codes[e.Material] = e.ErrorCode
 	}
-	if pv.Summary.Unchanged != 1 {
-		t.Fatalf("unchanged = %d, want 1", pv.Summary.Unchanged)
-	}
-	// Same Loại VL with a different Định mức is a different material, not an error.
-	if pv.Summary.ErrorRows != 0 {
-		t.Fatalf("want no errors, got %+v", pv.Errors)
-	}
-	if pv.Summary.NameVariants != 2 {
-		t.Fatalf("name variants = %d, want 2 rows flagged as same-name-different-data", pv.Summary.NameVariants)
+	if codes["Nửa vời"] != errDimInvalid || codes[""] != errMaterialBlank {
+		t.Fatalf("errors = %+v", pv.Errors)
 	}
 	for _, it := range pv.Items {
-		if it.Name == "Hai loại" && !it.NameVariant {
-			t.Fatalf("'Hai loại' must be flagged as a name variant: %+v", it)
+		if it.Name == "Mica trong 3 ly" && (it.Action != importActionUpdate || !dimEq(it.CurrentLengthMM, 600) || !dimEq(it.LengthMM, 1220)) {
+			t.Fatalf("Mica item = %+v", it)
 		}
 	}
 
-	if _, err := svc.CommitMaterialImport(owner, rows); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-
-	repo := repositories.New(db)
-	mica, _ := repo.Material.FindByNameInsensitive("Mica trong 3 ly")
-	if mica.ProductsPerUnit == nil || *mica.ProductsPerUnit != 20 {
-		t.Fatalf("Mica quota should be 20, got %v", mica.ProductsPerUnit)
-	}
-	go5, _ := repo.Material.FindByNameInsensitive("Gỗ 5 ly")
-	if go5 == nil || go5.ProductsPerUnit == nil || *go5.ProductsPerUnit != 12 || go5.Description != "Gỗ tốt" {
-		t.Fatalf("Gỗ 5 ly should be created with quota 12 + desc, got %+v", go5)
-	}
-	acr, _ := repo.Material.FindByNameInsensitive("Acrylic")
-	if acr == nil || acr.ProductsPerUnit != nil || acr.Description != "" {
-		t.Fatalf("Acrylic should be created unlimited with no desc, got %+v", acr)
-	}
-	keep, _ := repo.Material.FindByNameInsensitive("Giữ nguyên")
-	if keep.ProductsPerUnit == nil || *keep.ProductsPerUnit != 30 {
-		t.Fatalf("blank quota must NOT clear existing 30, got %v", keep.ProductsPerUnit)
-	}
-	// Description-only update must set the description and leave the quota alone.
-	descOnly, _ := repo.Material.FindByNameInsensitive("Mô tả mới")
-	if descOnly.Description != "Ghi chú" {
-		t.Fatalf("desc should be set to 'Ghi chú', got %q", descOnly.Description)
-	}
-	if descOnly.ProductsPerUnit == nil || *descOnly.ProductsPerUnit != 8 {
-		t.Fatalf("blank quota on a desc-only update must NOT clear existing 8, got %v", descOnly.ProductsPerUnit)
-	}
-	// Two lines sharing a name but not a quota become two materials, each with its
-	// own code — the older behaviour dropped both on the floor as a conflict.
-	pair, _ := repo.Material.ListByNameInsensitive("Hai loại")
-	if len(pair) != 2 {
-		t.Fatalf("same name + different quota must create 2 materials, got %d", len(pair))
-	}
-	if *pair[0].ProductsPerUnit != 5 || *pair[1].ProductsPerUnit != 9 {
-		t.Fatalf("quotas = %v/%v, want 5 and 9", pair[0].ProductsPerUnit, pair[1].ProductsPerUnit)
-	}
-	if pair[0].Code == pair[1].Code {
-		t.Fatalf("materials sharing a name must still get distinct codes, both %q", pair[0].Code)
-	}
-}
-
-// TestMaterialImport_FoldsExactDuplicateRows locks in what "dòng trùng nhau" means
-// here: only rows equal in ALL THREE columns are the same material and collapse to
-// one; differ in any single column and they stay separate. Real files repeat the
-// same material many times, and re-importing must not multiply the catalog.
-func TestMaterialImport_FoldsExactDuplicateRows(t *testing.T) {
-	db := newCatalogDB(t)
-	svc := catalogSvc(db)
-	owner := Actor{ID: 1, Role: models.RoleOwner}
-
-	rows := []MaterialQuotaRow{
-		{RowNumber: 1, Material: "Mica trong 3 ly", Quota: ptrInt(20), Description: "Mica 3mm"},
-		{RowNumber: 2, Material: "Mica trong 3 ly", Quota: ptrInt(20), Description: "Mica 3mm"},        // exact dup
-		{RowNumber: 3, Material: "  mica TRONG 3 ly ", Quota: ptrInt(20), Description: "mica 3MM"},     // dup modulo case/spaces
-		{RowNumber: 4, Material: "Mica trong 3 ly", Quota: ptrInt(20), Description: "Mica 3mm loại B"}, // desc differs → own material
-		{RowNumber: 5, Material: "Mica trong 3 ly", Quota: ptrInt(30), Description: "Mica 3mm"},        // quota differs → own material
-	}
-
-	pv, err := svc.PreviewMaterialImport("dup.csv", rows, nil)
+	res, err := svc.CommitMaterialImport(owner, rows)
 	if err != nil {
-		t.Fatalf("preview: %v", err)
-	}
-	if len(pv.Items) != 3 {
-		t.Fatalf("items = %d, want 3 (one per distinct triple)", len(pv.Items))
-	}
-	if pv.Summary.DuplicateRows != 2 {
-		t.Fatalf("duplicate rows = %d, want 2 folded away", pv.Summary.DuplicateRows)
-	}
-	// The folded rows keep their line numbers so the preview can point at them.
-	if got := pv.Items[0].RowNumbers; len(got) != 3 || got[0] != 1 || got[2] != 3 {
-		t.Fatalf("first item rows = %v, want rows 1,2,3 folded together", got)
-	}
-	if pv.Summary.ErrorRows != 0 {
-		t.Fatalf("duplicates are not errors, got %+v", pv.Errors)
-	}
-
-	if _, err := svc.CommitMaterialImport(owner, rows); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	repo := repositories.New(db)
-	mats, _ := repo.Material.ListByNameInsensitive("Mica trong 3 ly")
-	if len(mats) != 3 {
-		t.Fatalf("materials created = %d, want 3", len(mats))
+	if res.Applied.Created != 2 || res.Applied.Updated != 2 {
+		t.Fatalf("applied = %+v", res.Applied)
+	}
+	// Fresh struct per lookup: GORM folds a non-zero primary key on the
+	// receiver into the WHERE, so reusing one would AND two ids together.
+	load := func(where string, arg any) models.Material {
+		var m models.Material
+		if err := db.Where(where, arg).First(&m).Error; err != nil {
+			t.Fatalf("load %v: %v", arg, err)
+		}
+		return m
+	}
+	if got := load("id = ?", mica.ID); !dimEq(got.LengthMM, 1220) || !dimEq(got.WidthMM, 2440) {
+		t.Fatalf("size not updated: %v × %v", derefF(got.LengthMM), derefF(got.WidthMM))
+	}
+	if got := load("id = ?", keep.ID); !dimEq(got.LengthMM, 100) || !dimEq(got.WidthMM, 100) {
+		t.Fatalf("blank cells cleared a size: %v × %v", derefF(got.LengthMM), derefF(got.WidthMM))
+	}
+	if got := load("id = ?", descOnly.ID); got.Description != "Ghi chú" || !dimEq(got.LengthMM, 50) {
+		t.Fatalf("desc-only update: desc=%q size=%v", got.Description, derefF(got.LengthMM))
+	}
+	if got := load("name = ?", "Gỗ 5 ly"); !dimEq(got.LengthMM, 600) || !dimEq(got.WidthMM, 900) || got.Description != "Gỗ tốt" || got.Code != "GO-5-LY" {
+		t.Fatalf("created material = %+v", got)
+	}
+	if got := load("name = ?", "Acrylic"); got.LengthMM != nil || got.WidthMM != nil {
+		t.Fatalf("blank size on create must stay undeclared, got %v × %v", derefF(got.LengthMM), derefF(got.WidthMM))
 	}
 
-	// Re-importing the same file must be a no-op, not a second set of materials.
-	pv2, err := svc.PreviewMaterialImport("dup.csv", rows, nil)
+	// Re-importing the same file is a no-op.
+	pv2, err := svc.PreviewMaterialImport("nvl.csv", rows, nil, nil)
 	if err != nil {
 		t.Fatalf("re-preview: %v", err)
 	}
-	if pv2.Summary.NewMaterials != 0 || pv2.Summary.Updates != 0 || pv2.Summary.Unchanged != 3 {
+	if pv2.Summary.NewMaterials != 0 || pv2.Summary.Updates != 0 || pv2.Summary.Unchanged != 5 {
 		t.Fatalf("re-import should be all NOCHANGE, got %+v", pv2.Summary)
+	}
+}
+
+// TestMaterialImport_OneMaterialPerName locks in what a material IS to this
+// import: its name. Repeats of a name fold into one line when they agree (a
+// later line may fill a blank), and are an error when they disagree — the file
+// is never allowed to grow same-name variants the way the old quota import did.
+// A catalog that already holds several materials with one name is reported too,
+// instead of one of them being picked in silence.
+func TestMaterialImport_OneMaterialPerName(t *testing.T) {
+	db := newCatalogDB(t)
+	svc := catalogSvc(db)
+	for _, code := range []string{"CERAMIC", "CERAMIC-2"} {
+		if err := db.Create(&models.Material{Code: code, Name: "Ceramic"}).Error; err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	rows := []MaterialImportRow{
+		sizeRow(1, "Mica trong 3 ly", 1220, 2440, "Mica 3mm"),
+		sizeRow(2, "Mica trong 3 ly", 1220, 2440, "Mica 3mm"),    // exact dup
+		sizeRow(3, "  mica TRONG 3 ly ", 1220, 2440, "mica 3MM"), // dup modulo case/spaces
+		{RowNumber: 4, Material: "Mica trong 3 ly"},              // blank repeat → folds, adds nothing
+		{RowNumber: 5, Material: "Basswood 5mm"},                 // blank first…
+		sizeRow(6, "Basswood 5mm", 600, 900, ""),                 // …a later line fills the size
+		sizeRow(7, "Mica 2 ly", 600, 900, ""),
+		sizeRow(8, "Mica 2 ly", 1220, 2440, ""), // same name, different size → conflict
+		sizeRow(9, "Ceramic", 300, 300, ""),     // catalog already has two "Ceramic"
+	}
+	pv, err := svc.PreviewMaterialImport("dup.csv", rows, nil, nil)
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if len(pv.Items) != 2 {
+		t.Fatalf("items = %+v, want Mica trong 3 ly + Basswood 5mm", pv.Items)
+	}
+	if pv.Summary.DuplicateRows != 4 {
+		t.Fatalf("duplicate rows = %d, want 4 (rows 2, 3, 4, 6 folded)", pv.Summary.DuplicateRows)
+	}
+	if got := pv.Items[0].RowNumbers; len(got) != 4 || got[0] != 1 || got[3] != 4 {
+		t.Fatalf("first item rows = %v, want rows 1–4 folded together", got)
+	}
+	if bw := pv.Items[1]; !dimEq(bw.LengthMM, 600) || !dimEq(bw.WidthMM, 900) {
+		t.Fatalf("a later line must fill the size a blank line left: %+v", bw)
+	}
+	codes := map[string]string{}
+	for _, e := range pv.Errors {
+		codes[e.Material] = e.ErrorCode
+		if e.ErrorCode == errMaterialRowConflict && len(e.RowNumbers) != 2 {
+			t.Fatalf("a conflict must point at every row involved: %+v", e)
+		}
+	}
+	if codes["Mica 2 ly"] != errMaterialRowConflict || codes["Ceramic"] != errMaterialAmbiguous {
+		t.Fatalf("errors = %+v", pv.Errors)
+	}
+
+	owner := Actor{ID: 1, Role: models.RoleOwner}
+	if _, err := svc.CommitMaterialImport(owner, rows); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	repo := repositories.New(db)
+	if mats, _ := repo.Material.ListByNameInsensitive("Mica trong 3 ly"); len(mats) != 1 {
+		t.Fatalf("materials named Mica trong 3 ly = %d, want exactly 1", len(mats))
+	}
+	if mats, _ := repo.Material.ListByNameInsensitive("Mica 2 ly"); len(mats) != 0 {
+		t.Fatalf("a conflicting material must not be created, got %d", len(mats))
 	}
 	if _, err := svc.CommitMaterialImport(owner, rows); err != nil {
 		t.Fatalf("re-commit: %v", err)
 	}
-	if again, _ := repo.Material.ListByNameInsensitive("Mica trong 3 ly"); len(again) != 3 {
+	if again, _ := repo.Material.ListByNameInsensitive("Mica trong 3 ly"); len(again) != 1 {
 		t.Fatalf("re-import must not duplicate the catalog, got %d materials", len(again))
 	}
 }
@@ -255,13 +262,14 @@ func TestMaterialImport_StaysOffTheRowByRowPath(t *testing.T) {
 	owner := Actor{ID: 1, Role: models.RoleOwner}
 
 	const materials = 300
-	rows := make([]MaterialQuotaRow, 0, materials*2)
+	rows := make([]MaterialImportRow, 0, materials*2)
 	for i := 0; i < materials; i++ {
 		name := "NVL " + strconv.Itoa(i)
+		size := float64(100 + i%5)
 		rows = append(rows,
-			MaterialQuotaRow{RowNumber: len(rows) + 1, Material: name, Quota: ptrInt(10 + i%5)},
+			sizeRow(len(rows)+1, name, size, size, ""),
 			// Every material repeated once — the fold must not cost extra queries.
-			MaterialQuotaRow{RowNumber: len(rows) + 2, Material: name, Quota: ptrInt(10 + i%5)},
+			sizeRow(len(rows)+2, name, size, size, ""),
 		)
 	}
 
@@ -279,7 +287,7 @@ func TestMaterialImport_StaysOffTheRowByRowPath(t *testing.T) {
 		}
 	}
 
-	if _, err := svc.PreviewMaterialImport("big.csv", rows, nil); err != nil {
+	if _, err := svc.PreviewMaterialImport("big.csv", rows, nil, nil); err != nil {
 		t.Fatalf("preview: %v", err)
 	}
 	if stmts > 2 {
@@ -301,13 +309,57 @@ func TestMaterialImport_StaysOffTheRowByRowPath(t *testing.T) {
 	}
 }
 
-// Non-OWNER must be refused at the service layer too (defense in depth).
-func TestMaterialImport_NonOwnerForbidden(t *testing.T) {
+// TestMaterialSize_CRUD: the material form declares a sheet size the same way
+// the SKU form declares a product size — both sides or neither, rounded to
+// 0.01 mm, partial updates keep what they don't send — and the derived quota
+// follows from the two.
+func TestMaterialSize_CRUD(t *testing.T) {
 	db := newCatalogDB(t)
 	svc := catalogSvc(db)
-	admin := Actor{ID: 2, Role: models.RoleAdmin}
-	_, err := svc.CommitMaterialImport(admin, []MaterialQuotaRow{{RowNumber: 1, Material: "X", Quota: ptrInt(5)}})
-	if err == nil {
-		t.Fatalf("expected forbidden error for non-owner")
+	ops := Actor{ID: 2, Role: models.RoleOps} // no OWNER lever any more: sizes are master data
+
+	if _, err := svc.CreateMaterial(ops, MaterialInput{Code: "MICA", Name: "Mica", LengthMM: ptrFloat(1220)}); err == nil {
+		t.Fatalf("one side without the other must be refused")
+	}
+	m, err := svc.CreateMaterial(ops, MaterialInput{Code: "MICA", Name: "Mica", LengthMM: ptrFloat(1220.004), WidthMM: ptrFloat(2440)})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if !dimEq(m.LengthMM, 1220) || !dimEq(m.WidthMM, 2440) {
+		t.Fatalf("size stored as %v × %v", m.LengthMM, m.WidthMM)
+	}
+
+	// A name-only edit keeps the size; clearing one side clears the pair only
+	// when both are cleared — half a size is refused.
+	if _, err := svc.UpdateMaterial(ops, m.ID, MaterialUpdateInput{Name: "Mica trong"}); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if got, _ := svc.GetMaterial(m.ID); !dimEq(got.LengthMM, 1220) || got.Name != "Mica trong" {
+		t.Fatalf("rename touched the size: %+v", got)
+	}
+	if _, err := svc.UpdateMaterial(ops, m.ID, MaterialUpdateInput{WidthMM: ptrFloat(0)}); err == nil {
+		t.Fatalf("clearing one side only must be refused")
+	}
+	if _, err := svc.UpdateMaterial(ops, m.ID, MaterialUpdateInput{LengthMM: ptrFloat(0), WidthMM: ptrFloat(0)}); err != nil {
+		t.Fatalf("clear both: %v", err)
+	}
+	if got, _ := svc.GetMaterial(m.ID); got.LengthMM != nil || got.WidthMM != nil {
+		t.Fatalf("size not cleared: %+v", got)
+	}
+
+	// The quota of a pair is nobody's input: it comes from the two sizes.
+	if _, err := svc.UpdateMaterial(ops, m.ID, MaterialUpdateInput{LengthMM: ptrFloat(100), WidthMM: ptrFloat(100)}); err != nil {
+		t.Fatalf("set size: %v", err)
+	}
+	sku, err := svc.CreateSKU(ops, SKUInput{
+		Code: "AO-3X5", Name: "AO 3x5", LengthMM: ptrFloat(10), WidthMM: ptrFloat(15),
+		Materials: []SKUMaterialInput{{MaterialID: m.ID, QuantityPerUnit: 1}},
+	})
+	if err != nil {
+		t.Fatalf("create sku: %v", err)
+	}
+	mat, _ := svc.GetMaterial(m.ID)
+	if got := models.ProductionQuota(sku, mat); got != 66 {
+		t.Fatalf("quota = %d, want ⌊10000/150⌋ = 66", got)
 	}
 }

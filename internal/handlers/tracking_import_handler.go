@@ -2,13 +2,10 @@ package handlers
 
 import (
 	"net/http"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
-	"the-fulfillment/backend/internal/apperr"
 	"the-fulfillment/backend/internal/response"
 	"the-fulfillment/backend/internal/services"
 )
@@ -49,26 +46,17 @@ func (h *Handlers) DownloadTrackingImportTemplate(c *gin.Context) {
 //	                     handed_over_from=<RFC3339|YYYY-MM-DD> (optional),
 //	                     handed_over_to=<RFC3339|YYYY-MM-DD>   (optional)
 func (h *Handlers) PreviewTrackingImport(c *gin.Context) {
-	fileHeader, err := c.FormFile("file")
-	if err != nil {
-		response.Fail(c, apperr.BadRequest(`Thiếu file upload (field "file")`))
-		return
-	}
-	f, err := fileHeader.Open()
-	if err != nil {
-		response.Fail(c, apperr.BadRequest("Không mở được file upload"))
+	src, _, f, ok := spreadsheetUpload(c)
+	if !ok {
 		return
 	}
 	defer f.Close()
 
 	var rows []services.TrackingImportRow
-	switch strings.ToLower(filepath.Ext(fileHeader.Filename)) {
-	case ".xlsx", ".xlsm":
+	var err error
+	if src == "XLSX" {
 		rows, err = services.ParseTrackingXLSX(f)
-	case ".xls":
-		response.Fail(c, apperr.BadRequest("Định dạng .xls (Excel cũ) chưa hỗ trợ — lưu lại dạng .xlsx hoặc CSV"))
-		return
-	default:
+	} else {
 		rows, err = services.ParseTrackingCSV(f)
 	}
 	if err != nil {

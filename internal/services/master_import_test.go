@@ -2,6 +2,7 @@ package services
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -123,8 +124,8 @@ func TestMasterImport_Combo(t *testing.T) {
 	if pv.Summary.MissingCount != 1 {
 		t.Fatalf("missing = %d, want 1", pv.Summary.MissingCount)
 	}
-	if pv.Summary.ReviewCount != 0 {
-		t.Fatalf("review = %d, want 0 (no inconsistent rows)", pv.Summary.ReviewCount)
+	if pv.Summary.ErrorRows != 0 {
+		t.Fatalf("errors = %+v, want none (every SKU's rows agree)", pv.Errors)
 	}
 
 	single := skuPlanByCode(t, pv, normalizeSKUCode("BR A 1.6 Gai"))
@@ -262,10 +263,13 @@ func TestMasterImport_ProductName(t *testing.T) {
 	}
 }
 
-// TestMasterImport_InconsistentRowsFlaggedButMapped: when the same SKU's rows give
-// different material sets, the plan flags NEEDS_REVIEW yet still maps the union so
-// nothing is silently dropped.
-func TestMasterImport_InconsistentRowsFlaggedButMapped(t *testing.T) {
+// TestMasterImport_InconsistentRowsAreRefused: a SKU whose rows disagree on its
+// material set is dropped with MATERIAL_CONFLICT — not mapped to the union. A
+// product mapped to a material it is not made of would land in that material's
+// batch and be cut from the wrong sheet, so the file has to be fixed first. The
+// rest of the file still imports, and a material only the refused SKU used is
+// not created.
+func TestMasterImport_InconsistentRowsAreRefused(t *testing.T) {
 	db := newMasterDB(t)
 	svc := masterSvc(db)
 	actor := Actor{ID: 1}
@@ -273,33 +277,40 @@ func TestMasterImport_InconsistentRowsFlaggedButMapped(t *testing.T) {
 	rows := legacyRows(
 		[2]string{"BR A 1.6 kep", "Mica trong 3 ly + Basswood 5mm + Mica Hologram"},
 		[2]string{"BR A 1.6 kep", "Mica trong 3 ly"}, // partial → disagrees
+		[2]string{"BR A 2 kep", "Mica trong 3 ly"},
 	)
 
 	pv, err := svc.Preview(actor, "CSV", "inc.csv", rows)
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
-	sp := skuPlanByCode(t, pv, normalizeSKUCode("BR A 1.6 kep"))
-	if sp.Status != skuStatusReview {
-		t.Fatalf("inconsistent SKU status = %q, want %q", sp.Status, skuStatusReview)
+	if len(pv.Errors) != 1 || pv.Errors[0].ErrorCode != errMaterialConflict || pv.Errors[0].RowNumber != 1 {
+		t.Fatalf("errors = %+v, want one MATERIAL_CONFLICT against row 1", pv.Errors)
 	}
-	if len(sp.MaterialNames) != 3 {
-		t.Fatalf("union should be 3 materials, got %v", sp.MaterialNames)
+	if !strings.Contains(pv.Errors[0].Message, "Mica trong 3 ly + Basswood 5mm + Mica Hologram") || !strings.Contains(pv.Errors[0].Message, " / ") {
+		t.Fatalf("the message must show the sets that disagree, got %q", pv.Errors[0].Message)
 	}
-	if pv.Summary.ReviewCount != 1 {
-		t.Fatalf("review count = %d, want 1", pv.Summary.ReviewCount)
+	if len(pv.SKUs) != 1 || pv.SKUs[0].Code != normalizeSKUCode("BR A 2 kep") {
+		t.Fatalf("plan = %+v, want only the consistent SKU", pv.SKUs)
 	}
-	if pv.Summary.NewMappings != 3 {
-		t.Fatalf("union still mapped: new mappings = %d, want 3", pv.Summary.NewMappings)
+	for _, m := range pv.Materials {
+		if m.Name != "Mica trong 3 ly" {
+			t.Fatalf("a material only the refused SKU uses must not be planned: %+v", pv.Materials)
+		}
+	}
+	if pv.Summary.NewSKUs != 1 || pv.Summary.NewMappings != 1 || pv.Summary.ErrorRows != 1 {
+		t.Fatalf("summary = %+v", pv.Summary)
 	}
 
 	if _, err := svc.Commit(actor, pv.ImportJobID); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 	repo := repositories.New(db)
-	rec, _ := repo.SKU.FindByCode(normalizeSKUCode("BR A 1.6 kep"))
-	if len(rec.Materials) != 3 || !rec.IsCombo {
-		t.Fatalf("inconsistent SKU should still map all 3 as combo, got %d combo=%v", len(rec.Materials), rec.IsCombo)
+	if _, err := repo.SKU.FindByCode(normalizeSKUCode("BR A 1.6 kep")); err == nil {
+		t.Fatalf("the refused SKU must not be created")
+	}
+	if mats, _ := repo.Material.ListByNameInsensitive("Basswood 5mm"); len(mats) != 0 {
+		t.Fatalf("Basswood 5mm belonged only to the refused SKU, got %d", len(mats))
 	}
 }
 

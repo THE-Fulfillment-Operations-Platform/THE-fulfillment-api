@@ -40,16 +40,13 @@ type UpdateTrackingInput struct {
 	TrackingURL    *string `json:"tracking_url"`
 }
 
-// trackingRoles may edit tracking: internal managers, the packing/shipping
-// stations that dispatch parcels, and customer support — CS is who receives the
-// tracking number and matches it to a store order.
-func canEditTracking(role models.Role) bool {
-	switch role {
-	case models.RoleOwner, models.RoleAdmin, models.RoleOps,
-		models.RolePacking, models.RoleShipping, models.RoleCS:
-		return true
-	}
-	return false
+// canEditTracking: tracking is edited from two screens — the journeys board
+// (the packing/shipping stations that dispatch parcels) and CS lookup (CS is who
+// receives the tracking number and matches it to a store order). Either
+// screen's "manage" tick allows it; by role default that is OWNER, ADMIN, OPS,
+// PACKING, SHIPPING and CS.
+func canEditTracking(a Actor) bool {
+	return a.Can(models.Manage(models.FeatJourneys)) || a.Can(models.Manage(models.FeatCS))
 }
 
 // UpdateTracking sets tracking number/status/carrier/url on an order. Status is
@@ -57,7 +54,7 @@ func canEditTracking(role models.Role) bool {
 // It records LastTrackingUpdate and writes an audit entry. This is the manual
 // entry path; a provider sync would funnel through ApplyTrackingSync instead.
 func (s *OrderService) UpdateTracking(actor Actor, id uint, in UpdateTrackingInput) (*models.Order, error) {
-	if !canEditTracking(actor.Role) {
+	if !canEditTracking(actor) {
 		return nil, apperr.Forbidden("Bạn không có quyền cập nhật tracking")
 	}
 	order, err := s.GetOrder(id)

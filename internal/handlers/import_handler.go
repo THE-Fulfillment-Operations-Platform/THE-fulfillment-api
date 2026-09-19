@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -42,29 +41,17 @@ func parseImportUpload(c *gin.Context) (up importUpload, ok bool) {
 		up.sellerMode = strings.TrimSpace(c.PostForm("seller_mode"))
 		up.commit, _ = strconv.ParseBool(c.PostForm("commit"))
 
-		fileHeader, err := c.FormFile("file")
-		if err != nil {
-			response.Fail(c, apperr.BadRequest("file form field is required"))
-			return
-		}
-		f, err := fileHeader.Open()
-		if err != nil {
-			response.Fail(c, apperr.BadRequest("could not open uploaded file"))
+		src, name, f, opened := spreadsheetUpload(c)
+		if !opened {
 			return
 		}
 		defer f.Close()
-
-		up.filename = fileHeader.Filename
-		switch strings.ToLower(filepath.Ext(up.filename)) {
-		case ".xlsx", ".xlsm":
+		up.source, up.filename = src, name
+		var err error
+		if src == "XLSX" {
 			up.rows, up.hdr, err = services.ParseXLSX(f)
-			up.source = "XLSX"
-		case ".xls":
-			response.Fail(c, apperr.BadRequest("Định dạng .xls (Excel cũ) chưa hỗ trợ — lưu lại dạng .xlsx hoặc CSV"))
-			return
-		default:
+		} else {
 			up.rows, up.hdr, err = services.ParseCSV(f)
-			up.source = "CSV"
 		}
 		if err != nil {
 			response.Fail(c, err)

@@ -2,63 +2,45 @@ package handlers
 
 import (
 	"net/http"
-	"path/filepath"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 
-	"the-fulfillment/backend/internal/apperr"
 	"the-fulfillment/backend/internal/response"
 	"the-fulfillment/backend/internal/services"
 )
 
-// MaterialImportPreview parses a 2-column material-quota spreadsheet (`Loại VL` +
-// `Định mức`) and returns the plan (create/update/no-change per material, plus
-// bad rows). Nothing is written. OWNER-only (see routes).
+// MaterialImportPreview parses a material spreadsheet (`Loại VL` + `Dài (mm)` +
+// `Rộng (mm)` + optional `Mô tả`) and returns the plan (create/update/no-change
+// per material, plus bad rows). Nothing is written.
 //
 // POST /api/materials/import/preview
 //
 //	multipart/form-data: file=<csv|xlsx>
-//	application/json:     { "filename": "x.csv", "rows": [ { "material": "...", "quota": 20 } ] }
+//	application/json:     { "filename": "x.csv", "rows": [ { "material": "...", "length_mm": 1220, "width_mm": 2440 } ] }
 func (h *Handlers) MaterialImportPreview(c *gin.Context) {
 	var (
 		filename    string
-		rows        []services.MaterialQuotaRow
+		rows        []services.MaterialImportRow
 		parseErrors []services.MaterialImportRowError
+		notices     []string
 	)
 
-	if strings.HasPrefix(c.ContentType(), "multipart/form-data") {
-		fileHeader, err := c.FormFile("file")
-		if err != nil {
-			response.Fail(c, apperr.BadRequest("file form field is required"))
-			return
-		}
-		f, err := fileHeader.Open()
-		if err != nil {
-			response.Fail(c, apperr.BadRequest("could not open uploaded file"))
+	if isMultipart(c) {
+		src, name, f, ok := spreadsheetUpload(c)
+		if !ok {
 			return
 		}
 		defer f.Close()
-
-		filename = fileHeader.Filename
-		source := "CSV"
-		switch strings.ToLower(filepath.Ext(filename)) {
-		case ".xlsx", ".xlsm":
-			source = "XLSX"
-		case ".xls":
-			response.Fail(c, apperr.BadRequest("Định dạng .xls (Excel cũ) chưa hỗ trợ — lưu lại dạng .xlsx hoặc CSV"))
-			return
-		}
-		parsed, perrs, err := services.ParseMaterialQuotaFile(source, f)
+		parsed, perrs, ns, err := services.ParseMaterialImportFile(src, f)
 		if err != nil {
 			response.Fail(c, err)
 			return
 		}
-		rows, parseErrors = parsed, perrs
+		filename, rows, parseErrors, notices = name, parsed, perrs, ns
 	} else {
 		var body struct {
-			Filename string                      `json:"filename"`
-			Rows     []services.MaterialQuotaRow `json:"rows" binding:"required,min=1"`
+			Filename string                       `json:"filename"`
+			Rows     []services.MaterialImportRow `json:"rows" binding:"required,min=1"`
 		}
 		if !bindJSON(c, &body) {
 			return
@@ -67,7 +49,7 @@ func (h *Handlers) MaterialImportPreview(c *gin.Context) {
 		rows = body.Rows
 	}
 
-	pv, err := h.svc.Catalog.PreviewMaterialImport(filename, rows, parseErrors)
+	pv, err := h.svc.Catalog.PreviewMaterialImport(filename, rows, parseErrors, notices)
 	if err != nil {
 		response.Fail(c, err)
 		return
@@ -75,11 +57,12 @@ func (h *Handlers) MaterialImportPreview(c *gin.Context) {
 	response.OK(c, pv)
 }
 
-// MaterialImportCommit applies the material-quota plan. OWNER-only.
+// MaterialImportCommit applies the material plan; the client sends the
+// previewed rows back and they are re-analysed inside the transaction.
 // POST /api/materials/import/commit
 func (h *Handlers) MaterialImportCommit(c *gin.Context) {
 	var body struct {
-		Rows []services.MaterialQuotaRow `json:"rows" binding:"required,min=1"`
+		Rows []services.MaterialImportRow `json:"rows" binding:"required,min=1"`
 	}
 	if !bindJSON(c, &body) {
 		return
@@ -92,7 +75,7 @@ func (h *Handlers) MaterialImportCommit(c *gin.Context) {
 	response.OK(c, res)
 }
 
-// DownloadMaterialTemplate streams the material-quota import sample as an .xlsx.
+// DownloadMaterialTemplate streams the material import sample as an .xlsx.
 // GET /api/materials/import/template.xlsx
 func (h *Handlers) DownloadMaterialTemplate(c *gin.Context) {
 	data, filename, err := h.svc.Catalog.MaterialTemplateXLSX()

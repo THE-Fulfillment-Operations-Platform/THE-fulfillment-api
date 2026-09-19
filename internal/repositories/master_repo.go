@@ -83,6 +83,7 @@ func (r *UserRepository) RestoreWith(u *models.User) error {
 			"role":          u.Role,
 			"seller_id":     u.SellerID,
 			"is_active":     u.IsActive,
+			"permissions":   u.Permissions,
 		}).Error
 }
 
@@ -695,6 +696,91 @@ func (r *SKURepository) MarkComboMany(ids []uint) error {
 		if err := r.db.Model(&models.SKU{}).
 			Where("id IN ? AND is_combo = ?", ids[start:end], false).
 			Update("is_combo", true).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ChildrenOf returns the live child SKU ids of each given parent, one query per
+// chunk. Parents without children are simply absent from the map.
+func (r *SKURepository) ChildrenOf(parentIDs []uint) (map[uint][]uint, error) {
+	out := map[uint][]uint{}
+	for start := 0; start < len(parentIDs); start += idChunk {
+		end := start + idChunk
+		if end > len(parentIDs) {
+			end = len(parentIDs)
+		}
+		var rows []models.SKU
+		if err := r.db.Select("id", "parent_id").
+			Where("parent_id IN ?", parentIDs[start:end]).
+			Order("id asc").Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		for _, s := range rows {
+			if s.ParentID != nil {
+				out[*s.ParentID] = append(out[*s.ParentID], s.ID)
+			}
+		}
+	}
+	return out, nil
+}
+
+// SKUPatch is a partial update of one SKU's descriptive columns. A nil field is
+// left untouched; ParentID pointing at 0 clears the parent.
+type SKUPatch struct {
+	ID          uint
+	ParentID    *uint
+	LengthMM    *float64
+	WidthMM     *float64
+	ProductName *string
+	Description *string
+}
+
+// PatchMany applies many SKUPatches with ONE UPDATE per chunk — each column is
+// rewritten as `CASE id WHEN ? THEN ? … ELSE col END`, so SKUs that each carry a
+// different value still share a statement. Per-row UPDATEs made re-importing a
+// catalogue of a few hundred SKUs cost a few hundred round-trips.
+func (r *SKURepository) PatchMany(patches []SKUPatch) error {
+	for start := 0; start < len(patches); start += idChunk {
+		end := start + idChunk
+		if end > len(patches) {
+			end = len(patches)
+		}
+		chunk := patches[start:end]
+		ids := make([]uint, 0, len(chunk))
+		cols := map[string][]any{} // column → id, value, id, value…
+		for _, p := range chunk {
+			ids = append(ids, p.ID)
+			if p.ParentID != nil {
+				var v any // 0 → NULL: detach from the parent
+				if *p.ParentID != 0 {
+					v = *p.ParentID
+				}
+				cols["parent_id"] = append(cols["parent_id"], p.ID, v)
+			}
+			if p.LengthMM != nil {
+				cols["length_mm"] = append(cols["length_mm"], p.ID, *p.LengthMM)
+			}
+			if p.WidthMM != nil {
+				cols["width_mm"] = append(cols["width_mm"], p.ID, *p.WidthMM)
+			}
+			if p.ProductName != nil {
+				cols["product_name"] = append(cols["product_name"], p.ID, *p.ProductName)
+			}
+			if p.Description != nil {
+				cols["description"] = append(cols["description"], p.ID, *p.Description)
+			}
+		}
+		if len(cols) == 0 {
+			continue
+		}
+		set := make(map[string]any, len(cols))
+		for col, args := range cols {
+			sql := "CASE id" + strings.Repeat(" WHEN ? THEN ?", len(args)/2) + " ELSE " + col + " END"
+			set[col] = gorm.Expr(sql, args...)
+		}
+		if err := r.db.Model(&models.SKU{}).Where("id IN ?", ids).Updates(set).Error; err != nil {
 			return err
 		}
 	}

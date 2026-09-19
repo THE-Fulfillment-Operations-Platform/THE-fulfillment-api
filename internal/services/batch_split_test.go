@@ -33,20 +33,23 @@ func newBatchService(db *gorm.DB) *BatchService {
 	return &BatchService{repo: repo, audit: &AuditService{repo: repo}}
 }
 
-// seedSplit creates a material (with an optional quota), a SKU mapped to it, an
-// APPROVED order and `n` single-quantity items on that SKU. Returns the material
-// and the ordered item ids.
+// seedSplit creates a material, a SKU mapped to it, an APPROVED order and `n`
+// single-quantity items on that SKU. `quota` is the wanted products-per-sheet,
+// reached through sizes (sheet quota×1 mm, product 1×1 mm — the quota is
+// derived, never typed); 0 = no sizes, no quota. Returns the material and the
+// ordered item ids.
 func seedSplit(t *testing.T, db *gorm.DB, quota, n int) (*models.Material, []uint) {
 	t.Helper()
 	mat := &models.Material{Code: "MICA", Name: "Mica"}
+	sku := &models.SKU{Code: "MICA-01", Name: "Mica Plate"}
 	if quota > 0 {
-		q := quota
-		mat.ProductsPerUnit = &q
+		one, sheet := 1.0, float64(quota)
+		mat.LengthMM, mat.WidthMM = &sheet, &one
+		sku.LengthMM, sku.WidthMM = &one, &one
 	}
 	if err := db.Create(mat).Error; err != nil {
 		t.Fatalf("seed material: %v", err)
 	}
-	sku := &models.SKU{Code: "MICA-01", Name: "Mica Plate"}
 	if err := db.Create(sku).Error; err != nil {
 		t.Fatalf("seed sku: %v", err)
 	}

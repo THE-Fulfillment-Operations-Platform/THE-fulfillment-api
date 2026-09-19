@@ -1,6 +1,7 @@
 package services
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -23,9 +24,14 @@ import (
 // "pre-production" = no item batched or advanced past PENDING; "pre-shipping" =
 // not packed/handed-off/shipped. Item-level field edits (SKU/qty/design) are
 // blocked once an order is in production unless the actor is OWNER.
+//
+// The OPS column is anyone holding the orders screen's "manage" tick (OPS by
+// default); the ADMIN/OWNER overrides stay tied to the role.
 
-func isInternalManager(role models.Role) bool {
-	return role == models.RoleOwner || role == models.RoleAdmin || role == models.RoleOps
+// canManageOrders: editing and cancelling orders is the orders screen's
+// "manage" tick — by role default OWNER, ADMIN and OPS.
+func canManageOrders(a Actor) bool {
+	return a.Can(models.Manage(models.FeatOrders))
 }
 
 // EditOrderItemInput edits one existing line item. Nil fields are left unchanged.
@@ -180,7 +186,7 @@ func (s *OrderService) updateOrderCore(actor Actor, order *models.Order, in Upda
 // UpdateOrder edits an order as an internal manager (OWNER/ADMIN/OPS). Item edits
 // are blocked once the order is in production, except for OWNER.
 func (s *OrderService) UpdateOrder(actor Actor, id uint, in UpdateOrderInput) (*models.Order, error) {
-	if !isInternalManager(actor.Role) {
+	if !canManageOrders(actor) {
 		return nil, apperr.Forbidden("Bạn không có quyền sửa đơn")
 	}
 	order, err := s.GetOrder(id)
@@ -219,7 +225,7 @@ func (s *OrderService) SellerUpdateOrder(actor Actor, sellerID, id uint, in Upda
 // deleting data. A packed/handed-off/shipped order can only be cancelled by
 // ADMIN/OWNER (the "special permission" case).
 func (s *OrderService) CancelOrder(actor Actor, id uint, reason string) (*models.Order, error) {
-	if !isInternalManager(actor.Role) {
+	if !canManageOrders(actor) {
 		return nil, apperr.Forbidden("Bạn không có quyền huỷ đơn")
 	}
 	reason = strings.TrimSpace(reason)
@@ -284,4 +290,80 @@ func (s *OrderService) DeleteOrder(actor Actor, id uint) error {
 	s.audit.Log(actor, "ORDER_DELETE", "order", &order.ID, "Soft-deleted order "+order.InternalCode,
 		models.JSONMap{"review_status": string(order.ReviewStatus), "seller_status": string(order.SellerStatus)})
 	return nil
+}
+
+// OrderDeleteSkip is one selected order a bulk delete left alone, and why.
+type OrderDeleteSkip struct {
+	ID           uint   `json:"id"`
+	InternalCode string `json:"internal_code,omitempty"`
+	Reason       string `json:"reason"`
+}
+
+// OrderDeleteResult reports what a bulk order delete actually did.
+type OrderDeleteResult struct {
+	DeletedIDs []uint            `json:"deleted_ids"`
+	Skipped    []OrderDeleteSkip `json:"skipped"`
+}
+
+// maxOrderDeleteIDs bounds one bulk delete. The screen sends at most one page
+// (200 rows), so this only stops a runaway client.
+const maxOrderDeleteIDs = 500
+
+// DeleteOrders soft-deletes the orders ticked on the orders screen. Unlike
+// DeleteOrder, an order already in production is skipped for EVERY role, OWNER
+// included: deleting the order does not take its items out of their batches —
+// they stay counted there and still scan at QC — and a "select all" makes that
+// far too easy to do to a whole page by accident. Those orders are cancelled
+// instead, or deleted one at a time from the order detail, where OWNER still can.
+func (s *OrderService) DeleteOrders(actor Actor, ids []uint) (*OrderDeleteResult, error) {
+	if actor.Role != models.RoleOwner && actor.Role != models.RoleAdmin {
+		return nil, apperr.Forbidden("Chỉ Admin/Owner được xoá đơn")
+	}
+	clean := dedupeIDs(ids)
+	if len(clean) == 0 {
+		return nil, apperr.BadRequest("Chưa chọn đơn nào để xoá")
+	}
+	if len(clean) > maxOrderDeleteIDs {
+		return nil, apperr.BadRequest(fmt.Sprintf("Chỉ xoá tối đa %d đơn mỗi lần", maxOrderDeleteIDs))
+	}
+
+	found, err := s.repo.Order.FindByIDsForDelete(clean)
+	if err != nil {
+		return nil, apperr.Internal("lookup failed").Wrap(err)
+	}
+	byID := make(map[uint]*models.Order, len(found))
+	for i := range found {
+		byID[found[i].ID] = &found[i]
+	}
+
+	res := &OrderDeleteResult{DeletedIDs: []uint{}, Skipped: []OrderDeleteSkip{}}
+	deletable := make([]uint, 0, len(clean))
+	for _, id := range clean {
+		o := byID[id]
+		switch {
+		case o == nil:
+			res.Skipped = append(res.Skipped, OrderDeleteSkip{ID: id, Reason: "không còn tồn tại"})
+		case orderInProduction(o):
+			res.Skipped = append(res.Skipped, OrderDeleteSkip{
+				ID: id, InternalCode: o.InternalCode, Reason: "đã vào sản xuất",
+			})
+		default:
+			deletable = append(deletable, id)
+		}
+	}
+
+	if len(deletable) > 0 {
+		if err := s.repo.Order.SoftDeleteMany(deletable); err != nil {
+			return nil, apperr.Internal("could not delete orders").Wrap(err)
+		}
+		res.DeletedIDs = deletable
+	}
+	// One entry per order, same as the single delete: the audit trail is how
+	// someone finds out where a given order went (and restores it).
+	for _, id := range res.DeletedIDs {
+		o := byID[id]
+		s.audit.Log(actor, "ORDER_DELETE", "order", &o.ID, "Soft-deleted order "+o.InternalCode,
+			models.JSONMap{"review_status": string(o.ReviewStatus), "seller_status": string(o.SellerStatus), "bulk": true})
+	}
+	return res, nil
 }

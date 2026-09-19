@@ -269,7 +269,7 @@ func (s *OrderService) TrackingImportTemplateXLSX() ([]byte, string, error) {
 // operator had filtered on; the preview then also reports which orders of that
 // range the file fails to cover (the "file ít hơn hệ thống" alert).
 func (s *OrderService) PreviewTrackingImport(actor Actor, rows []TrackingImportRow, scopeFrom, scopeTo *time.Time) (*TrackingImportPreview, error) {
-	if !canEditTracking(actor.Role) {
+	if !canEditTracking(actor) {
 		return nil, apperr.Forbidden("Bạn không có quyền cập nhật tracking")
 	}
 	if len(rows) > MaxTrackingImportRows {
@@ -531,7 +531,7 @@ func refInScope(ref repositories.OrderCodeRef, from, to *time.Time) bool {
 // released on the provider, new parcel registered. Failures are collected, not
 // fatal — the rest of the batch still lands.
 func (s *OrderService) CommitTrackingImport(actor Actor, in TrackingImportCommitInput) (*TrackingImportCommitResult, error) {
-	if !canEditTracking(actor.Role) {
+	if !canEditTracking(actor) {
 		return nil, apperr.Forbidden("Bạn không có quyền cập nhật tracking")
 	}
 	if len(in.Assignments) > MaxTrackingCommitBatch {

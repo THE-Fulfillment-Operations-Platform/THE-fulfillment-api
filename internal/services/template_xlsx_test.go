@@ -67,14 +67,21 @@ func TestMasterTemplateXLSX_RoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 4 {
-		t.Fatalf("want 4 sample rows, got %d", len(rows))
+	if len(rows) != 5 {
+		t.Fatalf("want 5 sample rows, got %d", len(rows))
 	}
-	if rows[0].SKU != "BRA-1.6-KEP" || rows[0].Material != "Mica trong 3 ly" {
+	if rows[0].SKU != "HOP-NHUA-BE" || rows[0].Material != "Mica trong 3 ly" ||
+		rows[0].ParentSKU != "HOP-NHUA" || rows[0].Length != "80" || rows[0].Width != "60" {
 		t.Fatalf("row0 not split cleanly: %+v", rows[0])
 	}
+	// The sample's sizes must read back as millimetres, not trip the parser.
+	for _, r := range rows {
+		if _, _, msg := parseRowDims(r); msg != "" {
+			t.Fatalf("sample row %d has an unreadable size: %s", r.RowNumber, msg)
+		}
+	}
 	// The combo sample row must survive the round-trip and split into 2 materials.
-	combo := rows[3]
+	combo := rows[4]
 	if combo.SKU != "COMBO-A2-GAI" {
 		t.Fatalf("combo row not split cleanly: %+v", combo)
 	}

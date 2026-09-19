@@ -50,6 +50,7 @@ func (s *AuthService) Login(email, password string, ip string) (*LoginResult, er
 	s.audit.Log(Actor{ID: user.ID, Email: user.Email, Role: user.Role, IP: ip},
 		"AUTH_LOGIN", "user", &user.ID, "User logged in", nil)
 
+	user.FillEffectivePermissions()
 	return &LoginResult{Token: token, ExpiresAt: expiresAt, User: user}, nil
 }
 
@@ -62,5 +63,6 @@ func (s *AuthService) Me(userID uint) (*models.User, error) {
 		}
 		return nil, apperr.Internal("lookup failed").Wrap(err)
 	}
+	user.FillEffectivePermissions()
 	return user, nil
 }

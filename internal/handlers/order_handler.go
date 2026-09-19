@@ -123,6 +123,25 @@ func (h *Handlers) DeleteOrder(c *gin.Context) {
 	response.OK(c, gin.H{"deleted": true, "id": id})
 }
 
+// BulkDeleteOrders soft-deletes many orders in one request (ADMIN/OWNER only).
+// Orders already in production come back in `skipped` with a reason instead of
+// being deleted.
+// POST /api/orders/bulk-delete  { "ids": [1,2,3] }
+func (h *Handlers) BulkDeleteOrders(c *gin.Context) {
+	var in struct {
+		IDs []uint `json:"ids" binding:"required,min=1"`
+	}
+	if !bindJSON(c, &in) {
+		return
+	}
+	res, err := h.svc.Order.DeleteOrders(actor(c), in.IDs)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, res)
+}
+
 // UpdateOrderTracking sets tracking number/status/carrier/url on an order.
 // PATCH /api/orders/:id/tracking
 func (h *Handlers) UpdateOrderTracking(c *gin.Context) {

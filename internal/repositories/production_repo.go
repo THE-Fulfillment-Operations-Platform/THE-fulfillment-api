@@ -45,8 +45,11 @@ type BatchRepository struct{ db *gorm.DB }
 // cancelled, and the part was not scrapped after a QC fail. A scrapped part stays
 // in its batch as the record of what was actually produced, but it must never
 // hold a batch back — the batch that made a defective piece still finishes.
+//
+// The order item's SKU rides along in the same statement: its size (with the
+// material's) is what the batch's sheet count is derived from.
 func activeBatchItems(db *gorm.DB) *gorm.DB {
-	return db.Joins("OrderItem").
+	return db.Joins("OrderItem").Joins("OrderItem.SKU").
 		Where(`"OrderItem".cancellation_status NOT IN ?`, []models.CancellationStatus{models.CancellationSeller, models.CancellationApproved}).
 		Where("batch_items.scrapped_at IS NULL")
 }
@@ -92,6 +95,10 @@ func (r *BatchRepository) FindByID(id uint) (*models.Batch, error) {
 	// tiết thì chưa, nên batch vừa bị huỷ mở ra không giải thích được gì.
 	if scrapped, err := r.ScrappedCounts([]uint{b.ID}); err == nil {
 		b.ScrappedCount = scrapped[b.ID]
+	}
+	b.FillMaterialUnits(&b.Material)
+	for i := range b.ChildBatches {
+		b.ChildBatches[i].FillMaterialUnits(&b.Material)
 	}
 	return &b, nil
 }
@@ -251,6 +258,7 @@ func (r *BatchRepository) List(f BatchFilter) ([]models.Batch, int64, error) {
 	}
 	for i := range rows {
 		rows[i].ScrappedCount = scrapped[rows[i].ID]
+		rows[i].FillMaterialUnits(&rows[i].Material)
 	}
 	return rows, total, nil
 }
