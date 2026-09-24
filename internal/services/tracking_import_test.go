@@ -131,16 +131,16 @@ func TestTrackingImport_PreviewMatchesAndIssues(t *testing.T) {
 	f := seedImportOrder(t, db, "100006", "SO-F", "", &yesterday)
 
 	rows := []TrackingImportRow{
-		{Row: 1, OrderKey: "SO-A", TrackingNumber: "TN-A"},     // store id → but conflicts with row 8
-		{Row: 2, OrderKey: "100002", TrackingNumber: "TN-B"},   // internal code wins over the DUP store id
-		{Row: 3, OrderKey: "DUP", TrackingNumber: "TN-C"},      // ambiguous store id
-		{Row: 4, OrderKey: "SO-D", TrackingNumber: "TN-D"},     // overwrite OLD1
-		{Row: 5, OrderKey: "SO-E", TrackingNumber: "SAME"},     // unchanged
-		{Row: 6, OrderKey: "NOPE", TrackingNumber: "TN-X"},     // not found
-		{Row: 7, OrderKey: "SO-F", TrackingNumber: "OLD1"},     // number already on order D
-		{Row: 8, OrderKey: "100001", TrackingNumber: "TN-A2"},  // second, different number for order A
-		{Row: 9, OrderKey: "", TrackingNumber: "TN-EMPTY"},     // no order key
-		{Row: 10, OrderKey: "SO-A", TrackingNumber: ""},        // no tracking number
+		{Row: 1, OrderKey: "SO-A", TrackingNumber: "TN-A"},    // store id → but conflicts with row 8
+		{Row: 2, OrderKey: "100002", TrackingNumber: "TN-B"},  // internal code wins over the DUP store id
+		{Row: 3, OrderKey: "DUP", TrackingNumber: "TN-C"},     // ambiguous store id
+		{Row: 4, OrderKey: "SO-D", TrackingNumber: "TN-D"},    // overwrite OLD1
+		{Row: 5, OrderKey: "SO-E", TrackingNumber: "SAME"},    // unchanged
+		{Row: 6, OrderKey: "NOPE", TrackingNumber: "TN-X"},    // not found
+		{Row: 7, OrderKey: "SO-F", TrackingNumber: "OLD1"},    // number already on order D
+		{Row: 8, OrderKey: "100001", TrackingNumber: "TN-A2"}, // second, different number for order A
+		{Row: 9, OrderKey: "", TrackingNumber: "TN-EMPTY"},    // no order key
+		{Row: 10, OrderKey: "SO-A", TrackingNumber: ""},       // no tracking number
 	}
 
 	preview, err := svc.PreviewTrackingImport(Actor{ID: 1, Role: models.RoleCS}, rows, nil, nil)

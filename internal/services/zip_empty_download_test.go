@@ -29,7 +29,8 @@ func TestStreamBatchAssetsZip_NothingDownloadedWritesNoBytes(t *testing.T) {
 		Update("design_url", brokenDesignURL).Error; err != nil {
 		t.Fatalf("set design urls: %v", err)
 	}
-	batch, _, err := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batchAll, _, err := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batch := firstBatch(t, batchAll, err)
 	if err != nil {
 		t.Fatalf("create batch: %v", err)
 	}
@@ -59,7 +60,8 @@ func TestStreamBatchAssetsZip_ReportsEveryFailedLink(t *testing.T) {
 		Update("design_url", folder).Error; err != nil {
 		t.Fatalf("set design urls: %v", err)
 	}
-	batch, _, err := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batchAll, _, err := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batch := firstBatch(t, batchAll, err)
 	if err != nil {
 		t.Fatalf("create batch: %v", err)
 	}

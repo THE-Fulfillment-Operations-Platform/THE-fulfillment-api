@@ -29,9 +29,8 @@ func seedAutoItem(t *testing.T, db *gorm.DB, orderID uint, sku *models.SKU, code
 }
 
 // TestAutoCreateBatches_GroupsByMaterialAndQuota: one click batches the whole
-// pool — material A (quota 20, 25 products) becomes a parent with 2 children,
-// material B (no quota, 5 products) becomes one flat batch. Nobody picked a row
-// or typed a batch name.
+// pool — material A (quota 20, 25 products) becomes 2 flat batches, material B
+// (no quota, 5 products) becomes one. Nobody picked a row or typed a batch name.
 func TestAutoCreateBatches_GroupsByMaterialAndQuota(t *testing.T) {
 	db := newSplitDB(t)
 	svc := newBatchService(db)
@@ -71,8 +70,8 @@ func TestAutoCreateBatches_GroupsByMaterialAndQuota(t *testing.T) {
 	if !ok {
 		t.Fatalf("material A missing from result: %+v", res.Created)
 	}
-	if !a.IsParent || a.ChildCount != 2 || len(a.BatchCodes) != 2 {
-		t.Fatalf("material A: want parent with 2 children, got %+v", a)
+	if len(a.BatchCodes) != 2 {
+		t.Fatalf("material A: want 2 flat batches, got %+v", a)
 	}
 	if a.ItemCount != 25 {
 		t.Fatalf("material A item count: got %d, want 25", a.ItemCount)
@@ -81,7 +80,7 @@ func TestAutoCreateBatches_GroupsByMaterialAndQuota(t *testing.T) {
 	if !ok {
 		t.Fatalf("material B missing from result: %+v", res.Created)
 	}
-	if b.IsParent || len(b.BatchCodes) != 1 || b.ItemCount != 5 {
+	if len(b.BatchCodes) != 1 || b.ItemCount != 5 {
 		t.Fatalf("material B: want one flat batch of 5, got %+v", b)
 	}
 	// Codes are system-generated and unique across everything created.

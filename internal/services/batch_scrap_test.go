@@ -63,7 +63,9 @@ func TestScrapBatch_WritesOffProducedPartsAndClosesBatch(t *testing.T) {
 	prod := Actor{ID: 3, Role: models.RoleProduction}
 	_, ids := seedSplit(t, db, 0, 2)
 
-	batch, _, err := svc.Create(designer, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batchAll, _, err := svc.Create(designer, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+
+	batch := firstBatch(t, batchAll, err)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -135,7 +137,8 @@ func TestScrapBatch_WritesOffProducedPartsAndClosesBatch(t *testing.T) {
 	}
 
 	// Và đây là điểm cuối: hàng làm lại được ở batch MỚI.
-	again, skipped, err := svc.Create(designer, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	againAll, skipped, err := svc.Create(designer, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	again := firstBatch(t, againAll, err)
 	if err != nil {
 		t.Fatalf("gom batch lại sau khi huỷ: %v", err)
 	}
@@ -157,7 +160,8 @@ func TestScrapBatch_RequiresAReason(t *testing.T) {
 	db := newScrapDB(t)
 	svc := newBatchService(db)
 	_, ids := seedSplit(t, db, 0, 1)
-	batch, _, _ := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batchAll, _, batchErr := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batch := firstBatch(t, batchAll, batchErr)
 	advanceBatch(t, db, batch.ID, models.StatusCut)
 	actor := Actor{ID: 3, Role: models.RoleProduction}
 
@@ -179,8 +183,8 @@ func TestScrapBatch_SendsUntouchedBatchToDelete(t *testing.T) {
 	db := newScrapDB(t)
 	svc := newBatchService(db)
 	_, ids := seedSplit(t, db, 0, 2)
-	batch, _, _ := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
-
+	batchAll, _, batchErr := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batch := firstBatch(t, batchAll, batchErr)
 	_, err := svc.Scrap(Actor{ID: 3, Role: models.RoleProduction}, batch.ID, ScrapBatchInput{Reason: "gom nhầm"})
 	if err == nil {
 		t.Fatal("batch chưa sản xuất phải được chỉ sang lệnh xoá")
@@ -203,8 +207,8 @@ func TestScrapBatch_PendingBatchWithAScrappedPartIsNotStuck(t *testing.T) {
 	svc := newBatchService(db)
 	repo := repositories.New(db)
 	_, ids := seedSplit(t, db, 0, 2)
-	batch, _, _ := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
-
+	batchAll, _, batchErr := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batch := firstBatch(t, batchAll, batchErr)
 	var first models.BatchItem
 	db.Where("batch_id = ?", batch.ID).Order("id asc").First(&first)
 	if _, err := repo.Batch.ScrapBatchItems([]uint{first.ID}, "QC fail", nil, time.Now()); err != nil {
@@ -229,7 +233,8 @@ func TestScrapBatch_BlockedOnceOrderStartedPacking(t *testing.T) {
 	db := newScrapDB(t)
 	svc := newBatchService(db)
 	_, ids := seedSplit(t, db, 0, 2)
-	batch, _, _ := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batchAll, _, batchErr := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batch := firstBatch(t, batchAll, batchErr)
 	advanceBatch(t, db, batch.ID, models.StatusCut)
 
 	var order models.Order
@@ -256,7 +261,8 @@ func TestScrapBatch_DesignRouteSendsItemsBackToDesign(t *testing.T) {
 	db := newScrapDB(t)
 	svc := newBatchService(db)
 	_, ids := seedSplit(t, db, 0, 2)
-	batch, _, _ := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batchAll, _, batchErr := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batch := firstBatch(t, batchAll, batchErr)
 	advanceBatch(t, db, batch.ID, models.StatusPrinted)
 
 	res, err := svc.Scrap(Actor{ID: 5, Role: models.RoleQC}, batch.ID,
@@ -278,85 +284,6 @@ func TestScrapBatch_DesignRouteSendsItemsBackToDesign(t *testing.T) {
 	db.First(&note)
 	if note.OwnerRole != models.RoleDesigner {
 		t.Fatalf("ghi chú phải giao cho designer, got %s", note.OwnerRole)
-	}
-}
-
-// TestScrapBatch_ChildAloneThenParentCloses: mỗi batch con là MỘT tấm vật lý, và
-// lỗi xảy ra theo tấm — nên huỷ được từng con. Mẹ chỉ đóng khi con cuối cùng
-// đóng, và trong lúc đó trạng thái mẹ tính trên các con CÒN MỞ (nếu vẫn tính con
-// đã huỷ thì cụm đứng mãi ở trạng thái của tấm chết đó).
-func TestScrapBatch_ChildAloneThenParentCloses(t *testing.T) {
-	db := newScrapDB(t)
-	svc := newBatchService(db)
-	prod := Actor{ID: 3, Role: models.RoleProduction}
-	_, ids := seedSplit(t, db, 2, 4) // quota 2, 4 sản phẩm → mẹ + 2 con
-
-	parent, _, err := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if !parent.IsParent {
-		t.Fatal("want a split parent")
-	}
-	var children []models.Batch
-	db.Where("parent_batch_id = ?", parent.ID).Order("sequence asc").Find(&children)
-	if len(children) != 2 {
-		t.Fatalf("want 2 children, got %d", len(children))
-	}
-	for _, c := range children {
-		advanceBatch(t, db, c.ID, models.StatusCut)
-	}
-	db.Model(&models.Batch{}).Where("id = ?", parent.ID).Update("status", models.StatusCut)
-
-	if _, err := svc.Scrap(prod, children[0].ID, ScrapBatchInput{Reason: "tấm 1 cắt hỏng"}); err != nil {
-		t.Fatalf("huỷ batch con: %v", err)
-	}
-	if loadBatch(t, db, children[0].ID).ClosedAt == nil {
-		t.Fatal("con vừa huỷ phải đóng")
-	}
-	if p := loadBatch(t, db, parent.ID); p.ClosedAt != nil {
-		t.Fatal("mẹ chưa được đóng khi vẫn còn con đang mở")
-	}
-	// Con còn lại vẫn sản xuất bình thường.
-	if _, err := svc.Scrap(prod, children[1].ID, ScrapBatchInput{Reason: "tấm 2 cắt hỏng"}); err != nil {
-		t.Fatalf("huỷ batch con thứ hai: %v", err)
-	}
-	if p := loadBatch(t, db, parent.ID); p.ClosedAt == nil {
-		t.Fatal("mọi con đã đóng thì mẹ phải đóng theo")
-	}
-}
-
-// TestScrapBatch_ParentScrapsEveryOpenChild: huỷ ở cấp cụm là huỷ mọi tấm còn mở.
-func TestScrapBatch_ParentScrapsEveryOpenChild(t *testing.T) {
-	db := newScrapDB(t)
-	svc := newBatchService(db)
-	_, ids := seedSplit(t, db, 2, 4)
-	parent, _, _ := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
-	var children []models.Batch
-	db.Where("parent_batch_id = ?", parent.ID).Order("sequence asc").Find(&children)
-	for _, c := range children {
-		advanceBatch(t, db, c.ID, models.StatusCut)
-	}
-
-	res, err := svc.Scrap(Actor{ID: 3, Role: models.RoleProduction}, parent.ID, ScrapBatchInput{Reason: "hỏng cả cụm"})
-	if err != nil {
-		t.Fatalf("huỷ cả cụm: %v", err)
-	}
-	if res.ScrappedParts != 4 {
-		t.Fatalf("scrapped parts = %d, want 4", res.ScrappedParts)
-	}
-	for _, c := range children {
-		if loadBatch(t, db, c.ID).ClosedAt == nil {
-			t.Fatalf("con %s phải đóng", c.Code)
-		}
-	}
-	if loadBatch(t, db, parent.ID).ClosedAt == nil {
-		t.Fatal("mẹ phải đóng khi mọi con đã đóng")
-	}
-	var live int64
-	db.Model(&models.BatchItem{}).Where("scrapped_at IS NULL").Count(&live)
-	if live != 0 {
-		t.Fatalf("còn %d phần chưa bị huỷ", live)
 	}
 }
 
@@ -402,7 +329,8 @@ func TestScrapBatch_ClosedBatchRefusesStatusAndLinkEdits(t *testing.T) {
 	db := newScrapDB(t)
 	svc := newBatchService(db)
 	_, ids := seedSplit(t, db, 0, 1)
-	batch, _, _ := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batchAll, _, batchErr := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batch := firstBatch(t, batchAll, batchErr)
 	advanceBatch(t, db, batch.ID, models.StatusPrinted)
 	if _, err := svc.Scrap(Actor{ID: 3, Role: models.RoleProduction}, batch.ID, ScrapBatchInput{Reason: "in nhoè"}); err != nil {
 		t.Fatalf("scrap: %v", err)
@@ -425,8 +353,8 @@ func TestSetBatchLink_LeavesScrappedPartsAlone(t *testing.T) {
 	svc := newBatchService(db)
 	repo := repositories.New(db)
 	_, ids := seedSplit(t, db, 0, 2)
-	batch, _, _ := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
-
+	batchAll, _, batchErr := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batch := firstBatch(t, batchAll, batchErr)
 	var scrappedPart models.BatchItem
 	db.Where("batch_id = ?", batch.ID).Order("id asc").First(&scrappedPart)
 	if _, err := repo.Batch.ScrapBatchItems([]uint{scrappedPart.ID}, "QC fail", nil, time.Now()); err != nil {
@@ -457,7 +385,8 @@ func TestScrapBatch_ExportStillListsWhatWasProduced(t *testing.T) {
 	db := newScrapDB(t)
 	svc := newBatchService(db)
 	_, ids := seedSplit(t, db, 0, 2)
-	batch, _, _ := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batchAll, _, batchErr := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batch := firstBatch(t, batchAll, batchErr)
 	advanceBatch(t, db, batch.ID, models.StatusCut)
 	if _, err := svc.Scrap(Actor{ID: 3, Role: models.RoleProduction}, batch.ID, ScrapBatchInput{Reason: "cắt hỏng"}); err != nil {
 		t.Fatalf("scrap: %v", err)
@@ -526,7 +455,8 @@ func TestScrapBatch_UnstampsProductionLinks(t *testing.T) {
 	svc := newBatchService(db)
 	designer := Actor{ID: 1, Role: models.RoleDesigner}
 	_, ids := seedSplit(t, db, 0, 2)
-	batch, _, _ := svc.Create(designer, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batchAll, _, batchErr := svc.Create(designer, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batch := firstBatch(t, batchAll, batchErr)
 	if _, err := svc.SetBatchLink(designer, batch.ID, SetBatchLinkInput{
 		Kind: "PRINT", URL: "https://files.example.com/print-1.pdf",
 	}); err != nil {
@@ -558,7 +488,8 @@ func TestQCFail_UnstampsOnlyTheFailedItem(t *testing.T) {
 	qc := &QCService{repo: repo, audit: &AuditService{repo: repo}}
 	designer := Actor{ID: 1, Role: models.RoleDesigner}
 	_, ids := seedSplit(t, db, 0, 2)
-	batch, _, _ := svc.Create(designer, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batchAll, _, batchErr := svc.Create(designer, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batch := firstBatch(t, batchAll, batchErr)
 	if _, err := svc.SetBatchLink(designer, batch.ID, SetBatchLinkInput{
 		Kind: "PRINT", URL: "https://files.example.com/print-1.pdf",
 	}); err != nil {

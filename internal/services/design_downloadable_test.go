@@ -77,9 +77,9 @@ func TestDesignDownloadableItems_Scoping(t *testing.T) {
 	db := newDownloadableDB(t)
 	svc := newOrderService(db)
 
-	seedDownloadable(t, db, "100001_1/1", "SKU-A", models.DesignPending, "https://x/a.png", true) // ✓
-	seedDownloadable(t, db, "100002_1/1", "SKU-A", models.DesignPending, "", true)                // ✗ no file
-	seedDownloadable(t, db, "100003_1/1", "SKU-B", models.DesignReady, "https://x/c.png", true)   // ✗ not needing design
+	seedDownloadable(t, db, "100001_1/1", "SKU-A", models.DesignPending, "https://x/a.png", true)  // ✓
+	seedDownloadable(t, db, "100002_1/1", "SKU-A", models.DesignPending, "", true)                 // ✗ no file
+	seedDownloadable(t, db, "100003_1/1", "SKU-B", models.DesignReady, "https://x/c.png", true)    // ✗ not needing design
 	seedDownloadable(t, db, "100004_1/1", "SKU-B", models.DesignPending, "https://x/d.png", false) // ✗ not approved
 
 	got := downloadableCodes(t, svc, repositories.ItemFilter{})

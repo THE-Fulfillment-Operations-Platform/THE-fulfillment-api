@@ -52,9 +52,6 @@ func normalizeProductionURL(label, raw string) (string, error) {
 // its files are history. A wrong file after that point goes through the
 // scrap/rework flow, never through rewriting the links.
 func batchLinkLockedGuard(b *models.Batch) error {
-	if b.IsParent {
-		return apperr.Unprocessable("Batch mẹ không chứa item sản xuất. Hãy cập nhật link trên từng batch con.")
-	}
 	if b.ClosedAt != nil {
 		return apperr.Unprocessable("Batch " + b.Code + " đã đóng — không sửa link sản xuất nữa.")
 	}

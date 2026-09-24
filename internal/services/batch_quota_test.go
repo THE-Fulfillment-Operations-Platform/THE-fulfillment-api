@@ -105,11 +105,11 @@ func (f *quotaFixture) add(t *testing.T, skuIdx, n, qty int) []uint {
 	return ids
 }
 
-// groupSizes tạo batch từ mọi item của NVL và trả về số item của từng nhóm
-// (batch phẳng = một nhóm; batch mẹ = các con theo thứ tự).
+// groupSizes tạo batch từ mọi item của NVL và trả về số item của từng batch
+// (mỗi tấm một batch phẳng, theo thứ tự tạo).
 func (f *quotaFixture) groupSizes(t *testing.T, ids []uint) []int {
 	t.Helper()
-	batch, skipped, err := f.svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{
+	batches, skipped, err := f.svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{
 		MaterialID: f.material.ID, OrderItemIDs: ids,
 	})
 	if err != nil {
@@ -118,12 +118,9 @@ func (f *quotaFixture) groupSizes(t *testing.T, ids []uint) []int {
 	if len(skipped) != 0 {
 		t.Fatalf("want nothing skipped, got %v", skipped)
 	}
-	if !batch.IsParent {
-		return []int{len(batch.Items)}
-	}
-	sizes := make([]int, 0, len(batch.ChildBatches))
-	for _, c := range batch.ChildBatches {
-		sizes = append(sizes, len(c.Items))
+	sizes := make([]int, 0, len(batches))
+	for _, b := range batches {
+		sizes = append(sizes, len(b.Items))
 	}
 	return sizes
 }
@@ -305,12 +302,10 @@ func TestBatchQuota_DeclaredQuotaBeatsEstimate(t *testing.T) {
 		Update("products_per_unit", 1).Error; err != nil {
 		t.Fatalf("declare quota: %v", err)
 	}
-	flat, _, err := g.svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{
+	flats, _, err := g.svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{
 		MaterialID: g.material.ID, OrderItemIDs: g.add(t, 0, 1, 3),
 	})
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
+	flat := firstBatch(t, flats, err)
 	repo := repositories.New(g.db)
 	// The declared quota costs the detail payload exactly ONE extra statement
 	// (the pair lookup), on top of TestFindByID_RoundTripBudget's five.
@@ -618,38 +613,37 @@ func TestProductionQuota_GridAndDeclared(t *testing.T) {
 }
 
 // TestBatchMaterialUnits: the sheet count a batch reports comes from its parts'
-// quota (declared, else size estimate) — a child says ⌈Σ qty/quota⌉, a parent the
-// sum of its children, and a batch whose parts have no quota says nothing
-// rather than guess. It rides on the associations the detail/list queries already load, so
+// quota (declared, else size estimate): ⌈Σ qty/quota⌉, and a batch whose parts
+// have no quota says nothing rather than guess. It rides on the associations the detail/list queries already load, so
 // it costs no extra round trip (TestFindByID_RoundTripBudget pins that).
 func TestBatchMaterialUnits(t *testing.T) {
 	f := newQuotaFixture(t, 4)
-	ids := f.add(t, 0, 5, 1) // 5 sp, 4/tấm → mẹ + 2 con (4 + 1)
-	parent, _, err := f.svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{
+	ids := f.add(t, 0, 5, 1) // 5 sp, 4/tấm → hai batch phẳng (4 + 1)
+	batches, _, err := f.svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{
 		MaterialID: f.material.ID, OrderItemIDs: ids,
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
+	if len(batches) != 2 {
+		t.Fatalf("batches = %d, want 2", len(batches))
+	}
 	repo := repositories.New(f.db)
-	got, err := repo.Batch.FindByID(parent.ID)
-	if err != nil {
-		t.Fatalf("find parent: %v", err)
-	}
-	if got.MaterialUnits == nil || *got.MaterialUnits != 2 {
-		t.Fatalf("parent material_units = %v, want 2 (two children)", got.MaterialUnits)
-	}
-	if len(got.ChildBatches) != 2 {
-		t.Fatalf("children = %d", len(got.ChildBatches))
-	}
-	for _, c := range got.ChildBatches {
-		if c.MaterialUnits == nil || *c.MaterialUnits != 1 {
-			t.Fatalf("child %s material_units = %v, want 1 (4/4 and 1/4 both round up to one sheet)", c.Code, c.MaterialUnits)
+	for _, b := range batches {
+		got, err := repo.Batch.FindByID(b.ID)
+		if err != nil {
+			t.Fatalf("find %s: %v", b.Code, err)
+		}
+		if got.MaterialUnits == nil || *got.MaterialUnits != 1 {
+			t.Fatalf("%s material_units = %v, want 1 (4/4 and 1/4 both round up to one sheet)", b.Code, got.MaterialUnits)
 		}
 	}
 	rows, _, err := repo.Batch.List(repositories.BatchFilter{Page: repositories.Page{Page: 1, PageSize: 50}})
 	if err != nil {
 		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("list should show both sheets, got %d", len(rows))
 	}
 	for _, b := range rows {
 		if b.MaterialUnits == nil {
@@ -659,12 +653,10 @@ func TestBatchMaterialUnits(t *testing.T) {
 
 	// No size → no quota → no number.
 	g := newQuotaFixture(t, 0)
-	flat, _, err := g.svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{
+	flats, _, err := g.svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{
 		MaterialID: g.material.ID, OrderItemIDs: g.add(t, 0, 3, 1),
 	})
-	if err != nil {
-		t.Fatalf("create flat: %v", err)
-	}
+	flat := firstBatch(t, flats, err)
 	if gotFlat, _ := repositories.New(g.db).Batch.FindByID(flat.ID); gotFlat.MaterialUnits != nil {
 		t.Fatalf("flat batch without quota: material_units = %v, want nil", *gotFlat.MaterialUnits)
 	}

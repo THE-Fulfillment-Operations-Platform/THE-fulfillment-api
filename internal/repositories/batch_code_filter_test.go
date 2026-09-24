@@ -9,8 +9,8 @@ import (
 )
 
 // seedBatchWithOrder creates one batch producing one order (one line) and
-// returns the batch id. parentID != nil makes it a child batch.
-func seedBatchWithOrder(t *testing.T, db *gorm.DB, code string, parentID *uint) uint {
+// returns the batch id.
+func seedBatchWithOrder(t *testing.T, db *gorm.DB, code string) uint {
 	t.Helper()
 	order := &models.Order{
 		InternalCode: code, StoreOrderID: "SO-" + code, SellerID: 1,
@@ -26,7 +26,7 @@ func seedBatchWithOrder(t *testing.T, db *gorm.DB, code string, parentID *uint) 
 	if err := db.Create(item).Error; err != nil {
 		t.Fatalf("seed item %s: %v", code, err)
 	}
-	batch := &models.Batch{Code: "#B-" + code, MaterialID: 1, Status: models.StatusPending, ParentBatchID: parentID}
+	batch := &models.Batch{Code: "#B-" + code, MaterialID: 1, Status: models.StatusPending}
 	if err := db.Create(batch).Error; err != nil {
 		t.Fatalf("seed batch %s: %v", code, err)
 	}
@@ -40,18 +40,13 @@ func seedBatchWithOrder(t *testing.T, db *gorm.DB, code string, parentID *uint) 
 
 // TestBatchListCodeFilter covers the reverse lookup on the batch list: scan or
 // paste an order's internal code (or one item's tem code) and get exactly the
-// batch(es) producing that order — including child batches, which the default
-// list hides.
+// batch producing that order.
 func TestBatchListCodeFilter(t *testing.T) {
 	db := newQueueTestDB(t)
 	repo := &BatchRepository{db: db}
 
-	flat := seedBatchWithOrder(t, db, "100001", nil)
-	parent := &models.Batch{Code: "#B-PARENT", MaterialID: 1, Status: models.StatusPending}
-	if err := db.Create(parent).Error; err != nil {
-		t.Fatalf("seed parent: %v", err)
-	}
-	child := seedBatchWithOrder(t, db, "100002", &parent.ID)
+	first := seedBatchWithOrder(t, db, "100001")
+	second := seedBatchWithOrder(t, db, "100002")
 
 	page := Page{Page: 1, PageSize: 20}
 
@@ -68,17 +63,14 @@ func TestBatchListCodeFilter(t *testing.T) {
 		return ids
 	}
 
-	// Order internal code and item tem code both name the flat batch, and only it.
+	// Order internal code and item tem code both name the first batch, and only it.
 	for _, code := range []string{"100001", "100001_1/1", " 100001 "} {
-		if got := listIDs(BatchFilter{Page: page, Code: code}); len(got) != 1 || got[0] != flat {
-			t.Errorf("Code=%q: got batch ids %v, want [%d]", code, got, flat)
+		if got := listIDs(BatchFilter{Page: page, Code: code}); len(got) != 1 || got[0] != first {
+			t.Errorf("Code=%q: got batch ids %v, want [%d]", code, got, first)
 		}
 	}
-
-	// An order produced in a child batch must surface that child even though the
-	// default list hides children.
-	if got := listIDs(BatchFilter{Page: page, Code: "100002"}); len(got) != 1 || got[0] != child {
-		t.Errorf("Code=100002: got batch ids %v, want child [%d]", got, child)
+	if got := listIDs(BatchFilter{Page: page, Code: "100002"}); len(got) != 1 || got[0] != second {
+		t.Errorf("Code=100002: got batch ids %v, want [%d]", got, second)
 	}
 
 	// Unknown code: no batches, not the unfiltered list.
@@ -86,12 +78,9 @@ func TestBatchListCodeFilter(t *testing.T) {
 		t.Errorf("Code=999999: got batch ids %v, want none", got)
 	}
 
-	// No code: default child-hiding still applies (flat + parent, no child).
-	got := listIDs(BatchFilter{Page: page})
-	for _, id := range got {
-		if id == child {
-			t.Errorf("default list leaked child batch %d: %v", child, got)
-		}
+	// No code: every batch.
+	if got := listIDs(BatchFilter{Page: page}); len(got) != 2 {
+		t.Errorf("default list: got %v, want both batches", got)
 	}
 }
 
@@ -105,7 +94,7 @@ func TestBatchDetailPreloadsSeller(t *testing.T) {
 	if err := db.Create(&models.Seller{Code: "SEL-1", Name: "Shop ABC", Status: "active"}).Error; err != nil {
 		t.Fatalf("seed seller: %v", err)
 	}
-	batchID := seedBatchWithOrder(t, db, "100010", nil)
+	batchID := seedBatchWithOrder(t, db, "100010")
 
 	b, err := repo.FindByID(batchID)
 	if err != nil {

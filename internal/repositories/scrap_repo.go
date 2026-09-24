@@ -202,54 +202,6 @@ func (r *BatchRepository) FindLiteManyForUpdate(ids []uint) ([]models.Batch, err
 	return rows, err
 }
 
-// ChildBatchState là trạng thái một batch con dưới góc nhìn của batch mẹ: nó
-// đang ở đâu, và nó đã đóng chưa. Con đã đóng không kéo mẹ lại nữa (mẹ chờ mãi
-// một tấm không bao giờ được làm), nhưng vẫn phải đếm được để biết khi nào MỌI
-// con đã đóng và mẹ cũng nên đóng theo.
-type ChildBatchState struct {
-	ParentBatchID uint
-	Status        models.InternalStatus
-	Closed        bool
-}
-
-// ChildBatchStatesFor trả trạng thái + tình trạng đóng của các batch con, cho
-// nhiều mẹ trong một câu lệnh.
-func (r *BatchRepository) ChildBatchStatesFor(parentIDs []uint) (map[uint][]ChildBatchState, error) {
-	out := map[uint][]ChildBatchState{}
-	parentIDs = dedupeIDs(parentIDs)
-	if len(parentIDs) == 0 {
-		return out, nil
-	}
-	type row struct {
-		ParentBatchID uint
-		Status        models.InternalStatus
-		ClosedAt      *time.Time
-	}
-	var rows []row
-	err := r.db.Model(&models.Batch{}).
-		Select("parent_batch_id, status, closed_at").
-		Where("parent_batch_id IN ?", parentIDs).Scan(&rows).Error
-	if err != nil {
-		return nil, err
-	}
-	for _, x := range rows {
-		out[x.ParentBatchID] = append(out[x.ParentBatchID], ChildBatchState{
-			ParentBatchID: x.ParentBatchID, Status: x.Status, Closed: x.ClosedAt != nil,
-		})
-	}
-	return out, nil
-}
-
-// OpenChildBatchIDsFor trả id các batch con CHƯA đóng của một mẹ — tập mà lệnh
-// "huỷ cả cụm" thực sự phải huỷ.
-func (r *BatchRepository) OpenChildBatchIDsFor(parentID uint) ([]uint, error) {
-	var ids []uint
-	err := r.db.Model(&models.Batch{}).
-		Where("parent_batch_id = ? AND closed_at IS NULL", parentID).
-		Order("sequence asc").Pluck("id", &ids).Error
-	return ids, err
-}
-
 // GateStateByID trả trạng thái nội bộ + trạng thái huỷ của một sản phẩm, không
 // kèm association nào. Cửa quét ở trạm đóng gói phải đọc lại đúng hai thứ này
 // TRONG transaction, sau khi đã khoá dòng: đọc trước transaction thì một lần

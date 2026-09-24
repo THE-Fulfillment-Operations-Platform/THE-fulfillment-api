@@ -205,7 +205,7 @@ func TestSellerView_CarriesTrackingWithoutInternals(t *testing.T) {
 	o := models.Order{
 		InternalCode: "100001", StoreOrderID: "ETSY-1",
 		TrackingNumber: "940011", TrackingStatus: models.TrackingInTransit,
-		TrackingDetail: "In Transit to Next Facility",
+		TrackingDetail:   "In Transit to Next Facility",
 		TrackingLocation: "JAMAICA, NY", TrackingSyncError: "provider blew up",
 	}
 	v := toSellerView(o, false, false)

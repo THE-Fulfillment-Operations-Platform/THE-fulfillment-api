@@ -20,7 +20,8 @@ func newExcelFixture(t *testing.T) (*gorm.DB, *BatchService, []*models.Batch) {
 	db := newSplitDB(t)
 	svc := newBatchService(db)
 	_, ids := seedSplit(t, db, 0, 3)
-	b1, _, err := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids[:2]})
+	b1All, _, err := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids[:2]})
+	b1 := firstBatch(t, b1All, err)
 	if err != nil {
 		t.Fatalf("create batch 1: %v", err)
 	}
@@ -37,7 +38,8 @@ func newExcelFixture(t *testing.T) (*gorm.DB, *BatchService, []*models.Batch) {
 	if err := db.Create(&models.SKUMaterial{SKUID: sku.ID, MaterialID: mat2.ID, QuantityPerUnit: 1}).Error; err != nil {
 		t.Fatalf("seed sku-material: %v", err)
 	}
-	b2, _, err := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: mat2.ID, OrderItemIDs: ids[2:]})
+	b2All, _, err := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: mat2.ID, OrderItemIDs: ids[2:]})
+	b2 := firstBatch(t, b2All, err)
 	if err != nil {
 		t.Fatalf("create batch 2: %v", err)
 	}
@@ -86,7 +88,7 @@ func TestExportBatchLinks_ScopeAndRoundTrip(t *testing.T) {
 	if _, err := svc.SetBatchLink(Actor{ID: 1}, batches[0].ID, SetBatchLinkInput{Kind: "PRINT", URL: "https://files/print-old"}); err != nil {
 		t.Fatalf("seed link: %v", err)
 	}
-	// Out-of-scope rows: a PRINTED batch, a closed batch, a parent batch.
+	// Out-of-scope rows: a PRINTED batch and a closed batch.
 	mat := &models.Material{Code: "SCOPE", Name: "Scope"}
 	if err := db.Create(mat).Error; err != nil {
 		t.Fatalf("seed material: %v", err)
@@ -95,7 +97,6 @@ func TestExportBatchLinks_ScopeAndRoundTrip(t *testing.T) {
 	outOfScope := []*models.Batch{
 		{Code: "#S-1", MaterialID: mat.ID, Status: models.StatusPrinted},
 		{Code: "#S-2", MaterialID: mat.ID, Status: models.StatusPending, ClosedAt: &now},
-		{Code: "#S-3", MaterialID: mat.ID, Status: models.StatusPending, IsParent: true},
 	}
 	for _, b := range outOfScope {
 		if err := db.Create(b).Error; err != nil {
@@ -220,8 +221,7 @@ func TestPreviewBatchLinkImport_Blockers(t *testing.T) {
 	now := time.Now()
 	printed := &models.Batch{Code: "#K-1", MaterialID: mat.ID, Status: models.StatusPrinted}
 	closed := &models.Batch{Code: "#K-2", MaterialID: mat.ID, Status: models.StatusPending, ClosedAt: &now}
-	parent := &models.Batch{Code: "#K-3", MaterialID: mat.ID, Status: models.StatusPending, IsParent: true}
-	for _, b := range []*models.Batch{printed, closed, parent} {
+	for _, b := range []*models.Batch{printed, closed} {
 		if err := db.Create(b).Error; err != nil {
 			t.Fatalf("seed batch: %v", err)
 		}
@@ -244,7 +244,6 @@ func TestPreviewBatchLinkImport_Blockers(t *testing.T) {
 		{"invalid url", mk(func(r *BatchLinkImportRow) { r.CutURL = "javascript:alert(1)" })},
 		{"printed batch", mk(func(r *BatchLinkImportRow) { r.BatchID, r.BatchCode = printed.ID, printed.Code })},
 		{"closed batch", mk(func(r *BatchLinkImportRow) { r.BatchID, r.BatchCode = closed.ID, closed.Code })},
-		{"parent batch", mk(func(r *BatchLinkImportRow) { r.BatchID, r.BatchCode = parent.ID, parent.Code })},
 	}
 	for _, tc := range cases {
 		p, err := svc.PreviewBatchLinkImport(Actor{ID: 1}, []BatchLinkImportRow{tc.row})

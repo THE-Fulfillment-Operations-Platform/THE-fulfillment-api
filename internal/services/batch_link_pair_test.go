@@ -18,7 +18,8 @@ func newPairFixture(t *testing.T, n int) (*gorm.DB, *BatchService, *models.Batch
 	db := newSplitDB(t)
 	svc := newBatchService(db)
 	_, ids := seedSplit(t, db, 0, n)
-	batch, _, err := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batchAll, _, err := svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batch := firstBatch(t, batchAll, err)
 	if err != nil {
 		t.Fatalf("create fixture batch: %v", err)
 	}
@@ -128,14 +129,13 @@ func TestSetBatchLinkPair_LockedBatches(t *testing.T) {
 		return b
 	}
 	now := time.Now()
-	parent := mk("#L-P", func(b *models.Batch) { b.IsParent = true })
 	closed := mk("#L-C", func(b *models.Batch) { b.ClosedAt = &now })
 	printed := mk("#L-1", func(b *models.Batch) { b.Status = models.StatusPrinted })
 	cut := mk("#L-2", func(b *models.Batch) { b.Status = models.StatusCut })
 	qced := mk("#L-3", func(b *models.Batch) { b.Status = models.StatusQCPassed })
 
 	in := SetBatchLinkPairInput{PrintURL: "https://files/p", CutURL: "https://files/c"}
-	for _, b := range []*models.Batch{parent, closed, printed, cut, qced} {
+	for _, b := range []*models.Batch{closed, printed, cut, qced} {
 		if _, err := svc.SetBatchLinkPair(Actor{ID: 1}, b.ID, in); err == nil {
 			t.Fatalf("batch %s must refuse the package", b.Code)
 		}

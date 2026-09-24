@@ -1,8 +1,6 @@
 package services
 
 import (
-	"time"
-
 	"the-fulfillment/backend/internal/models"
 	"the-fulfillment/backend/internal/repositories"
 )
@@ -65,10 +63,6 @@ func recomputeBatchStatus(repo *repositories.Repositories, batchID uint, actor A
 		}
 		_ = recordStatus(repo, models.EntityBatch, batch.ID, old, string(newStatus), actor, "derived from batch items")
 	}
-	// A child batch's change rolls up to its parent's aggregate status.
-	if batch.ParentBatchID != nil {
-		return recomputeParentBatchStatus(repo, *batch.ParentBatchID, actor)
-	}
 	return nil
 }
 
@@ -79,12 +73,10 @@ func recomputeBatchStatus(repo *repositories.Repositories, batchID uint, actor A
 // move two or three batches at once; the per-batch version spent four round trips
 // apiece and the operator paid for all of them before the screen came back. Here
 // the whole set costs one read of the parts, one read of the batches, one update
-// per distinct resulting status (at most four) and one history insert — then the
-// same again for whatever parents are affected.
+// per distinct resulting status (at most four) and one history insert.
 //
 // Semantics match the single version exactly: a batch with no live parts is left
-// untouched, a batch that does not move writes no history, and a child that moves
-// rolls up to its parent.
+// untouched and a batch that does not move writes no history.
 func recomputeBatchStatuses(repo *repositories.Repositories, batchIDs []uint, actor Actor) error {
 	if len(batchIDs) == 0 {
 		return nil
@@ -100,7 +92,6 @@ func recomputeBatchStatuses(repo *repositories.Repositories, batchIDs []uint, ac
 
 	var history []models.StatusHistory
 	moved := map[models.InternalStatus][]uint{}
-	parents := map[uint]bool{}
 	for _, b := range batches {
 		parts, ok := partStatuses[b.ID]
 		if !ok || len(parts) == 0 {
@@ -116,116 +107,13 @@ func recomputeBatchStatuses(repo *repositories.Repositories, batchIDs []uint, ac
 			FromStatus: string(b.Status), ToStatus: string(newStatus),
 			ChangedByID: actor.IDPtr(), Note: "derived from batch items",
 		})
-		if b.ParentBatchID != nil {
-			parents[*b.ParentBatchID] = true
-		}
 	}
 	for status, ids := range moved {
 		if err := repo.Batch.UpdateStatusColumns(ids, status); err != nil {
-			return err
-		}
-	}
-	if err := repo.Status.CreateBulk(history); err != nil {
-		return err
-	}
-
-	if len(parents) == 0 {
-		return nil
-	}
-	parentIDs := make([]uint, 0, len(parents))
-	for id := range parents {
-		parentIDs = append(parentIDs, id)
-	}
-	return recomputeParentBatchStatuses(repo, parentIDs, actor)
-}
-
-// closeReasonAllChildrenClosed is stamped on a parent batch whose every child is
-// finished-and-closed, so the batch list can say why the cụm disappeared from the
-// production board.
-const closeReasonAllChildrenClosed = "Mọi batch con đã đóng — không còn gì để sản xuất"
-
-// recomputeParentBatchStatuses is recomputeParentBatchStatus over a set, on the
-// same fixed budget as recomputeBatchStatuses above.
-//
-// Con ĐÃ ĐÓNG bị bỏ qua khi tính trạng thái mẹ. Một tấm bị huỷ không bao giờ
-// được làm tiếp (hàng làm lại nằm ở batch mới), nên nếu vẫn tính nó thì mẹ đứng
-// mãi ở trạng thái của tấm chết đó và cả cụm không bao giờ xong. Khi MỌI con đã
-// đóng thì bản thân cụm cũng hết việc: đóng mẹ luôn, giữ nguyên trạng thái làm
-// lịch sử của phần đã làm được.
-func recomputeParentBatchStatuses(repo *repositories.Repositories, parentIDs []uint, actor Actor) error {
-	if len(parentIDs) == 0 {
-		return nil
-	}
-	childStates, err := repo.Batch.ChildBatchStatesFor(parentIDs)
-	if err != nil {
-		return err
-	}
-	parents, err := repo.Batch.FindLiteMany(parentIDs)
-	if err != nil {
-		return err
-	}
-
-	var history []models.StatusHistory
-	moved := map[models.InternalStatus][]uint{}
-	var toClose []uint
-	for _, p := range parents {
-		children, ok := childStates[p.ID]
-		if !ok || len(children) == 0 {
-			continue // không phải batch mẹ
-		}
-		newStatus := models.StatusQCPassed
-		open := 0
-		for _, c := range children {
-			if c.Closed {
-				continue
-			}
-			open++
-			if c.Status.Rank() < newStatus.Rank() {
-				newStatus = c.Status
-			}
-		}
-		if open == 0 {
-			if p.ClosedAt == nil {
-				toClose = append(toClose, p.ID)
-				history = append(history, models.StatusHistory{
-					EntityType: models.EntityBatch, EntityID: p.ID,
-					FromStatus: string(p.Status), ToStatus: string(p.Status),
-					ChangedByID: actor.IDPtr(), Note: closeReasonAllChildrenClosed,
-				})
-			}
-			continue
-		}
-		if newStatus == p.Status {
-			continue
-		}
-		moved[newStatus] = append(moved[newStatus], p.ID)
-		history = append(history, models.StatusHistory{
-			EntityType: models.EntityBatch, EntityID: p.ID,
-			FromStatus: string(p.Status), ToStatus: string(newStatus),
-			ChangedByID: actor.IDPtr(), Note: "derived from child batches",
-		})
-	}
-	for status, ids := range moved {
-		if err := repo.Batch.UpdateStatusColumns(ids, status); err != nil {
-			return err
-		}
-	}
-	if len(toClose) > 0 {
-		if _, err := repo.Batch.CloseBatches(toClose, closeReasonAllChildrenClosed, time.Now()); err != nil {
 			return err
 		}
 	}
 	return repo.Status.CreateBulk(history)
-}
-
-// recomputeParentBatchStatus recalculates and persists a parent batch's status as
-// the least-advanced status across its OPEN child batches — the parent reaches
-// QC_PASSED only when every open child has, and closes when none is left open.
-// Called whenever a child's status changes (QC roll-up, the production board
-// cascade, or a child being scrapped). A batch with no children is left
-// untouched, so it is safe to call on any batch id.
-func recomputeParentBatchStatus(repo *repositories.Repositories, parentID uint, actor Actor) error {
-	return recomputeParentBatchStatuses(repo, []uint{parentID}, actor)
 }
 
 // recomputeOrderItemStatus recalculates and persists one item's internal status

@@ -67,6 +67,33 @@ func AutoMigrate(db *gorm.DB) error {
 	if err := purgeTransportPartnerData(db); err != nil {
 		return err
 	}
+	if err := flattenParentBatches(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+// flattenParentBatches retires the parent/child batch layer (2026-09-24, at the
+// customer's request: one sheet = one batch, nothing above it). Every child
+// becomes an ordinary batch — it keeps its code, items, links, status and
+// history — and every parent (which never held items) is soft-deleted so it
+// disappears from the lists. The columns stay (AutoMigrate never drops one) but
+// no model field reads them any more, so the raw SQL is guarded on the column
+// still existing: a fresh database has no such column and nothing to flatten.
+// Idempotent: a second run finds nothing to update.
+func flattenParentBatches(db *gorm.DB) error {
+	if !db.Migrator().HasColumn(&models.Batch{}, "parent_batch_id") {
+		return nil
+	}
+	stmts := []string{
+		`UPDATE batches SET parent_batch_id = NULL, sequence = 0 WHERE parent_batch_id IS NOT NULL`,
+		`UPDATE batches SET deleted_at = CURRENT_TIMESTAMP, close_reason = 'Bỏ lớp batch mẹ (24/09/2026) — các tấm là batch thường' WHERE is_parent = TRUE AND deleted_at IS NULL`,
+	}
+	for _, q := range stmts {
+		if err := db.Exec(q).Error; err != nil {
+			return fmt.Errorf("database: flatten parent batches: %w", err)
+		}
+	}
 	return nil
 }
 

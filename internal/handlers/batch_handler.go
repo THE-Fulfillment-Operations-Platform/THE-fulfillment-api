@@ -17,12 +17,14 @@ func (h *Handlers) CreateBatch(c *gin.Context) {
 	if !bindJSON(c, &in) {
 		return
 	}
-	batch, skipped, err := h.svc.Batch.Create(actor(c), in)
+	batches, skipped, err := h.svc.Batch.Create(actor(c), in)
 	if err != nil {
 		response.Fail(c, err)
 		return
 	}
-	response.Created(c, gin.H{"batch": batch, "skipped_item_ids": skipped})
+	// `batches` is the full answer (one flat batch per sheet); `batch` is the
+	// first of them, kept so a client built for the single-batch shape still works.
+	response.Created(c, gin.H{"batches": batches, "batch": batches[0], "skipped_item_ids": skipped})
 }
 
 // ListBatches lists batches with filters (material, status, priority, date).
@@ -30,13 +32,12 @@ func (h *Handlers) CreateBatch(c *gin.Context) {
 func (h *Handlers) ListBatches(c *gin.Context) {
 	p := pageFrom(c)
 	f := repositories.BatchFilter{
-		Page:          p,
-		MaterialID:    uintQueryPtr(c, "material_id"),
-		Status:        c.Query("status"),
-		Priority:      c.Query("priority"),
-		DateFrom:      timeQueryPtr(c, "date_from"),
-		DateTo:        timeQueryPtr(c, "date_to"),
-		ParentBatchID: uintQueryPtr(c, "parent_batch_id"),
+		Page:       p,
+		MaterialID: uintQueryPtr(c, "material_id"),
+		Status:     c.Query("status"),
+		Priority:   c.Query("priority"),
+		DateFrom:   timeQueryPtr(c, "date_from"),
+		DateTo:     timeQueryPtr(c, "date_to"),
 		// ?code= — mã nội bộ đơn ("100047") hoặc mã tem item ("100047_1/1"):
 		// trả về (các) batch đang sản xuất đơn đó.
 		Code: c.Query("code"),

@@ -18,10 +18,6 @@ type BatchFilter struct {
 	Priority   string
 	DateFrom   *time.Time
 	DateTo     *time.Time
-	// ParentBatchID scopes the list to the children of one parent batch. When nil
-	// (the default), children are hidden and only parent + flat batches are listed
-	// (see baseQuery) so the list isn't cluttered with split sub-batches.
-	ParentBatchID *uint
 	// ExcludeClosed drops batches whose production is over because every piece they
 	// made was scrapped at QC. The production board sets it — there is no work left
 	// in such a batch — while the batch list keeps showing them (greyed, with the
@@ -29,9 +25,7 @@ type BatchFilter struct {
 	ExcludeClosed bool
 	// Code scopes the list to the batches producing one order: it matches the
 	// order's internal code ("100047") or one item's tem code ("100047_1/1") —
-	// exact match, these codes are system-generated. Items live in child/flat
-	// batches, so when Code is set the default hide-children rule is lifted and
-	// the actual batch holding the product is listed.
+	// exact match, these codes are system-generated.
 	Code string
 }
 
@@ -55,7 +49,7 @@ func activeBatchItems(db *gorm.DB) *gorm.DB {
 }
 
 // attachPairQuotas loads the DECLARED quota of every (item SKU, batch material)
-// pair the given batches (and their loaded children) hold, in ONE statement,
+// pair the given batches hold, in ONE statement,
 // and hangs it on each item's SKU as its Materials — so FillMaterialUnits sees
 // the number the factory typed instead of the size estimate. The pair rows
 // can't ride in the items' SELECT (a has-many), hence the separate query; one
@@ -81,9 +75,6 @@ func (r *BatchRepository) attachPairQuotas(batches []*models.Batch) error {
 	}
 	for _, b := range batches {
 		collect(b)
-		for i := range b.ChildBatches {
-			collect(&b.ChildBatches[i])
-		}
 	}
 	if len(targets) == 0 {
 		return nil
@@ -139,11 +130,6 @@ func (r *BatchRepository) FindByID(id uint) (*models.Batch, error) {
 			// Seller rides along for the QR label print (tem in tên seller).
 			return activeBatchItems(db).Joins("OrderItem.Order").Joins("OrderItem.Order.Seller").Joins("Material")
 		}).
-		// A parent batch preloads its children (with each child's active items so the
-		// detail view can show per-child item counts). Children/flat batches have none,
-		// and GORM skips the nested preload once the child list comes back empty.
-		Preload("ChildBatches", func(db *gorm.DB) *gorm.DB { return db.Order("sequence asc") }).
-		Preload("ChildBatches.Items", activeBatchItems).
 		First(&b, id).Error
 	if err != nil {
 		return nil, err
@@ -158,22 +144,6 @@ func (r *BatchRepository) FindByID(id uint) (*models.Batch, error) {
 		return nil, err
 	}
 	b.FillMaterialUnits(&b.Material)
-	// A parent's sheets are the sum of its children's (children are loaded with
-	// their live parts here, so the sum is exact). Any child without a quota
-	// leaves the parent at its child count — one sheet per child.
-	total := 0
-	exact := true
-	for i := range b.ChildBatches {
-		b.ChildBatches[i].FillMaterialUnits(&b.Material)
-		if u := b.ChildBatches[i].MaterialUnits; u != nil {
-			total += *u
-		} else {
-			exact = false
-		}
-	}
-	if b.IsParent && exact && len(b.ChildBatches) > 0 {
-		b.MaterialUnits = &total
-	}
 	return &b, nil
 }
 
@@ -251,14 +221,6 @@ func (r *BatchRepository) LinkKindsForBatch(batchID uint) ([]models.BatchLinkKin
 	return kinds, err
 }
 
-// ChildBatchesFor returns the child batches of a parent (id + status are enough
-// for the parent status roll-up). Ordered by sequence for stable display.
-func (r *BatchRepository) ChildBatchesFor(parentID uint) ([]models.Batch, error) {
-	var rows []models.Batch
-	err := r.db.Where("parent_batch_id = ?", parentID).Order("sequence asc").Find(&rows).Error
-	return rows, err
-}
-
 func (r *BatchRepository) FindByCode(code string) (*models.Batch, error) {
 	var b models.Batch
 	if err := r.db.Preload("Material").Where("code = ?", code).First(&b).Error; err != nil {
@@ -293,14 +255,6 @@ func (r *BatchRepository) baseQuery(f BatchFilter) *gorm.DB {
 			Joins("JOIN order_items ON order_items.id = batch_items.order_item_id").
 			Joins("JOIN orders ON orders.id = order_items.order_id").
 			Where("orders.internal_code = ? OR order_items.internal_code = ?", code, code))
-	}
-	// Child-scoping: with a parent id, list only that parent's children; otherwise
-	// hide children so the default list shows parent + flat batches only — except
-	// when searching by code, where the hit IS a child/flat batch and must show.
-	if f.ParentBatchID != nil {
-		q = q.Where("parent_batch_id = ?", *f.ParentBatchID)
-	} else if f.Code == "" {
-		q = q.Where("parent_batch_id IS NULL")
 	}
 	return q
 }
@@ -348,13 +302,12 @@ func (r *BatchRepository) List(f BatchFilter) ([]models.Batch, int64, error) {
 
 // FindLink returns the live link of a given kind for a batch, or gorm.ErrRecordNotFound.
 // PendingLinkTargets lists the batches a designer can still attach production
-// files to: PENDING, not closed, and holding items themselves (flat or child —
-// never a parent, which aggregates children and carries no files). Ordered by
-// id so the exported sheet is stable between downloads.
+// files to: PENDING and not closed. Ordered by id so the exported sheet is
+// stable between downloads.
 func (r *BatchRepository) PendingLinkTargets() ([]models.Batch, error) {
 	var rows []models.Batch
 	err := r.db.Preload("Material").Preload("Links").
-		Where("is_parent = ? AND closed_at IS NULL AND status = ?", false, models.StatusPending).
+		Where("closed_at IS NULL AND status = ?", models.StatusPending).
 		Order("id").Find(&rows).Error
 	return rows, err
 }
@@ -654,30 +607,6 @@ func (r *BatchRepository) UpdateStatusColumns(ids []uint, status models.Internal
 		return nil
 	}
 	return r.db.Model(&models.Batch{}).Where("id IN ?", ids).Update("status", status).Error
-}
-
-// ChildBatchStatusesFor returns, per parent batch, its children's statuses — the
-// input to the parent roll-up, for many parents in one query.
-func (r *BatchRepository) ChildBatchStatusesFor(parentIDs []uint) (map[uint][]models.InternalStatus, error) {
-	out := map[uint][]models.InternalStatus{}
-	if len(parentIDs) == 0 {
-		return out, nil
-	}
-	type row struct {
-		ParentBatchID uint
-		Status        models.InternalStatus
-	}
-	var rows []row
-	err := r.db.Model(&models.Batch{}).
-		Select("parent_batch_id, status").
-		Where("parent_batch_id IN ?", parentIDs).Scan(&rows).Error
-	if err != nil {
-		return nil, err
-	}
-	for _, r := range rows {
-		out[r.ParentBatchID] = append(out[r.ParentBatchID], r.Status)
-	}
-	return out, nil
 }
 
 // ExistingMaterialKeys returns the set of order_item_id|material_id pairs already

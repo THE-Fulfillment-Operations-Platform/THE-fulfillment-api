@@ -45,26 +45,18 @@ func TestSetBatchLink_AddAndReplace(t *testing.T) {
 	}
 }
 
-func TestSetBatchLink_RejectsParentAndInvalidURL(t *testing.T) {
+func TestSetBatchLink_RejectsInvalidURL(t *testing.T) {
 	db := newSplitDB(t)
 	svc := newBatchService(db)
-	material := &models.Material{Code: "WOOD-PARENT", Name: "Wood"}
+	material := &models.Material{Code: "WOOD-URL", Name: "Wood"}
 	if err := db.Create(material).Error; err != nil {
 		t.Fatalf("seed material: %v", err)
 	}
-	parent := &models.Batch{Code: "#LINK-P", MaterialID: material.ID, IsParent: true, Status: models.StatusPending}
-	if err := db.Create(parent).Error; err != nil {
-		t.Fatalf("seed parent: %v", err)
+	batch := &models.Batch{Code: "#LINK-U", MaterialID: material.ID, Status: models.StatusPending}
+	if err := db.Create(batch).Error; err != nil {
+		t.Fatalf("seed batch: %v", err)
 	}
-
-	if _, err := svc.SetBatchLink(Actor{ID: 1}, parent.ID, SetBatchLinkInput{Kind: "PRINT", URL: "https://files/print"}); err == nil {
-		t.Fatal("parent batch link should be rejected")
-	}
-	parent.IsParent = false
-	if err := db.Save(parent).Error; err != nil {
-		t.Fatalf("make flat batch: %v", err)
-	}
-	if _, err := svc.SetBatchLink(Actor{ID: 1}, parent.ID, SetBatchLinkInput{Kind: "CUT", URL: "javascript:alert(1)"}); err == nil {
+	if _, err := svc.SetBatchLink(Actor{ID: 1}, batch.ID, SetBatchLinkInput{Kind: "CUT", URL: "javascript:alert(1)"}); err == nil {
 		t.Fatal("non-http URL should be rejected")
 	}
 }

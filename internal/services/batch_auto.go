@@ -14,17 +14,15 @@ import (
 // silently truncated.
 const MaxAutoBatchItemsPerMaterial = 2000
 
-// AutoCreatedBatch reports what auto-create built for one material: the root
-// batch (flat, or the parent when the quota split kicked in) plus the codes of
-// the actual production batches (children, or the flat batch itself).
+// AutoCreatedBatch reports what auto-create built for one material: every
+// production batch (one per sheet) by code, the first one's id/code for a
+// quick link, and the item total.
 type AutoCreatedBatch struct {
 	MaterialID     uint     `json:"material_id"`
 	MaterialCode   string   `json:"material_code"`
 	MaterialName   string   `json:"material_name"`
 	BatchID        uint     `json:"batch_id"`
 	BatchCode      string   `json:"batch_code"`
-	IsParent       bool     `json:"is_parent"`
-	ChildCount     int      `json:"child_count"`
 	BatchCodes     []string `json:"batch_codes"`
 	ItemCount      int      `json:"item_count"`
 	SkippedItemIDs []uint   `json:"skipped_item_ids"`
@@ -95,7 +93,7 @@ func (s *BatchService) AutoCreateBatches(actor Actor) (*AutoCreateBatchesResult,
 		for i := range items {
 			ids = append(ids, items[i].ID)
 		}
-		batch, skippedIDs, err := s.Create(actor, CreateBatchInput{MaterialID: bucket.MaterialID, OrderItemIDs: ids})
+		batches, skippedIDs, err := s.Create(actor, CreateBatchInput{MaterialID: bucket.MaterialID, OrderItemIDs: ids})
 		if err != nil {
 			reason := "không gom được batch"
 			if ae, ok := apperr.As(err); ok && ae.Message != "" {
@@ -106,21 +104,16 @@ func (s *BatchService) AutoCreateBatches(actor Actor) (*AutoCreateBatchesResult,
 		}
 		entry := AutoCreatedBatch{
 			MaterialID: bucket.MaterialID, MaterialCode: bucket.MaterialCode, MaterialName: bucket.MaterialName,
-			BatchID: batch.ID, BatchCode: batch.Code, IsParent: batch.IsParent, ChildCount: batch.ChildCount,
+			BatchID: batches[0].ID, BatchCode: batches[0].Code,
 			BatchCodes:     []string{},
 			SkippedItemIDs: skippedIDs,
 		}
 		if entry.SkippedItemIDs == nil {
 			entry.SkippedItemIDs = []uint{}
 		}
-		if batch.IsParent {
-			for _, child := range batch.ChildBatches {
-				entry.BatchCodes = append(entry.BatchCodes, child.Code)
-				entry.ItemCount += len(child.Items)
-			}
-		} else {
-			entry.BatchCodes = append(entry.BatchCodes, batch.Code)
-			entry.ItemCount = len(batch.Items)
+		for _, b := range batches {
+			entry.BatchCodes = append(entry.BatchCodes, b.Code)
+			entry.ItemCount += len(b.Items)
 		}
 		res.Created = append(res.Created, entry)
 		res.TotalBatches += len(entry.BatchCodes)

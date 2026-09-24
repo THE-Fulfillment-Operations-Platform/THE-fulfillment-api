@@ -111,23 +111,3 @@ func TestUpdateStatus_PendingNeedsNoLinks(t *testing.T) {
 		t.Fatalf("PENDING must not require links: %v", err)
 	}
 }
-
-// TestUpdateStatus_ParentBatchSkipsLinkGuard covers the split case: a parent holds no
-// items and can carry no links (SetBatchLink rejects it), so guarding it would lock
-// its status forever. Each child is guarded on its own instead.
-func TestUpdateStatus_ParentBatchSkipsLinkGuard(t *testing.T) {
-	db := newSplitDB(t)
-	svc := newBatchService(db)
-	material := &models.Material{Code: "NVL-PARENT", Name: "NVL"}
-	if err := db.Create(material).Error; err != nil {
-		t.Fatalf("seed material: %v", err)
-	}
-	parent := &models.Batch{Code: "#GUARD-P", MaterialID: material.ID, IsParent: true, Status: models.StatusPending}
-	if err := db.Create(parent).Error; err != nil {
-		t.Fatalf("seed parent: %v", err)
-	}
-
-	if _, err := svc.UpdateStatus(Actor{ID: 1}, parent.ID, UpdateStatusInput{Status: string(models.StatusPrinted)}); err != nil {
-		t.Fatalf("parent batch must not be blocked by the link guard: %v", err)
-	}
-}

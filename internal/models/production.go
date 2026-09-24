@@ -35,45 +35,32 @@ type Batch struct {
 	// "0 còn lại · 1 đã huỷ" instead of showing a batch that looks empty.
 	ScrappedCount int `json:"scrapped_count" gorm:"-"`
 	// MaterialUnits is how many sheets of the material this batch needs:
-	// ⌈Σ quantity / quota⌉ over its live parts, quota per product from the SKU's
-	// and the material's sizes. A parent reports its child count (each child is
-	// at most one sheet). nil when any part has no quota (a size is missing) —
-	// the list then shows "—" instead of a number nobody can vouch for. Not
-	// stored; list/detail queries fill it.
+	// ⌈Σ quantity / quota⌉ over its live parts, quota per product from the
+	// (SKU, material) pair — declared, else estimated from the sizes. nil when
+	// any part has no quota — the list then shows "—" instead of a number nobody
+	// can vouch for. Not stored; list/detail queries fill it.
 	MaterialUnits *int `json:"material_units" gorm:"-"`
 
-	// ---- Parent/child batches (split by a material's production quota) ----
-	// A "parent" batch groups several "child" batches; each child fills at most
-	// ONE sheet of the material (see ProductionQuota). A flat (un-split) batch leaves all of these
-	// at their zero value. Children carry ParentBatchID + Sequence and hold the
-	// items; the parent holds no items and only aggregates the children.
-	ParentBatchID *uint   `json:"parent_batch_id" gorm:"index"`
-	IsParent      bool    `json:"is_parent" gorm:"not null;default:false"`
-	Sequence      int     `json:"sequence" gorm:"not null;default:0"`    // 1..k position of a child within its parent
-	ChildCount    int     `json:"child_count" gorm:"not null;default:0"` // number of children (on the parent)
-	ChildBatches  []Batch `json:"child_batches,omitempty" gorm:"foreignKey:ParentBatchID"`
+	// One batch = one sheet of one material, flat. The parent/child ("batch
+	// mẹ – con") layer of 18–24/09/2026 is gone at the customer's request
+	// ("bỏ lớp mẹ đi, để nó ra một batch mới cho dễ quản lý"): its columns
+	// (parent_batch_id, is_parent, sequence, child_count) still exist in the
+	// database — AutoMigrate never drops one — but nothing reads or writes them;
+	// database.flattenParentBatches detached the old children once.
 }
 
 func (Batch) TableName() string { return "batches" }
 
 // FillMaterialUnits computes MaterialUnits from the batch's loaded live parts:
-// ⌈Σ quantity / quota⌉ with each part's quota derived from its SKU's size and
-// `material` (the batch's own — passed in because a child batch loaded under
-// its parent carries no Material of its own). Items must be loaded with their
-// OrderItem and its SKU. A parent reports its child count (each child is one
-// SKU within its quota, i.e. one sheet — the detail query replaces this with
-// the children's exact sum, which only differs when a single order line
-// exceeds its quota). nil when any part has no quota (a size is missing on
-// either side) — the screen then shows "—" instead of a number nobody can
-// vouch for. The sum is added as exact fractions: at the boundary where a
-// sheet is precisely full, float rounding would turn "one sheet" into two.
+// ⌈Σ quantity / quota⌉ with each part's quota from its SKU and `material` (the
+// batch's own). Items must be loaded with their OrderItem and its SKU (with
+// the pair's declared quota when there is one — see attachPairQuotas). nil
+// when any part has no quota (nothing declared and a size missing on either
+// side) — the screen then shows "—" instead of a number nobody can vouch for.
+// The sum is added as exact fractions: at the boundary where a sheet is
+// precisely full, float rounding would turn "one sheet" into two.
 func (b *Batch) FillMaterialUnits(material *Material) {
 	b.MaterialUnits = nil
-	if b.IsParent {
-		n := b.ChildCount
-		b.MaterialUnits = &n
-		return
-	}
 	sum := new(big.Rat)
 	for i := range b.Items {
 		it := b.Items[i].OrderItem

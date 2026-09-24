@@ -261,7 +261,7 @@ func TestCreateBatch_AcceptsReworkedItem(t *testing.T) {
 		t.Fatalf("QC fail: %v", err)
 	}
 
-	batch, skipped, err := batchSvc.Create(actor, CreateBatchInput{
+	batches, skipped, err := batchSvc.Create(actor, CreateBatchInput{
 		MaterialID: mat.ID, OrderItemIDs: []uint{item.ID},
 	})
 	if err != nil {
@@ -270,6 +270,7 @@ func TestCreateBatch_AcceptsReworkedItem(t *testing.T) {
 	if len(skipped) != 0 {
 		t.Fatalf("không được bỏ qua sản phẩm nào, skipped=%v", skipped)
 	}
+	batch := firstBatch(t, batches, nil)
 
 	// Phần mới là lần sản xuất thứ 2, và phần hỏng vẫn nằm ở batch cũ.
 	var parts []models.BatchItem
@@ -337,12 +338,13 @@ func TestQCFail_RepeatedRoundsStayConsistent(t *testing.T) {
 		}
 
 		// Và luôn gom lại được vào một batch mới — y như vòng đầu tiên.
-		batch, skipped, err := batchSvc.Create(actor, CreateBatchInput{
+		batches, skipped, err := batchSvc.Create(actor, CreateBatchInput{
 			MaterialID: mat.ID, OrderItemIDs: []uint{item.ID},
 		})
 		if err != nil || len(skipped) != 0 {
 			t.Fatalf("vòng %d — phải gom lại được vào batch mới: err=%v skipped=%v", round, err, skipped)
 		}
+		batch := firstBatch(t, batches, nil)
 		// Phần mới là lần sản xuất kế tiếp và là phần DUY NHẤT còn hiệu lực.
 		var newPart models.BatchItem
 		db.Where("batch_id = ? AND order_item_id = ?", batch.ID, item.ID).First(&newPart)

@@ -45,7 +45,6 @@ const (
 	BatchLinkIssueMissingCode    = "MISSING_CODE"
 	BatchLinkIssueNotFound       = "NOT_FOUND"
 	BatchLinkIssueCodeMismatch   = "CODE_MISMATCH"
-	BatchLinkIssueParentBatch    = "PARENT_BATCH"
 	BatchLinkIssueClosed         = "CLOSED"
 	BatchLinkIssueStarted        = "ALREADY_STARTED"
 	BatchLinkIssueNoItems        = "NO_ITEMS"
@@ -366,8 +365,6 @@ func (s *BatchService) PreviewBatchLinkImport(actor Actor, rows []BatchLinkImpor
 			switch {
 			case normalizeBatchCode(r.BatchCode) != ref.Code:
 				fail(BatchLinkIssueCodeMismatch, fmt.Sprintf("Mã batch %q không khớp với Batch ID %d (%s) — dòng có thể đã bị sửa hoặc tráo", r.BatchCode, ref.ID, ref.Code))
-			case ref.IsParent:
-				fail(BatchLinkIssueParentBatch, "Đây là batch mẹ — link sản xuất gắn trên từng batch con")
 			case ref.ClosedAt != nil:
 				fail(BatchLinkIssueClosed, "Batch đã đóng/huỷ — không gắn file sản xuất nữa")
 			case ref.Status != models.StatusPending:

@@ -63,18 +63,7 @@ func (s *BatchService) Scrap(actor Actor, batchID uint, in ScrapBatchInput) (*Sc
 		return nil, apperr.Unprocessable("Batch " + batch.Code + " đã đóng rồi.")
 	}
 
-	// Batch mẹ không giữ phần sản xuất nào: huỷ mẹ nghĩa là huỷ mọi con còn mở.
 	targetIDs := []uint{batch.ID}
-	if batch.IsParent {
-		children, err := s.repo.Batch.OpenChildBatchIDsFor(batch.ID)
-		if err != nil {
-			return nil, apperr.Internal("Không đọc được batch con").Wrap(err)
-		}
-		if len(children) == 0 {
-			return nil, apperr.Unprocessable("Cụm " + batch.Code + " không còn batch con nào đang mở.")
-		}
-		targetIDs = children
-	}
 
 	var (
 		result  = &ScrapBatchResult{Route: route}
@@ -242,14 +231,8 @@ func (s *BatchService) Scrap(actor Actor, batchID uint, in ScrapBatchInput) (*Sc
 	result.ItemIDs = itemIDs
 	// Sản phẩm mất phần sống của NVL này nên tụt về trạng thái của những phần còn
 	// lại (thường là PENDING) và hiện lại ở hàng chờ gom batch; batch đã đóng
-	// không còn phần sống nên roll-up bỏ qua, còn batch mẹ đóng theo khi con cuối
-	// cùng đóng.
+	// không còn phần sống nên roll-up bỏ qua.
 	_, _ = recomputeOrderItemStatuses(s.repo, itemIDs, actor)
-	if batch.ParentBatchID != nil {
-		_ = recomputeParentBatchStatus(s.repo, *batch.ParentBatchID, actor)
-	} else if batch.IsParent {
-		_ = recomputeParentBatchStatus(s.repo, batch.ID, actor)
-	}
 
 	s.audit.Log(actor, "BATCH_SCRAP", "batch", &batch.ID,
 		"Huỷ batch "+strings.Join(result.BatchCodes, ", ")+" ("+reason+") → làm lại theo hướng "+route,

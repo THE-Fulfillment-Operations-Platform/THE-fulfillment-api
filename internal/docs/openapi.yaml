@@ -550,6 +550,12 @@ paths:
     post:
       tags: [Batches]
       summary: Tạo batch cho 1 material từ các item (Designer)
+      description: >-
+        Chia các item theo nhóm SKU cha và định mức (xem /api/batches/auto) rồi
+        tạo MỖI TẤM MỘT BATCH PHẲNG. Trả `batches[]` (mọi batch vừa tạo, theo
+        thứ tự tấm), `batch` (= batches[0], giữ cho client cũ) và
+        `skipped_item_ids`. Không còn batch mẹ/con từ 24/09/2026; các batch con
+        cũ đã được tách thành batch thường khi API khởi động.
       requestBody:
         required: true
         content:
@@ -576,18 +582,19 @@ paths:
         cặp (SKU, NVL), chưa khai thì ước tính từ kích thước; SKU không có định
         mức thành một batch riêng không giới hạn (khách chốt 24/09/2026). Rồi tự
         sinh mã #101xxx và tạo batch; người vận hành không chọn từng sản phẩm,
-        không đặt tên. Nhiều nhóm → batch mẹ + mỗi nhóm một batch con.
-        NVL nào không gom được
+        không đặt tên. Mỗi tấm là MỘT batch phẳng — không còn batch mẹ/con
+        (khách chốt 24/09/2026: "bỏ lớp mẹ đi, để nó ra một batch mới cho dễ
+        quản lý"). NVL nào không gom được
         (pool quá lớn, lỗi giữa chừng) được trả về trong `skipped` kèm lý do;
         material lỗi rollback riêng, không ảnh hưởng material khác.
       responses:
-        '200': { description: 'created[] (mỗi NVL: batch gốc + mã các batch sản xuất + số sản phẩm), skipped[], total_batches, total_items' }
+        '200': { description: 'created[] (mỗi NVL: batch_id/batch_code của batch đầu + batch_codes mọi batch đã tạo + số sản phẩm), skipped[], total_batches, total_items' }
   /api/batches/links/export.xlsx:
     get:
       tags: [Batches]
       summary: Xuất Excel bàn làm việc designer — mỗi dòng một batch chờ file sản xuất
       description: >-
-        Gồm mọi batch PENDING chưa đóng trực tiếp chứa item (batch mẹ bị loại).
+        Gồm mọi batch PENDING chưa đóng.
         Cột: Phiên bản mẫu (batch-links-v1, trên từng dòng nên sort không phá),
         Batch ID (bất biến — căn cứ đối chiếu khi nhập lại), Mã batch, Chất
         liệu, Số item, Số sản phẩm, Link design (trang chi tiết batch — nơi tải
@@ -662,12 +669,11 @@ paths:
       summary: Xoá batch chưa sản xuất, trả sản phẩm về hàng chờ gom batch
       description: >-
         Chỉ xoá được batch còn PENDING toàn bộ (chưa in/cắt, chưa QC, chưa có
-        hàng huỷ). Batch cha (chia theo định mức) xoá cả cụm con; batch con
-        không xoá riêng lẻ. Batch đã vào sản xuất trả 422 — hàng lỗi/bỏ xử lý
-        qua flow QC scrap. Sản phẩm được thả về màn gom batch để gom lại.
+        hàng huỷ). Batch đã vào sản xuất trả 422 — hàng lỗi/bỏ xử lý qua flow
+        QC scrap. Sản phẩm được thả về màn gom batch để gom lại.
       responses:
         '200': { description: Đã xoá }
-        '422': { description: Batch đã vào sản xuất / batch con / đã đóng }
+        '422': { description: Batch đã vào sản xuất / đã đóng }
   /api/batches/{id}/links:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
     put:
@@ -677,7 +683,7 @@ paths:
         Lưu CẢ HAI link trong một transaction (khoá batch, upsert PRINT + CUT,
         fan-out xuống print_file_url/cut_file_url của mọi item còn hiệu lực) —
         lỗi bất kỳ rollback toàn bộ, không bao giờ có link in mới + link cắt cũ.
-        Chỉ batch PENDING, chưa đóng, không phải batch mẹ. Thay link hiện có
+        Chỉ batch PENDING, chưa đóng. Thay link hiện có
         (REPLACE) bắt buộc `reason`. Cặp trùng hệt hiện tại là no-op (UNCHANGED),
         không audit. Audit BATCH_PRODUCTION_PACKAGE_SET giữ URL cũ + mới + lý do.
       requestBody:
@@ -693,13 +699,13 @@ paths:
                 reason: { type: string, maxLength: 255 }
       responses:
         '200': { description: 'links[] (cả PRINT và CUT), action = ASSIGN|REPLACE|UNCHANGED' }
-        '422': { description: Batch mẹ / đã đóng / đã bắt đầu sản xuất (bộ file khoá) / hết item hợp lệ / thiếu lý do thay thế }
+        '422': { description: Đã đóng / đã bắt đầu sản xuất (bộ file khoá) / hết item hợp lệ / thiếu lý do thay thế }
     patch:
       tags: [Batches]
       summary: Sửa MỘT link (PRINT hoặc CUT) — đường dự phòng, cùng luật khoá
       description: >-
-        Giữ để tương thích; luật giống PUT: chỉ batch PENDING chưa đóng, không
-        phải batch mẹ; thay bằng URL khác bắt buộc `reason`; audit giữ URL cũ,
+        Giữ để tương thích; luật giống PUT: chỉ batch PENDING chưa đóng; thay
+        bằng URL khác bắt buộc `reason`; audit giữ URL cũ,
         URL mới và lý do. UI chính dùng PUT (cặp nguyên tử).
       requestBody:
         required: true
@@ -732,8 +738,6 @@ paths:
         còn sống được đánh dấu huỷ kèm lý do + người huỷ, batch đóng lại, sản
         phẩm quay về hàng chờ gom batch (route PRODUCTION) hoặc hàng chờ thiết
         kế (route DESIGN) và được gom vào một batch MỚI.
-        Huỷ được từng batch con (mỗi con là một tấm vật lý); huỷ batch mẹ = huỷ
-        mọi con còn mở, và mẹ tự đóng khi con cuối cùng đóng.
         Với hàng combo nhiều NVL, các phần NVL khác của cùng sản phẩm đang ở
         "đã QC" sẽ bị hạ về CUT — QC là cổng cấp sản phẩm, còn phần đang làm lại
         thì cả sản phẩm chưa QC xong.

@@ -43,10 +43,12 @@ type CreateBatchInput struct {
 	Note         string         `json:"note"`
 }
 
-// Create builds a batch and its batch items. Items whose SKU does not include the
-// material, or that are already scheduled for that material, are skipped and
-// reported back so the caller knows exactly what was batched.
-func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, []uint, error) {
+// Create builds the production batches for one material — one flat batch per
+// sheet, as planBatchSplitByQuota lays them out — and their batch items. Items
+// whose SKU does not include the material, or that are already scheduled for
+// that material, are skipped and reported back so the caller knows exactly what
+// was batched. Returns every batch created, in sheet order.
+func (s *BatchService) Create(actor Actor, in CreateBatchInput) ([]*models.Batch, []uint, error) {
 	material, err := s.repo.Material.FindByID(in.MaterialID)
 	if err != nil {
 		return nil, nil, apperr.BadRequest("material_id does not reference an existing material")
@@ -71,7 +73,7 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 		return resolveProductionQuota(it.SKU, material)
 	}
 
-	var rootBatch *models.Batch // the batch returned to the caller (flat batch or parent)
+	var created []*models.Batch
 	var skipped []uint
 
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
@@ -180,9 +182,11 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 			return txRepo.Status.CreateBulk(history)
 		}
 
-		// One group (one family within one sheet, or a SKU without a quota): one
-		// flat batch — identical to legacy behaviour.
-		if len(groups) <= 1 {
+		// One flat batch per sheet. Codes "#101<id>" come from the row's own id, so
+		// every batch is a first-class citizen of the list — no parent wrapper, no
+		// "-1/-2" suffixes (khách chốt 24/09/2026: "bỏ lớp mẹ đi, để nó ra một
+		// batch mới cho dễ quản lý").
+		for _, group := range groups {
 			batch := newBatch()
 			if err := txRepo.Batch.Create(batch); err != nil {
 				return err
@@ -191,46 +195,12 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 			if err := txRepo.Batch.Update(batch); err != nil {
 				return err
 			}
-			if err := attachItems(batch, eligible); err != nil {
+			if err := attachItems(batch, group); err != nil {
 				return err
 			}
 			_ = recordStatus(txRepo, models.EntityBatch, batch.ID, "", string(models.StatusPending), actor, "batch created")
-			rootBatch = batch
-			return nil
+			created = append(created, batch)
 		}
-
-		// Several groups (several families, and/or a family over one sheet): a
-		// parent batch (holds no items) + one child batch per group. Codes:
-		// parent "#<n>", child "#<n>-<seq>".
-		parent := newBatch()
-		parent.IsParent = true
-		parent.ChildCount = len(groups)
-		if err := txRepo.Batch.Create(parent); err != nil {
-			return err
-		}
-		parent.Code = fmt.Sprintf("#%d", 101000+parent.ID)
-		if err := txRepo.Batch.Update(parent); err != nil {
-			return err
-		}
-		parentID := parent.ID
-		for i, group := range groups {
-			child := newBatch()
-			child.ParentBatchID = &parentID
-			child.Sequence = i + 1
-			if err := txRepo.Batch.Create(child); err != nil {
-				return err
-			}
-			child.Code = fmt.Sprintf("%s-%d", parent.Code, i+1)
-			if err := txRepo.Batch.Update(child); err != nil {
-				return err
-			}
-			if err := attachItems(child, group); err != nil {
-				return err
-			}
-			_ = recordStatus(txRepo, models.EntityBatch, child.ID, "", string(models.StatusPending), actor, "child batch created under "+parent.Code)
-		}
-		_ = recordStatus(txRepo, models.EntityBatch, parent.ID, "", string(models.StatusPending), actor, "parent batch created")
-		rootBatch = parent
 		return nil
 	})
 	if err != nil {
@@ -243,11 +213,20 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 	// Recompute affected items' internal status outside the create transaction.
 	_, _ = recomputeOrderItemStatuses(s.repo, in.OrderItemIDs, actor)
 
-	full, _ := s.repo.Batch.FindByID(rootBatch.ID)
-	s.audit.Log(actor, "BATCH_CREATE", "batch", &rootBatch.ID,
-		fmt.Sprintf("Created batch %s (material=%s)", rootBatch.Code, material.Code),
-		models.JSONMap{"skipped": skipped, "children": rootBatch.ChildCount})
-	return full, skipped, nil
+	out := make([]*models.Batch, 0, len(created))
+	codes := make([]string, 0, len(created))
+	for _, b := range created {
+		full, err := s.repo.Batch.FindByID(b.ID)
+		if err != nil {
+			return nil, nil, apperr.Internal("could not reload batch").Wrap(err)
+		}
+		out = append(out, full)
+		codes = append(codes, full.Code)
+	}
+	s.audit.Log(actor, "BATCH_CREATE", "batch", &out[0].ID,
+		fmt.Sprintf("Created %d batch (%s) (material=%s)", len(out), strings.Join(codes, ", "), material.Code),
+		models.JSONMap{"skipped": skipped, "batch_codes": codes})
+	return out, skipped, nil
 }
 
 // resolveProductionQuota returns the production quota that applies to one
@@ -438,9 +417,7 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 	// and cut files are ganged once per batch, so nobody can have printed or cut
 	// without them on record — and marking a stage done without them would strand
 	// the batch in the design queue, which only clears once both links exist.
-	// Parent batches are skipped: they hold no items and carry no links (their
-	// status is rolled up from their children, each of which is guarded here).
-	if !batch.IsParent && (newStatus == models.StatusPrinted || newStatus == models.StatusCut) {
+	if newStatus == models.StatusPrinted || newStatus == models.StatusCut {
 		kinds, err := s.repo.Batch.LinkKindsForBatch(batch.ID)
 		if err != nil {
 			return nil, apperr.Internal("could not read batch links").Wrap(err)
@@ -549,11 +526,6 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 	}
 	_, _ = recomputeOrderItemStatuses(s.repo, itemIDs, actor)
 
-	// If this is a child batch, roll the change up into its parent's status.
-	if batch.ParentBatchID != nil {
-		_ = recomputeParentBatchStatus(s.repo, *batch.ParentBatchID, actor)
-	}
-
 	s.audit.Log(actor, "BATCH_STATUS_UPDATE", "batch", &batch.ID,
 		fmt.Sprintf("Batch %s -> %s", batch.Code, newStatus), nil)
 	return s.Get(batch.ID)
@@ -561,12 +533,10 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 
 // Delete removes a batch that production has not touched yet, releasing its
 // items back to the batching pool (they reappear on the create-batch screen and
-// can be re-grouped). Deleting a split parent removes the whole child tree in
-// one go; a child is never deleted on its own — the split is quota-derived, so
-// removing one child would leave the parent's ChildCount and sequence lying.
+// can be re-grouped).
 //
-// The guard is deliberately narrow: every batch in the tree must still be
-// PENDING (and not closed), and every part untouched (PENDING, not scrapped).
+// The guard is deliberately narrow: the batch must still be PENDING (and not
+// closed), and every part untouched (PENDING, not scrapped).
 // A batch that was printed or cut represents physical goods and spent material —
 // that is the scrap/close flow's job, not delete's. Any tem QR printed for the
 // deleted batch becomes waste paper; the replacement batch prints its own.
@@ -578,29 +548,15 @@ func (s *BatchService) Delete(actor Actor, batchID uint) error {
 		}
 		return apperr.Internal("lookup failed").Wrap(err)
 	}
-	if batch.ParentBatchID != nil {
-		return apperr.Unprocessable("Đây là batch con trong cụm chia theo định mức — không xoá riêng lẻ. Hãy xoá batch cha để xoá cả cụm.")
-	}
-
 	var itemIDs []uint
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
 		txRepo := repositories.New(tx)
-
 		ids := []uint{batch.ID}
-		if batch.IsParent {
-			children, err := txRepo.Batch.ChildBatchesFor(batch.ID)
-			if err != nil {
-				return err
-			}
-			for _, c := range children {
-				ids = append(ids, c.ID)
-			}
-		}
 
 		// Re-read inside the transaction: the board may have advanced the batch
 		// between the screen render and the click, and the header alone can lag
 		// (a PENDING batch whose part a QC action already moved), so the guard
-		// checks both the headers and every part.
+		// checks both the header and every part.
 		rows, err := txRepo.Batch.FindLiteMany(ids)
 		if err != nil {
 			return err
@@ -670,7 +626,7 @@ func (s *BatchService) Delete(actor Actor, batchID uint) error {
 
 	s.audit.Log(actor, "BATCH_DELETE", "batch", &batch.ID,
 		fmt.Sprintf("Deleted batch %s", batch.Code),
-		models.JSONMap{"released_item_ids": itemIDs, "children": batch.ChildCount})
+		models.JSONMap{"released_item_ids": itemIDs})
 	return nil
 }
 

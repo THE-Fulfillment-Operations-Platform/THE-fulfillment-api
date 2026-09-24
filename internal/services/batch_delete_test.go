@@ -20,7 +20,9 @@ func TestBatchDelete_ReleasesItemsForRebatch(t *testing.T) {
 	actor := Actor{ID: 1, Role: models.RoleDesigner}
 	_, ids := seedSplit(t, db, 0, 2)
 
-	batch, _, err := svc.Create(actor, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batchAll, _, err := svc.Create(actor, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+
+	batch := firstBatch(t, batchAll, err)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -63,7 +65,8 @@ func TestBatchDelete_ReleasesItemsForRebatch(t *testing.T) {
 	}
 
 	// The same items regroup into a fresh batch with nothing skipped.
-	again, skipped, err := svc.Create(actor, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	againAll, skipped, err := svc.Create(actor, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	again := firstBatch(t, againAll, err)
 	if err != nil {
 		t.Fatalf("re-batch after delete: %v", err)
 	}
@@ -85,7 +88,9 @@ func TestBatchDelete_BlockedOnceProductionStarted(t *testing.T) {
 	actor := Actor{ID: 1, Role: models.RoleDesigner}
 	_, ids := seedSplit(t, db, 0, 2)
 
-	batch, _, err := svc.Create(actor, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batchAll, _, err := svc.Create(actor, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+
+	batch := firstBatch(t, batchAll, err)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -116,48 +121,48 @@ func TestBatchDelete_BlockedOnceProductionStarted(t *testing.T) {
 	}
 }
 
-// TestBatchDelete_ParentTree: deleting a split parent takes the whole tree;
-// deleting a child on its own is refused.
-func TestBatchDelete_ParentTree(t *testing.T) {
+// TestBatchDelete_OneSheetOfMany: a pool that fills several sheets becomes
+// several flat batches; each is deleted on its own, the others stay, and the
+// released items regroup into a fresh batch.
+func TestBatchDelete_OneSheetOfMany(t *testing.T) {
 	db := newSplitDB(t)
 	svc := newBatchService(db)
 	actor := Actor{ID: 1, Role: models.RoleDesigner}
-	_, ids := seedSplit(t, db, 2, 5) // quota 2, 5 products → parent + 3 children
+	_, ids := seedSplit(t, db, 2, 5) // quota 2, 5 products → 3 flat batches
 
-	parent, _, err := svc.Create(actor, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
+	batches, _, err := svc.Create(actor, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if !parent.IsParent {
-		t.Fatalf("expected a split parent")
+	if len(batches) != 3 {
+		t.Fatalf("want 3 flat batches, got %d", len(batches))
 	}
-	var child models.Batch
-	if err := db.Where("parent_batch_id = ?", parent.ID).First(&child).Error; err != nil {
-		t.Fatalf("load child: %v", err)
-	}
-
-	if err := svc.Delete(actor, child.ID); err == nil {
-		t.Fatal("deleting a child on its own should be refused")
+	first := batches[0]
+	firstItems, err := svc.repo.Batch.OrderItemIDsForBatches([]uint{first.ID})
+	if err != nil {
+		t.Fatalf("items of first: %v", err)
 	}
 
-	if err := svc.Delete(actor, parent.ID); err != nil {
-		t.Fatalf("delete parent: %v", err)
+	if err := svc.Delete(actor, first.ID); err != nil {
+		t.Fatalf("delete one sheet: %v", err)
 	}
-	var liveBatches int64
-	db.Model(&models.Batch{}).Where("id = ? OR parent_batch_id = ?", parent.ID, parent.ID).Count(&liveBatches)
-	if liveBatches != 0 {
-		t.Fatalf("parent tree should be gone, %d batches remain", liveBatches)
+	var live int64
+	db.Model(&models.Batch{}).Count(&live)
+	if live != 2 {
+		t.Fatalf("the other two sheets must stay, got %d live batches", live)
 	}
 	var parts int64
-	db.Unscoped().Model(&models.BatchItem{}).Count(&parts)
+	db.Unscoped().Model(&models.BatchItem{}).Where("batch_id = ?", first.ID).Count(&parts)
 	if parts != 0 {
-		t.Fatalf("all parts should be hard-deleted, %d remain", parts)
+		t.Fatalf("deleted sheet's parts should be hard-deleted, %d remain", parts)
 	}
 
-	// Every released item is back to PENDING and can regroup.
-	if _, skipped, err := svc.Create(actor, CreateBatchInput{MaterialID: 1, OrderItemIDs: ids}); err != nil {
-		t.Fatalf("re-batch after tree delete: %v", err)
-	} else if len(skipped) != 0 {
-		t.Fatalf("re-batch skipped %v, want none", skipped)
+	// The released items are back to PENDING and regroup on their own.
+	again, skipped, err := svc.Create(actor, CreateBatchInput{MaterialID: 1, OrderItemIDs: firstItems})
+	if err != nil {
+		t.Fatalf("re-batch after delete: %v", err)
+	}
+	if len(skipped) != 0 || len(again) != 1 || len(again[0].Items) != len(firstItems) {
+		t.Fatalf("re-batch: skipped %v, batches %d", skipped, len(again))
 	}
 }
