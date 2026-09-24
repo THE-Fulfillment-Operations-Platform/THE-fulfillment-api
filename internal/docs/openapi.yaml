@@ -182,8 +182,9 @@ paths:
       description: >-
         `length_mm` × `width_mm` là kích thước MỘT tấm NVL (mm) — cùng kích
         thước SKU tạo ra định mức sản xuất của từng SKU trên NVL này (xem POST
-        /api/skus). Phải có cả hai hoặc bỏ trống cả hai. Định mức nhập tay
-        (`products_per_unit`) đã bỏ khỏi API.
+        /api/skus). Phải có cả hai hoặc bỏ trống cả hai — chỉ để ƯỚC TÍNH
+        định mức cho cặp chưa khai. Định mức khai nằm ở từng cặp SKU – NVL
+        (`materials[].products_per_unit` của SKU), không ở NVL.
       responses: { '201': { description: Created } }
   /api/materials/import/preview:
     post:
@@ -217,15 +218,16 @@ paths:
       summary: Tạo SKU (single hoặc combo nhiều material)
       description: >-
         Mỗi phần tử `materials[]` là một cặp (SKU, NVL): `quantity_per_unit` =
-        một sản phẩm ăn bao nhiêu đơn vị NVL (định lượng vật tư). ĐỊNH MỨC SẢN
-        XUẤT của cặp (một tấm NVL ra được bao nhiêu sản phẩm của SKU này) KHÔNG
-        phải là input — từ 2026-09-18 nó được TÍNH: ⌊diện tích tấm NVL / diện
-        tích sản phẩm⌋, tức ⌊(Material.length_mm × width_mm) / (SKU.length_mm ×
-        width_mm)⌋. Cùng một tấm mica ra 10 khay nhỏ nhưng chỉ 4 khay to, nên
-        định mức theo cặp; thiếu kích thước ở một trong hai bên = không có định
-        mức (SKU đó không chẻ). Khi tạo batch, item nhóm theo SKU rồi mỗi SKU
-        chẻ theo định mức này. Công thức là cận trên — bỏ qua mạch cắt và cách
-        xếp hình. Trường `products_per_unit` cũ không còn trong API.
+        một sản phẩm ăn bao nhiêu đơn vị NVL (định lượng vật tư);
+        `products_per_unit` = ĐỊNH MỨC SẢN XUẤT KHAI của cặp — một tấm NVL ra
+        được bao nhiêu sản phẩm của SKU này, theo file layout thật của xưởng
+        (khách chốt 24/09/2026), null/≤0 = chưa khai. Định mức khai luôn thắng;
+        cặp chưa khai thì hệ thống ƯỚC TÍNH bằng xếp lưới D x R lên tấm
+        (⌊L/l⌋·⌊W/w⌋, lấy chiều tốt hơn — chia diện tích cho số cao hơn thực
+        tế: mica 600×800 với 127×127 chia diện tích ra 29, xếp thật 24). Thiếu
+        kích thước ở một trong hai bên và không khai = không có định mức (SKU
+        đó không chẻ). GET /api/skus trả `quota` không có sẵn — client tính lại
+        bằng cùng luật (utils/quota.ts).
 
         `length_mm` × `width_mm` là kích thước D x R của sản phẩm, đơn vị mm
         (làm tròn 0,01 mm), phải có cả hai hoặc bỏ trống cả hai.
@@ -277,6 +279,28 @@ paths:
       responses: { '200': { description: OK } }
   /api/master-data/parents/template.xlsx:
     get: { tags: [Catalog], summary: File mẫu import SKU cha, responses: { '200': { description: OK } } }
+  /api/master-data/template.xlsx:
+    get:
+      tags: [Catalog]
+      summary: File mẫu import SKU con (bước 2)
+      description: >-
+        Cột `SKU cha | SKU | Tên sản phẩm | Loại VL | D (mm) | R (mm) | Định mức
+        | Mô tả`. `Định mức` = số sản phẩm một tấm Loại VL trên cùng dòng làm
+        ra (định mức KHAI của cặp SKU – NVL); ô trống giữ số đã khai; số không
+        nguyên dương → dòng lỗi QUOTA_INVALID; hai dòng cùng SKU khai hai số
+        khác nhau cho cùng NVL → SKU lỗi QUOTA_CONFLICT. Preview trả
+        `quota_by_material` + `quota_sources` (declared / estimated) cho từng SKU.
+      responses: { '200': { description: OK } }
+  /api/master-data/export.xlsx:
+    get:
+      tags: [Catalog]
+      summary: Xuất toàn bộ SKU con / SKU lẻ hiện có theo khổ file import
+      description: >-
+        Mỗi dòng một cặp SKU × NVL, cột `Định mức` là số đã khai (trống = chưa
+        khai), thêm cột `Ước tính theo kích thước (import bỏ qua)` để đối chiếu.
+        Điền `Định mức` rồi nạp lại chính file này qua /api/master-data/import.
+        SKU cha không có trong file (bước 1 quản).
+      responses: { '200': { description: OK } }
   /api/orders/import:
     post:
       tags: [Import]
@@ -545,14 +569,14 @@ paths:
       tags: [Batches]
       summary: Tự tạo batch từ toàn bộ pool design-ready (OWNER/ADMIN/OPS/DESIGNER)
       description: >-
-        Hệ thống tự phân loại theo NVL, trong mỗi NVL NHÓM THEO SKU (một batch
-        là một file in + một file cắt của MỘT SKU; SKU khác nhau — kể cả hai SKU
-        con cùng SKU cha — không bao giờ chung batch), rồi mỗi SKU chia theo
-        ĐỊNH MỨC CỦA CẶP (SKU, NVL) — tính từ kích thước: ⌊S_tấm / S_sản phẩm⌋,
-        thiếu kích thước một bên thì SKU đó thành một batch không giới hạn — rồi
-        tự sinh mã #101xxx và tạo batch; người vận hành không chọn từng sản
-        phẩm, không đặt tên. Nhiều nhóm → batch mẹ + mỗi nhóm một batch con
-        (khách chốt 24/09/2026: SKU chỉ có vài sản phẩm lẻ vẫn là batch riêng).
+        Hệ thống tự phân loại theo NVL, trong mỗi NVL NHÓM THEO SKU CHA (SKU
+        không có cha là nhóm của chính nó; khác nhóm không bao giờ chung batch),
+        trong nhóm xếp SKU cùng mã trước rồi nhét SKU anh em vào chỗ trống theo
+        MỨC CHIẾM DỤNG: mỗi sản phẩm chiếm 1/định mức tấm — định mức KHAI của
+        cặp (SKU, NVL), chưa khai thì ước tính từ kích thước; SKU không có định
+        mức thành một batch riêng không giới hạn (khách chốt 24/09/2026). Rồi tự
+        sinh mã #101xxx và tạo batch; người vận hành không chọn từng sản phẩm,
+        không đặt tên. Nhiều nhóm → batch mẹ + mỗi nhóm một batch con.
         NVL nào không gom được
         (pool quá lớn, lỗi giữa chừng) được trả về trong `skipped` kèm lý do;
         material lỗi rollback riêng, không ảnh hưởng material khác.

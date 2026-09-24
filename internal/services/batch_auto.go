@@ -49,7 +49,7 @@ type AutoCreateBatchesResult struct {
 // AutoCreateBatches batches the ENTIRE design-ready pool in one deliberate
 // action: per material it reads every eligible item (approved order,
 // design-ready, not cancelled, not already scheduled — a part scrapped at QC
-// comes back for rework), groups by SKU and splits each SKU by the derived
+// comes back for rework), groups by SKU family and fills each sheet by the
 // (SKU, material) quota (see planBatchSplitByQuota), then creates the batches
 // with system-generated codes. Nobody picks rows or types batch names.
 //

@@ -70,12 +70,12 @@ type Material struct {
 	Name        string `json:"name" gorm:"size:120;not null"`
 	Description string `json:"description" gorm:"size:255"`
 	// LengthMM × WidthMM is the size of ONE unit of the material — one sheet —
-	// in millimetres. Together with a SKU's own size it yields the production
-	// quota (see ProductionQuota). nil = not declared: no quota, batches of this
-	// material are never split.
-	// (Before 2026-09-18 the quota was typed by hand into products_per_unit on
-	// this table and on sku_materials. Those columns still exist in the database
-	// — AutoMigrate never drops one — but no code reads or writes them.)
+	// in millimetres. Together with a SKU's own size it gives the ESTIMATED
+	// production quota (EstimatedQuota) for pairs the factory has not declared
+	// one for. nil = not declared.
+	// (materials.products_per_unit, the pre-18/09 material-level quota, still
+	// exists in the database — AutoMigrate never drops a column — but nothing
+	// reads or writes it; the declared quota lives on sku_materials.)
 	LengthMM *float64 `json:"length_mm"`
 	WidthMM  *float64 `json:"width_mm"`
 }
@@ -94,30 +94,89 @@ func dimCells(v *float64) int64 {
 	return int64(math.Round(*v * dimUnit))
 }
 
-// ProductionQuota is how many products of `sku` ONE unit (one sheet) of
-// `material` yields: ⌊S_sheet / S_product⌋, both areas from the declared D × R.
-// This is the customer's own rule (2026-09-18) and it is an upper bound — it
-// ignores kerf and how the pieces actually nest — so a real sheet may yield a
-// little less. 0 = no quota (either side has no size), which the batch splitter
-// reads as "unlimited". A product larger than the sheet yields 1, never 0: a 0
-// there would read as unlimited and pack every such product into one batch.
+// QuotaSource says where a pair's production quota came from.
+type QuotaSource string
+
+const (
+	// QuotaDeclared: typed by the factory for this (SKU, material) pair — the
+	// number from its real layout file. Always wins.
+	QuotaDeclared QuotaSource = "declared"
+	// QuotaEstimated: derived from the two sizes by grid packing. An estimate:
+	// it ignores kerf, margins and clever nesting.
+	QuotaEstimated QuotaSource = "estimated"
+	// QuotaNone: nothing declared and a size missing on either side.
+	QuotaNone QuotaSource = ""
+)
+
+// DeclaredQuota is the quota the factory declared for (sku, materialID), or 0.
+// It reads sku.Materials, so the caller must have loaded them.
+func DeclaredQuota(sku *SKU, materialID uint) int {
+	if sku == nil {
+		return 0
+	}
+	for i := range sku.Materials {
+		m := &sku.Materials[i]
+		if m.MaterialID == materialID && m.ProductsPerUnit != nil && *m.ProductsPerUnit > 0 {
+			return *m.ProductsPerUnit
+		}
+	}
+	return 0
+}
+
+// EstimatedQuota is how many products of `sku` ONE sheet of `material` yields
+// by laying the product's D × R box out on a grid, in the better of the two
+// orientations: ⌊L/l⌋·⌊W/w⌋ or ⌊L/w⌋·⌊W/l⌋. 0 = a size is missing on either
+// side. A product larger than the sheet yields 1, never 0: a 0 would read as
+// "no quota" and pack every such product into one batch.
 //
-// The division is done in whole hundredths of a millimetre so that the exact
-// boundary — where a sheet is precisely full — is decided by integer arithmetic
-// and not by float rounding (0.3 / 0.1 is 2.9999… in float, ⌊…⌋ = 2, wrong).
-func ProductionQuota(sku *SKU, material *Material) int {
+// Grid, not area: the customer showed (2026-09-24) that ⌊S_sheet / S_product⌋
+// overstates — a 600×800 mica sheet holds 24 pieces of 127×127 laid out, not
+// 29 — and asked to declare the real number per pair instead (DeclaredQuota).
+// This estimate only fills in for pairs nobody has declared yet.
+//
+// Sizes are compared in whole hundredths of a millimetre so the boundary —
+// a piece that fits exactly — is decided by integer arithmetic, not float
+// rounding.
+func EstimatedQuota(sku *SKU, material *Material) int {
 	if sku == nil || material == nil {
 		return 0
 	}
-	sheet := dimCells(material.LengthMM) * dimCells(material.WidthMM)
-	product := dimCells(sku.LengthMM) * dimCells(sku.WidthMM)
-	if sheet == 0 || product == 0 {
+	sheetL, sheetW := dimCells(material.LengthMM), dimCells(material.WidthMM)
+	prodL, prodW := dimCells(sku.LengthMM), dimCells(sku.WidthMM)
+	if sheetL == 0 || sheetW == 0 || prodL == 0 || prodW == 0 {
 		return 0
 	}
-	if q := sheet / product; q >= 1 {
-		return int(q)
+	upright := (sheetL / prodL) * (sheetW / prodW)
+	rotated := (sheetL / prodW) * (sheetW / prodL)
+	if rotated > upright {
+		upright = rotated
 	}
-	return 1
+	if upright < 1 {
+		return 1
+	}
+	return int(upright)
+}
+
+// ProductionQuotaSource is the quota the batch splitter uses for (sku,
+// material) and where it came from: the declared number when the factory
+// typed one, else the grid estimate, else 0 (no quota → the SKU is never split).
+func ProductionQuotaSource(sku *SKU, material *Material) (int, QuotaSource) {
+	if sku == nil || material == nil {
+		return 0, QuotaNone
+	}
+	if q := DeclaredQuota(sku, material.ID); q > 0 {
+		return q, QuotaDeclared
+	}
+	if q := EstimatedQuota(sku, material); q > 0 {
+		return q, QuotaEstimated
+	}
+	return 0, QuotaNone
+}
+
+// ProductionQuota is ProductionQuotaSource without the source.
+func ProductionQuota(sku *SKU, material *Material) int {
+	q, _ := ProductionQuotaSource(sku, material)
+	return q
 }
 
 // ProductFitsSheet reports whether a product with the given size fits on one
@@ -167,9 +226,16 @@ type SKUMaterial struct {
 	MaterialID uint     `json:"material_id" gorm:"index:idx_sku_material,unique;not null"`
 	Material   Material `json:"material,omitempty" gorm:"foreignKey:MaterialID"`
 	// QuantityPerUnit is how much of this material ONE product consumes — a bill
-	// of materials figure. It is NOT the production quota: that is derived from
-	// the SKU's and the material's sizes (ProductionQuota), never stored.
-	QuantityPerUnit int    `json:"quantity_per_unit" gorm:"not null;default:1"`
+	// of materials figure. It is NOT the production quota.
+	QuantityPerUnit int `json:"quantity_per_unit" gorm:"not null;default:1"`
+	// ProductsPerUnit is the DECLARED production quota of this (SKU, material)
+	// pair: how many products of the SKU one sheet of the material yields, as
+	// the factory knows it from its real layout file (customer, 2026-09-24: the
+	// size-derived number overstates, so the declared one always wins — see
+	// ProductionQuotaSource). nil / ≤0 = not declared → estimated from sizes.
+	// Same nullable column the pre-18/09 code used, so AutoMigrate leaves the
+	// live table alone.
+	ProductsPerUnit *int   `json:"products_per_unit"`
 	Note            string `json:"note" gorm:"size:255"`
 }
 

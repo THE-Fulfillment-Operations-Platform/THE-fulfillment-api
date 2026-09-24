@@ -15,9 +15,11 @@ import (
 
 // Material import: seed each material's SHEET SIZE from a small spreadsheet —
 // `Loại VL` (material name) + `Dài (mm)` + `Rộng (mm)` (+ optional `Mô tả`).
-// One row per material. The size is what every SKU's production quota on that
-// material is derived from (⌊S_sheet / S_product⌋, see models.ProductionQuota);
-// there is no quota column any more — khách chốt 2026-09-18.
+// One row per material. The sheet size feeds the ESTIMATED production quota
+// (grid packing, models.EstimatedQuota) of every pair nobody has declared a
+// quota for; the declared quota itself lives on the (SKU, material) pair and
+// comes in through the SKU file's "Định mức" column — not here (khách chốt
+// 2026-09-18 for sizes, 2026-09-24 for declared quotas).
 //
 // A material is identified by its name (case-insensitive). Blank cells are never
 // destructive: for a new material they create it without a size; for an existing
@@ -148,7 +150,7 @@ func ParseMaterialImportFile(source string, r io.Reader) ([]MaterialImportRow, [
 		case descIdx == -1 && legacyDescHeaders[n]:
 			descIdx = i
 		case legacyQuotaHeaders[n]:
-			notices = append(notices, fmt.Sprintf("Cột \"%s\" không còn được dùng — định mức giờ tính từ kích thước tấm NVL và kích thước SKU, cột này bị bỏ qua", strings.TrimSpace(h)))
+			notices = append(notices, fmt.Sprintf("Cột \"%s\" bị bỏ qua — định mức là của từng cặp SKU – NVL, khai ở cột \"Định mức\" của file SKU (Master Data → SKU → Import SKU con), không ở file NVL", strings.TrimSpace(h)))
 		}
 	}
 	if matIdx == -1 {

@@ -72,6 +72,20 @@ func (h *Handlers) DownloadMasterTemplate(c *gin.Context) {
 	c.Data(http.StatusOK, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", data)
 }
 
+// DownloadMasterExport streams the current catalog (child + standalone SKUs, one
+// row per SKU × material, with the declared quota) in the import layout, so the
+// factory fills "Định mức" and imports the same file back.
+// GET /api/master-data/export.xlsx
+func (h *Handlers) DownloadMasterExport(c *gin.Context) {
+	data, filename, err := h.svc.MasterImport.MasterExportXLSX()
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
+	c.Data(http.StatusOK, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", data)
+}
+
 // MasterImportCommit applies a previously previewed master-data import job.
 // POST /api/master-data/import/commit
 func (h *Handlers) MasterImportCommit(c *gin.Context) {

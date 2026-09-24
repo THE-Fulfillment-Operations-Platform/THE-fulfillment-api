@@ -359,7 +359,8 @@ func TestMaterialSize_CRUD(t *testing.T) {
 		t.Fatalf("create sku: %v", err)
 	}
 	mat, _ := svc.GetMaterial(m.ID)
-	if got := models.ProductionQuota(sku, mat); got != 66 {
-		t.Fatalf("quota = %d, want ⌊10000/150⌋ = 66", got)
+	// Nothing declared → grid estimate: ⌊100/10⌋·⌊100/15⌋ = 60 (not ⌊10000/150⌋ = 66).
+	if got := models.ProductionQuota(sku, mat); got != 60 {
+		t.Fatalf("quota = %d, want 10×6 = 60", got)
 	}
 }

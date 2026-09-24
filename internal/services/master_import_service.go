@@ -55,6 +55,10 @@ type LegacyRow struct {
 	Length      string `json:"length"`
 	Width       string `json:"width"`
 	Size        string `json:"size"`
+	// Quota is the raw "Định mức" cell: the declared production quota of this
+	// row's (SKU, Loại VL) pair — products per sheet, from the factory's layout
+	// file. Blank = not declared (an existing number stays).
+	Quota       string `json:"quota"`
 	Description string `json:"description"`
 }
 
@@ -77,6 +81,8 @@ const (
 	errParentNotFound   = "PARENT_NOT_FOUND"  // parent not in the catalog — import it first
 	errParentIsChild    = "PARENT_IS_CHILD"   // parent is itself a child (2 levels max)
 	errSKUHasChildren   = "SKU_HAS_CHILDREN"  // an existing parent can't become a child
+	errQuotaInvalid     = "QUOTA_INVALID"     // Định mức cell is not a positive whole number, or has no Loại VL
+	errQuotaConflict    = "QUOTA_CONFLICT"    // the SKU's rows declare different quotas for the same material
 )
 
 // ---------- Preview / plan structures (also stored in MasterImportJob.Plan) ----------
@@ -106,9 +112,11 @@ type SKUPlan struct {
 	WidthMM       *float64 `json:"width_mm,omitempty"`
 	Description   string   `json:"description,omitempty"`
 	// QuotaByMaterial is the production quota this SKU will have on each of its
-	// materials once applied — ⌊S_sheet / S_product⌋ — for the materials whose
-	// sheet size is known. Preview only; nothing is stored.
-	QuotaByMaterial map[string]int `json:"quota_by_material,omitempty"`
+	// materials once applied: the file's "Định mức", else the number already
+	// declared on the pair, else the size estimate. QuotaSources says which
+	// (models.QuotaDeclared / QuotaEstimated) per material name.
+	QuotaByMaterial map[string]int    `json:"quota_by_material,omitempty"`
+	QuotaSources    map[string]string `json:"quota_sources,omitempty"`
 }
 
 type MappingPlan struct {
@@ -116,6 +124,9 @@ type MappingPlan struct {
 	MaterialCode string `json:"material_code"`
 	MaterialName string `json:"material_name"`
 	Exists       bool   `json:"exists"`
+	// Quota is the declared quota the file sets on this pair (0 = the file says
+	// nothing; whatever is stored stays).
+	Quota int `json:"quota,omitempty"`
 }
 
 type LegacyRowError struct {
@@ -133,6 +144,8 @@ type MasterImportSummary struct {
 	NewMappings  int `json:"new_mappings"`
 	MissingCount int `json:"missing_count"`
 	ErrorRows    int `json:"error_rows"`
+	// QuotasSet: pairs that get a declared quota from the file's Định mức column.
+	QuotasSet int `json:"quotas_set"`
 	// ChildSKUs: SKUs the file files under a parent; ParentGroups: how many
 	// distinct parents they go to.
 	ChildSKUs    int `json:"child_skus"`
@@ -145,6 +158,8 @@ type MasterImportApplied struct {
 	MappingsCreated  int `json:"mappings_created"`
 	// SKUsUpdated: existing SKUs whose parent, D x R or description changed.
 	SKUsUpdated int `json:"skus_updated"`
+	// QuotasSet: (SKU, material) pairs whose declared quota was written.
+	QuotasSet int `json:"quotas_set"`
 }
 
 // MasterImportPreview is returned to the client and also persisted (as Plan) so a
@@ -194,6 +209,19 @@ var (
 	legacyWidthHeaders  = map[string]bool{"r": true, "rong": true, "chieurong": true, "width": true}
 	legacySizeHeaders   = map[string]bool{"dxr": true, "kichthuoc": true, "kichthuocdxr": true}
 )
+
+// skuQuotaHeaders: the declared production quota of the row's (SKU, Loại VL)
+// pair — "Định mức", "SP/tấm", "Định mức (sp/tấm)"… Keyed by quotaHeaderKey.
+var skuQuotaHeaders = map[string]bool{
+	"dinhmuc": true, "dinhmucsanxuat": true, "dinhmucsptam": true, "dinhmucsanphamtam": true,
+	"sptam": true, "sanphamtam": true, "sanphamtrentam": true, "sanphammottam": true,
+	"quota": true, "productsperunit": true, "productspersheet": true, "persheet": true,
+}
+
+// quotaHeaderKey normalizes a quota header and drops brackets: "Định mức (sp/tấm)" → "dinhmucsptam".
+func quotaHeaderKey(h string) string {
+	return strings.NewReplacer("(", "", ")", "", "[", "", "]", "").Replace(normalizeLegacyHeader(h))
+}
 
 // legacySKUDescHeaders: the SKU's own description. Narrower than the material
 // import's aliases on purpose — "Note"/"Ghi chú" in an order file is a note about
@@ -252,10 +280,11 @@ func legacyRowsFromGrid(records [][]string) ([]LegacyRow, error) {
 	}
 	header := records[0]
 	skuIdx, matIdx, prodIdx := -1, -1, -1
-	parentIdx, lenIdx, widIdx, sizeIdx, descIdx := -1, -1, -1, -1, -1
+	parentIdx, lenIdx, widIdx, sizeIdx, descIdx, quotaIdx := -1, -1, -1, -1, -1, -1
 	for i, h := range header {
 		n := normalizeLegacyHeader(h)
 		d := dimHeaderKey(h)
+		q := quotaHeaderKey(h)
 		switch {
 		case skuIdx == -1 && legacySKUHeaders[n]:
 			skuIdx = i
@@ -273,6 +302,8 @@ func legacyRowsFromGrid(records [][]string) ([]LegacyRow, error) {
 			sizeIdx = i
 		case descIdx == -1 && legacySKUDescHeaders[n]:
 			descIdx = i
+		case quotaIdx == -1 && skuQuotaHeaders[q]:
+			quotaIdx = i
 		}
 	}
 	if skuIdx == -1 {
@@ -298,11 +329,33 @@ func legacyRowsFromGrid(records [][]string) ([]LegacyRow, error) {
 			Length:      cell(rec, lenIdx),
 			Width:       cell(rec, widIdx),
 			Size:        cell(rec, sizeIdx),
+			Quota:       cell(rec, quotaIdx),
 			Description: cell(rec, descIdx),
 		})
 	}
 	return rows, nil
 }
+
+// parseQuota reads a "Định mức" cell: blank → 0 (not declared); a positive whole
+// number → that; anything else → a message. "40 sp" / "40/tấm" are accepted
+// (the unit is stripped), "40,5" is not — half a product per sheet is nonsense.
+func parseQuota(raw string) (int, string) {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return 0, ""
+	}
+	m := quotaNumberRe.FindStringSubmatch(raw)
+	if m == nil {
+		return 0, "Định mức = \"" + raw + "\" không phải số nguyên dương (số sản phẩm một tấm làm ra, vd 40)"
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil || n < 1 {
+		return 0, "Định mức = \"" + raw + "\" phải là số nguyên dương"
+	}
+	return n, ""
+}
+
+var quotaNumberRe = regexp.MustCompile(`^(\d+)\s*(?:sp|sản phẩm|san pham|pcs|/\s*tấm|/\s*tam|sp\s*/\s*tấm|sp\s*/\s*tam)?$`)
 
 // dimNumberRe is one size figure: digits with an optional decimal part, either
 // "." or the Vietnamese "," — optionally followed by the only unit accepted, mm.
@@ -388,20 +441,23 @@ func dimEqual(a, b *float64) bool {
 // ---------- Analysis ----------
 
 type skuAgg struct {
-	code         string
-	name         string
-	matNames     []string          // union of every material seen for this SKU, first-seen order
-	productNames []string          // distinct human-readable product names seen, first-seen order
-	rowSets      map[string]string // distinct per-row material sets: signature → as written (blank rows excluded)
-	rowCount     int
-	firstSeen    int
-	firstRow     int            // file row of the SKU's first line — where a SKU-level error points
-	parentCodes  []string       // distinct normalized "SKU cha" codes its rows name
-	length       *float64       // first declared D
-	width        *float64       // first declared R
-	dimConflict  bool           // two rows declare different D x R
-	description  string         // first non-blank Mô tả
-	quotas       map[string]int // derived quota per material name (preview)
+	code          string
+	name          string
+	matNames      []string          // union of every material seen for this SKU, first-seen order
+	productNames  []string          // distinct human-readable product names seen, first-seen order
+	rowSets       map[string]string // distinct per-row material sets: signature → as written (blank rows excluded)
+	rowCount      int
+	firstSeen     int
+	firstRow      int            // file row of the SKU's first line — where a SKU-level error points
+	parentCodes   []string       // distinct normalized "SKU cha" codes its rows name
+	length        *float64       // first declared D
+	width         *float64       // first declared R
+	dimConflict   bool           // two rows declare different D x R
+	description   string         // first non-blank Mô tả
+	quotas        map[string]int // effective quota per material name (preview)
+	quotaSrc      map[string]string
+	declared      map[string]int // file's Định mức per lower(material name)
+	quotaConflict bool           // two rows declare different quotas for one material
 }
 
 // skuError reports a SKU-level problem against the SKU's first row.
@@ -420,6 +476,7 @@ type catalogSnapshot struct {
 	matByName map[string]*models.Material // key: lower(trim(name))
 	skuByCode map[string]*models.SKU      // key: normalized code
 	mappings  map[[2]uint]bool            // (skuID, materialID) pairs already stored
+	quota     map[[2]uint]int             // declared quota per stored pair (0 = none)
 }
 
 func (c *catalogSnapshot) material(name string) *models.Material {
@@ -442,6 +499,7 @@ func loadCatalogSnapshot(repo *repositories.Repositories, matNames, skuCodes []s
 		matByName: map[string]*models.Material{},
 		skuByCode: map[string]*models.SKU{},
 		mappings:  map[[2]uint]bool{},
+		quota:     map[[2]uint]int{},
 	}
 
 	mats, err := repo.Material.ListByNamesInsensitive(matNames)
@@ -476,6 +534,9 @@ func loadCatalogSnapshot(repo *repositories.Repositories, matNames, skuCodes []s
 		}
 		for _, p := range pairs {
 			snap.mappings[[2]uint{p.SKUID, p.MaterialID}] = true
+			if p.ProductsPerUnit != nil && *p.ProductsPerUnit > 0 {
+				snap.quota[[2]uint{p.SKUID, p.MaterialID}] = *p.ProductsPerUnit
+			}
 		}
 	}
 	return snap, nil
@@ -519,6 +580,17 @@ func (s *MasterImportService) analyze(rows []LegacyRow) (*MasterImportPreview, e
 			rowErrors = append(rowErrors, LegacyRowError{
 				RowNumber: r.RowNumber, SKU: sku, Material: strings.TrimSpace(r.Material),
 				ErrorCode: errDimInvalid, Message: dimMsg,
+			})
+			continue
+		}
+		quota, quotaMsg := parseQuota(r.Quota)
+		if quotaMsg == "" && quota > 0 && len(mats) == 0 {
+			quotaMsg = "Định mức phải đi kèm Loại VL trên cùng dòng (định mức là của cặp SKU – NVL)"
+		}
+		if quotaMsg != "" {
+			rowErrors = append(rowErrors, LegacyRowError{
+				RowNumber: r.RowNumber, SKU: sku, Material: strings.TrimSpace(r.Material),
+				ErrorCode: errQuotaInvalid, Message: quotaMsg,
 			})
 			continue
 		}
@@ -571,6 +643,19 @@ func (s *MasterImportService) analyze(rows []LegacyRow) (*MasterImportPreview, e
 			for _, name := range mats {
 				if !containsFold(agg.matNames, name) {
 					agg.matNames = append(agg.matNames, name)
+				}
+				// A row's Định mức applies to every material on that row (a combo
+				// row wanting different numbers per material lists them one per row).
+				if quota > 0 {
+					if agg.declared == nil {
+						agg.declared = map[string]int{}
+					}
+					lk := strings.ToLower(name)
+					if prev, ok := agg.declared[lk]; ok && prev != quota {
+						agg.quotaConflict = true
+					} else {
+						agg.declared[lk] = quota
+					}
 				}
 				lm := strings.ToLower(name)
 				if !matSeen[lm] {
@@ -631,6 +716,8 @@ func (s *MasterImportService) analyze(rows []LegacyRow) (*MasterImportPreview, e
 			fail(errMaterialConflict, "Các dòng của SKU này khai Loại VL khác nhau ("+strings.Join(sets, " / ")+") — sửa cho thống nhất")
 		case agg.dimConflict:
 			fail(errDimConflict, "Các dòng của SKU này khai D x R khác nhau — sửa cho thống nhất")
+		case agg.quotaConflict:
+			fail(errQuotaConflict, "Các dòng của SKU này khai định mức khác nhau cho cùng một Loại VL — sửa cho thống nhất")
 		case len(agg.parentCodes) > 1:
 			fail(errParentConflict, "Các dòng của SKU này khai nhiều SKU cha khác nhau: "+strings.Join(agg.parentCodes, ", "))
 		case len(agg.parentCodes) == 1:
@@ -667,11 +754,22 @@ func (s *MasterImportService) analyze(rows []LegacyRow) (*MasterImportPreview, e
 						fmtDim(probe.LengthMM), fmtDim(probe.WidthMM), m.Name, fmtDim(m.LengthMM), fmtDim(m.WidthMM)))
 					break
 				}
-				if q := models.ProductionQuota(probe, m); q > 0 {
+				// Effective quota after the import: the file's number, else the one
+				// already declared on the pair, else the size estimate.
+				q, src := agg.declared[strings.ToLower(name)], models.QuotaDeclared
+				if q == 0 && rec != nil {
+					q = snap.quota[[2]uint{rec.ID, m.ID}]
+				}
+				if q == 0 {
+					q, src = models.EstimatedQuota(probe, m), models.QuotaEstimated
+				}
+				if q > 0 {
 					if agg.quotas == nil {
 						agg.quotas = map[string]int{}
+						agg.quotaSrc = map[string]string{}
 					}
 					agg.quotas[m.Name] = q
+					agg.quotaSrc[m.Name] = string(src)
 				}
 			}
 		}
@@ -732,7 +830,8 @@ func (s *MasterImportService) analyze(rows []LegacyRow) (*MasterImportPreview, e
 		plan := SKUPlan{
 			Code: agg.code, Name: agg.name, ProductName: productName, ProductNames: agg.productNames,
 			Exists: skuExists, MaterialNames: agg.matNames, Status: status, RowCount: agg.rowCount, IsCombo: isCombo,
-			LengthMM: agg.length, WidthMM: agg.width, Description: agg.description, QuotaByMaterial: agg.quotas,
+			LengthMM: agg.length, WidthMM: agg.width, Description: agg.description,
+			QuotaByMaterial: agg.quotas, QuotaSources: agg.quotaSrc,
 		}
 		if len(agg.parentCodes) == 1 {
 			plan.ParentCode = agg.parentCodes[0]
@@ -756,8 +855,13 @@ func (s *MasterImportService) analyze(rows []LegacyRow) (*MasterImportPreview, e
 				if !exists {
 					sum.NewMappings++
 				}
+				declared := agg.declared[strings.ToLower(matName)]
+				if declared > 0 {
+					sum.QuotasSet++
+				}
 				pv.Mappings = append(pv.Mappings, MappingPlan{
 					SKUCode: agg.code, MaterialCode: materialCode(matName), MaterialName: matName, Exists: exists,
+					Quota: declared,
 				})
 			}
 		}
@@ -983,8 +1087,10 @@ func (s *MasterImportService) Commit(actor Actor, jobID uint) (*MasterImportPrev
 			}
 		}
 
-		// ---- Mappings: only the pairs that aren't stored yet, in batches ----
+		// ---- Mappings: only the pairs that aren't stored yet, in batches; the
+		// file's Định mức rides on new pairs and is written onto existing ones ----
 		var newMappings []models.SKUMaterial
+		var quotaUpdates []repositories.PairQuota
 		for _, mp := range pv.Mappings {
 			skuID := skuIDByCode[mp.SKUCode]
 			matID := matIDByName[strings.ToLower(strings.TrimSpace(mp.MaterialName))]
@@ -996,17 +1102,31 @@ func (s *MasterImportService) Commit(actor Actor, jobID uint) (*MasterImportPrev
 			// guards a plan that lists the same pair twice (the unique index would
 			// reject the second row and fail the whole batch).
 			if snap.mappings[pair] {
+				if mp.Quota > 0 && snap.quota[pair] != mp.Quota {
+					quotaUpdates = append(quotaUpdates, repositories.PairQuota{SKUID: skuID, MaterialID: matID, Quota: mp.Quota})
+					snap.quota[pair] = mp.Quota
+				}
 				continue
 			}
 			snap.mappings[pair] = true
+			var quota *int
+			if mp.Quota > 0 {
+				q := mp.Quota
+				quota = &q
+				applied.QuotasSet++
+			}
 			newMappings = append(newMappings, models.SKUMaterial{
-				SKUID: skuID, MaterialID: matID, QuantityPerUnit: 1, Note: mappingSourceNote,
+				SKUID: skuID, MaterialID: matID, QuantityPerUnit: 1, ProductsPerUnit: quota, Note: mappingSourceNote,
 			})
 		}
 		if err := txRepo.SKU.AddMaterialsMany(newMappings, skuInsertBatch); err != nil {
 			return err
 		}
 		applied.MappingsCreated = len(newMappings)
+		if err := txRepo.SKU.SetPairQuotas(quotaUpdates); err != nil {
+			return err
+		}
+		applied.QuotasSet += len(quotaUpdates)
 
 		// Flag as combo any SKU that ended up mapped to ≥2 materials. Counting the
 		// real mappings (not just this file's plan) keeps it correct when an import
@@ -1208,22 +1328,22 @@ func removeVietnameseDiacritics(s string) string {
 
 // masterTemplateHeaders are the columns the importer reads: "SKU cha" (the parent
 // SKU, imported first — blank for a standalone SKU), "SKU", the human-readable
-// "Tên sản phẩm", "Loại VL", the size "D (mm)" × "R (mm)" and "Mô tả". Only "SKU"
-// is required. The file the factory uploads may carry many more columns — those
+// "Tên sản phẩm", "Loại VL", the size "D (mm)" × "R (mm)", the declared "Định
+// mức" (products per sheet of that Loại VL) and "Mô tả". Only "SKU" is required. The file the factory uploads may carry many more columns — those
 // are ignored — but the sample we hand back keeps just these so the format is
 // obvious.
-var masterTemplateHeaders = []string{"SKU cha", "SKU", "Tên sản phẩm", "Loại VL", "D (mm)", "R (mm)", "Mô tả"}
+var masterTemplateHeaders = []string{"SKU cha", "SKU", "Tên sản phẩm", "Loại VL", "D (mm)", "R (mm)", "Định mức", "Mô tả"}
 
 // masterTemplateSample is a handful of example rows so the user can see exactly
 // what a valid row looks like before filling in their own: three children of the
 // parent HOP-NHUA (which must already exist — imported in step 1), a standalone
 // SKU with no parent, and a combo SKU (several materials in one cell joined by " + ").
 var masterTemplateSample = [][]string{
-	{"HOP-NHUA", "HOP-NHUA-BE", "Hộp nhựa bé", "Mica trong 3 ly", "80", "60", "Hộp nắp trượt"},
-	{"HOP-NHUA", "HOP-NHUA-LON", "Hộp nhựa lớn", "Mica trong 3 ly", "160", "120", ""},
-	{"HOP-NHUA", "HOP-NHUA-VUONG", "Hộp nhựa vuông", "Mica trong 3 ly", "100", "100", ""},
-	{"", "LWD-12IN", "Thớt gỗ khắc tên", "Gỗ 5 ly 3 lớp", "304.8", "203.2", ""},
-	{"", "COMBO-A2-GAI", "Đèn gỗ combo", "Mica trong 3 ly + Mica Hologram", "", "", ""},
+	{"HOP-NHUA", "HOP-NHUA-BE", "Hộp nhựa bé", "Mica trong 3 ly", "80", "60", "90", "Hộp nắp trượt"},
+	{"HOP-NHUA", "HOP-NHUA-LON", "Hộp nhựa lớn", "Mica trong 3 ly", "160", "120", "20", ""},
+	{"HOP-NHUA", "HOP-NHUA-VUONG", "Hộp nhựa vuông", "Mica trong 3 ly", "100", "100", "", ""},
+	{"", "LWD-12IN", "Thớt gỗ khắc tên", "Gỗ 5 ly 3 lớp", "304.8", "203.2", "12", ""},
+	{"", "COMBO-A2-GAI", "Đèn gỗ combo", "Mica trong 3 ly + Mica Hologram", "", "", "", ""},
 }
 
 // MasterTemplateXLSX renders the master-data import sample as a real .xlsx
@@ -1231,11 +1351,95 @@ var masterTemplateSample = [][]string{
 // CSV that opened as garbled single-column text).
 func (s *MasterImportService) MasterTemplateXLSX() ([]byte, string, error) {
 	grid := append([][]string{masterTemplateHeaders}, masterTemplateSample...)
-	data, err := buildTemplateXLSX("Master data", grid, []float64{16, 20, 24, 30, 10, 10, 28})
+	data, err := buildTemplateXLSX("Master data", grid, []float64{16, 20, 24, 30, 10, 10, 10, 28})
 	if err != nil {
 		return nil, "", err
 	}
 	return data, "master-data-template.xlsx", nil
+}
+
+// masterExportEstimateHeader is the extra, read-only column of the export: the
+// size estimate, there to be compared with, never imported (the importer only
+// reads "Định mức").
+const masterExportEstimateHeader = "Ước tính theo kích thước (import bỏ qua)"
+
+// MasterExportXLSX renders the catalog's child and standalone SKUs, one row per
+// (SKU, material), in the import file's own layout — so the factory fills the
+// "Định mức" column from its layout file and imports the same file straight
+// back. Parents are left out (step 1 owns them); a SKU without materials still
+// gets a row so nothing in the catalog is invisible. Sorted by parent then code.
+func (s *MasterImportService) MasterExportXLSX() ([]byte, string, error) {
+	skus, _, err := s.repo.SKU.List(repositories.Page{PageSize: repositories.PageSizeAll}.Normalize())
+	if err != nil {
+		return nil, "", apperr.Internal("could not read catalog").Wrap(err)
+	}
+	byID := map[uint]*models.SKU{}
+	hasChildren := map[uint]bool{}
+	for i := range skus {
+		byID[skus[i].ID] = &skus[i]
+		if skus[i].ParentID != nil {
+			hasChildren[*skus[i].ParentID] = true
+		}
+	}
+	dimCell := func(v *float64) string {
+		if v == nil {
+			return ""
+		}
+		return fmtDim(v)
+	}
+	parentCode := func(sku *models.SKU) string {
+		if sku.ParentID == nil {
+			return ""
+		}
+		if p := byID[*sku.ParentID]; p != nil {
+			return p.Code
+		}
+		return ""
+	}
+	type row struct {
+		parent string
+		cells  []string
+	}
+	var rows []row
+	for i := range skus {
+		sku := &skus[i]
+		if hasChildren[sku.ID] {
+			continue
+		}
+		base := []string{parentCode(sku), sku.Code, sku.ProductName}
+		if len(sku.Materials) == 0 {
+			rows = append(rows, row{parent: base[0], cells: append(base, "", dimCell(sku.LengthMM), dimCell(sku.WidthMM), "", sku.Description, "")})
+			continue
+		}
+		for j := range sku.Materials {
+			sm := &sku.Materials[j]
+			declared := ""
+			if sm.ProductsPerUnit != nil && *sm.ProductsPerUnit > 0 {
+				declared = strconv.Itoa(*sm.ProductsPerUnit)
+			}
+			estimate := ""
+			if q := models.EstimatedQuota(sku, &sm.Material); q > 0 {
+				estimate = strconv.Itoa(q)
+			}
+			rows = append(rows, row{parent: base[0], cells: append(append([]string{}, base...),
+				sm.Material.Name, dimCell(sku.LengthMM), dimCell(sku.WidthMM), declared, sku.Description, estimate)})
+		}
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].parent != rows[j].parent {
+			return rows[i].parent < rows[j].parent
+		}
+		return rows[i].cells[1] < rows[j].cells[1]
+	})
+	grid := [][]string{append(append([]string{}, masterTemplateHeaders...), masterExportEstimateHeader)}
+	for _, r := range rows {
+		grid = append(grid, r.cells)
+	}
+	data, err := buildTemplateXLSX("SKU", grid, []float64{16, 20, 24, 30, 10, 10, 10, 28, 20})
+	if err != nil {
+		return nil, "", err
+	}
+	return data, "sku-hien-co.xlsx", nil
 }
 
 // skuInsertBatch is how many SKUs / mappings ride in one INSERT.

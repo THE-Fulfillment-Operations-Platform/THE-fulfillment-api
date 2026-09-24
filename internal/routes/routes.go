@@ -219,6 +219,9 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	masterData := authd.Group("/master-data", masterManage)
 	{
 		masterData.GET("/template.xlsx", h.DownloadMasterTemplate)
+		// The catalog as an import file: fill "Định mức" (declared quota per SKU ×
+		// NVL) and import it straight back.
+		masterData.GET("/export.xlsx", h.DownloadMasterExport)
 		masterData.POST("/import/preview", h.MasterImportPreview)
 		masterData.POST("/import/commit", h.MasterImportCommit)
 		masterData.GET("/import-jobs", h.ListMasterImportJobs)

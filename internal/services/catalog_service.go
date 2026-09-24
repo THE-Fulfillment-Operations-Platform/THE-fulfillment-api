@@ -240,13 +240,16 @@ func (s *CatalogService) DeleteMaterial(actor Actor, id uint) error {
 
 // ---------- SKUs ----------
 
-// SKUMaterialInput links a SKU to a material with a per-unit quantity. The
-// production quota of the pair is not an input: it is derived from the SKU's
-// and the material's sizes (models.ProductionQuota).
+// SKUMaterialInput links a SKU to a material with a per-unit quantity and,
+// optionally, the pair's declared production quota.
 type SKUMaterialInput struct {
 	MaterialID uint `json:"material_id" binding:"required"`
 	// QuantityPerUnit: how much of the material ONE product consumes.
-	QuantityPerUnit int    `json:"quantity_per_unit"`
+	QuantityPerUnit int `json:"quantity_per_unit"`
+	// ProductsPerUnit: how many products of this SKU one sheet of the material
+	// yields, as the factory declares it. Omitted / ≤0 = not declared → the
+	// batch splitter estimates from the sizes (models.ProductionQuotaSource).
+	ProductsPerUnit *int   `json:"products_per_unit"`
 	Note            string `json:"note"`
 }
 
@@ -335,7 +338,11 @@ func (s *CatalogService) buildMaterials(in []SKUMaterialInput) ([]models.SKUMate
 		if qty < 1 {
 			qty = 1
 		}
-		out = append(out, models.SKUMaterial{MaterialID: m.MaterialID, QuantityPerUnit: qty, Note: m.Note})
+		quota := m.ProductsPerUnit
+		if quota != nil && *quota <= 0 {
+			quota = nil
+		}
+		out = append(out, models.SKUMaterial{MaterialID: m.MaterialID, QuantityPerUnit: qty, ProductsPerUnit: quota, Note: m.Note})
 	}
 	return out, nil
 }

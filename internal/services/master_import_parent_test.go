@@ -188,9 +188,11 @@ func TestMasterImport_ChildrenGoUnderExistingParents(t *testing.T) {
 	if be.ParentCode != "HOP-NHUA" || !dimEq(be.LengthMM, 80) || !dimEq(be.WidthMM, 60.5) || be.Description != "nắp trượt" {
 		t.Fatalf("child plan = %+v", be)
 	}
-	// The preview already says what the quota will be: ⌊100×100 / 80×60,5⌋ = 2.
-	if be.QuotaByMaterial["Mica"] != 2 {
-		t.Fatalf("quota_by_material = %v, want Mica: 2", be.QuotaByMaterial)
+	// The preview already says what the quota will be — the grid ESTIMATE, since
+	// nothing is declared: ⌊100/80⌋·⌊100/60,5⌋ = 1 (area division would say 2,
+	// which is exactly the overstatement the customer objected to on 24/09).
+	if be.QuotaByMaterial["Mica"] != 1 || be.QuotaSources["Mica"] != string(models.QuotaEstimated) {
+		t.Fatalf("quota_by_material = %v / %v, want Mica: 1 (estimated)", be.QuotaByMaterial, be.QuotaSources)
 	}
 	if le2 := skuPlanByCode(t, pv, "LE-2"); len(le2.QuotaByMaterial) != 0 {
 		t.Fatalf("a SKU without a size has no quota to show, got %v", le2.QuotaByMaterial)

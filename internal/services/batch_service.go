@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"strings"
 	"time"
@@ -64,7 +65,8 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 	}
 
 	// The quota is per (SKU, material) pair: how many products of that SKU one
-	// sheet of this material yields (derived from the two sizes).
+	// sheet of this material yields — declared by the factory, else estimated
+	// from the two sizes (models.ProductionQuotaSource).
 	quotaFor := func(it *models.OrderItem) int {
 		return resolveProductionQuota(it.SKU, material)
 	}
@@ -178,8 +180,8 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 			return txRepo.Status.CreateBulk(history)
 		}
 
-		// One group (a single SKU within its quota, or without a quota): one flat
-		// batch — identical to legacy behaviour.
+		// One group (one family within one sheet, or a SKU without a quota): one
+		// flat batch — identical to legacy behaviour.
 		if len(groups) <= 1 {
 			batch := newBatch()
 			if err := txRepo.Batch.Create(batch); err != nil {
@@ -197,9 +199,9 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 			return nil
 		}
 
-		// Several groups (several SKUs, and/or a SKU over its quota): a parent
-		// batch (holds no items) + one child batch per group. Codes: parent "#<n>",
-		// child "#<n>-<seq>".
+		// Several groups (several families, and/or a family over one sheet): a
+		// parent batch (holds no items) + one child batch per group. Codes:
+		// parent "#<n>", child "#<n>-<seq>".
 		parent := newBatch()
 		parent.IsParent = true
 		parent.ChildCount = len(groups)
@@ -250,8 +252,9 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 
 // resolveProductionQuota returns the production quota that applies to one
 // (SKU, material) pair: how many products of that SKU a single sheet of the
-// material yields, derived from the two sizes (models.ProductionQuota). 0 means
-// a size is missing on either side → no quota → unlimited.
+// material yields — the declared number when the factory typed one, else the
+// size estimate (models.ProductionQuota). 0 means neither → no quota → the
+// SKU is never split.
 //
 // The quota MUST be resolved per pair, not per material: the same mica sheet
 // yields ten small trays but only four large ones, so batching every SKU of a
@@ -269,26 +272,32 @@ func itemProducts(it *models.OrderItem) int {
 	return it.Quantity
 }
 
-// planBatchSplitByQuota partitions items into production batches. A batch is
-// one print file + one cut file — ONE product repeated across the sheet — so:
+// planBatchSplitByQuota partitions items into production batches — the rule
+// the customer laid out on 2026-09-24:
 //
-//  1. Items are grouped by SKU (exact SKU; two variants of the same parent SKU
-//     are different sizes, hence different cut files, hence different
-//     batches). Products of different SKUs never share a batch.
-//  2. Each SKU's lines are packed, in the caller's order, into batches of at
-//     most `quota` products — the pair's quota, how many of that SKU one sheet
-//     of this material yields. quotaFor returning 0 (a size missing on either
-//     side) means no quota: that SKU's lines form a single batch.
-//
-// Confirmed with the customer on 2026-09-24: three loose products of a SKU
-// still become their own batch rather than sharing a sheet with another SKU,
-// even though that multiplies the batch count. The earlier rule (2026-09-18)
-// let SKUs share a sheet by area — 1/10 + 1/4 of a sheet — which on a mixed
-// pool almost never filled a sheet, so the quota never split anything.
+//  1. Items are grouped into FAMILIES: the SKU's parent SKU, or the SKU itself
+//     when it has no parent. Products of different families never share a
+//     batch (different product lines → different print/cut files).
+//  2. Inside a family the lines are ordered by SKU (first seen first), so a
+//     SKU's own products fill a sheet before anything else is added.
+//  3. A sheet is filled by SHARE: each product takes 1/quota of the sheet —
+//     the pair's quota, how many of that SKU one sheet of this material yields
+//     — and when a SKU runs out with room to spare, its sibling SKUs (same
+//     parent) top the sheet up: 20 of a 40-per-sheet SKU leave half a sheet,
+//     which takes 10 of a sibling at 20 per sheet. A line that no longer fits
+//     opens the next batch. Shares are added as exact fractions (math/big.Rat)
+//     so 1/3+1/3+1/3 is exactly one sheet, not 0.999….
+//  4. A SKU with no quota (quotaFor returns 0) can't be measured against a
+//     sheet, so its lines form one batch of their own.
 //
 // A single line that on its own exceeds the quota keeps its own over-quota
 // batch — splitting one order line across batches is a business decision the
 // customer has not made, so the line stays whole and visible instead.
+//
+// History: 18/09 let ANY SKUs share a sheet by share — on a mixed pool a sheet
+// almost never filled, so nothing ever split; 24/09 morning grouped strictly
+// per SKU; the customer then asked for siblings to top up the leftover space,
+// which is this version.
 func planBatchSplitByQuota(items []*models.OrderItem, quotaFor func(*models.OrderItem) int) [][]*models.OrderItem {
 	if len(items) == 0 {
 		return nil
@@ -302,40 +311,61 @@ func planBatchSplitByQuota(items []*models.OrderItem, quotaFor func(*models.Orde
 		}
 		return 0
 	}
-	// Group by SKU in first-seen order so batches come out in the caller's order.
-	var order []uint
-	bySKU := map[uint][]*models.OrderItem{}
-	for _, it := range items {
-		k := skuKey(it)
-		if _, seen := bySKU[k]; !seen {
-			order = append(order, k)
+	familyKey := func(it *models.OrderItem) uint {
+		if it.SKU != nil && it.SKU.ParentID != nil {
+			return *it.SKU.ParentID
 		}
-		bySKU[k] = append(bySKU[k], it)
+		return skuKey(it)
+	}
+
+	// Families in first-seen order; inside each, SKUs in first-seen order.
+	var familyOrder []uint
+	families := map[uint][]uint{}           // family → SKU keys in order
+	lines := map[uint][]*models.OrderItem{} // SKU key → its lines in order
+	for _, it := range items {
+		f := familyKey(it)
+		k := skuKey(it)
+		if _, seen := lines[k]; !seen {
+			if _, fseen := families[f]; !fseen {
+				familyOrder = append(familyOrder, f)
+			}
+			families[f] = append(families[f], k)
+		}
+		lines[k] = append(lines[k], it)
 	}
 
 	var groups [][]*models.OrderItem
-	for _, k := range order {
-		lines := bySKU[k]
-		quota := quotaFor(lines[0]) // same SKU, same material → same quota for every line
-		if quota <= 0 {
-			groups = append(groups, lines)
-			continue
-		}
+	one := new(big.Rat).SetInt64(1)
+	for _, f := range familyOrder {
 		var current []*models.OrderItem
-		used := 0
-		for _, it := range lines {
-			n := itemProducts(it)
-			if len(current) > 0 && used+n > quota {
+		used := new(big.Rat) // share of the sheet consumed by `current`
+		flush := func() {
+			if len(current) > 0 {
 				groups = append(groups, current)
 				current = nil
-				used = 0
+				used = new(big.Rat)
 			}
-			current = append(current, it)
-			used += n
 		}
-		if len(current) > 0 {
-			groups = append(groups, current)
+		for _, k := range families[f] {
+			quota := quotaFor(lines[k][0]) // same SKU, same material → same quota for every line
+			if quota <= 0 {
+				// Unmeasurable: its own batch, outside the shared sheet.
+				flush()
+				groups = append(groups, lines[k])
+				continue
+			}
+			for _, it := range lines[k] {
+				share := big.NewRat(int64(itemProducts(it)), int64(quota))
+				next := new(big.Rat).Add(used, share)
+				if len(current) > 0 && next.Cmp(one) > 0 {
+					flush()
+					next = share
+				}
+				current = append(current, it)
+				used = next
+			}
 		}
+		flush()
 	}
 	return groups
 }

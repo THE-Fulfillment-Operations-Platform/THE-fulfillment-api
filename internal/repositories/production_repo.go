@@ -54,6 +54,64 @@ func activeBatchItems(db *gorm.DB) *gorm.DB {
 		Where("batch_items.scrapped_at IS NULL")
 }
 
+// attachPairQuotas loads the DECLARED quota of every (item SKU, batch material)
+// pair the given batches (and their loaded children) hold, in ONE statement,
+// and hangs it on each item's SKU as its Materials — so FillMaterialUnits sees
+// the number the factory typed instead of the size estimate. The pair rows
+// can't ride in the items' SELECT (a has-many), hence the separate query; one
+// per list / detail call, never one per item.
+func (r *BatchRepository) attachPairQuotas(batches []*models.Batch) error {
+	type target struct {
+		sku   *models.SKU
+		matID uint
+	}
+	var targets []target
+	skuSet := map[uint]bool{}
+	matSet := map[uint]bool{}
+	collect := func(b *models.Batch) {
+		for i := range b.Items {
+			it := b.Items[i].OrderItem
+			if it == nil || it.SKU == nil {
+				continue
+			}
+			targets = append(targets, target{sku: it.SKU, matID: b.MaterialID})
+			skuSet[it.SKU.ID] = true
+			matSet[b.MaterialID] = true
+		}
+	}
+	for _, b := range batches {
+		collect(b)
+		for i := range b.ChildBatches {
+			collect(&b.ChildBatches[i])
+		}
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	skuIDs := make([]uint, 0, len(skuSet))
+	for id := range skuSet {
+		skuIDs = append(skuIDs, id)
+	}
+	matIDs := make([]uint, 0, len(matSet))
+	for id := range matSet {
+		matIDs = append(matIDs, id)
+	}
+	var rows []models.SKUMaterial
+	if err := r.db.Where("sku_id IN ? AND material_id IN ?", skuIDs, matIDs).Find(&rows).Error; err != nil {
+		return err
+	}
+	byPair := map[[2]uint]models.SKUMaterial{}
+	for _, row := range rows {
+		byPair[[2]uint{row.SKUID, row.MaterialID}] = row
+	}
+	for _, t := range targets {
+		if row, ok := byPair[[2]uint{t.sku.ID, t.matID}]; ok {
+			t.sku.Materials = []models.SKUMaterial{row}
+		}
+	}
+	return nil
+}
+
 func (r *BatchRepository) Create(b *models.Batch) error { return r.db.Create(b).Error }
 func (r *BatchRepository) Update(b *models.Batch) error { return r.db.Save(b).Error }
 
@@ -95,6 +153,9 @@ func (r *BatchRepository) FindByID(id uint) (*models.Batch, error) {
 	// tiết thì chưa, nên batch vừa bị huỷ mở ra không giải thích được gì.
 	if scrapped, err := r.ScrappedCounts([]uint{b.ID}); err == nil {
 		b.ScrappedCount = scrapped[b.ID]
+	}
+	if err := r.attachPairQuotas([]*models.Batch{&b}); err != nil {
+		return nil, err
 	}
 	b.FillMaterialUnits(&b.Material)
 	// A parent's sheets are the sum of its children's (children are loaded with
@@ -267,6 +328,13 @@ func (r *BatchRepository) List(f BatchFilter) ([]models.Batch, int64, error) {
 	}
 	scrapped, err := r.ScrappedCounts(ids)
 	if err != nil {
+		return rows, total, err
+	}
+	ptrs := make([]*models.Batch, 0, len(rows))
+	for i := range rows {
+		ptrs = append(ptrs, &rows[i])
+	}
+	if err := r.attachPairQuotas(ptrs); err != nil {
 		return rows, total, err
 	}
 	for i := range rows {

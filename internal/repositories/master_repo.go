@@ -787,6 +787,45 @@ func (r *SKURepository) PatchMany(patches []SKUPatch) error {
 	return nil
 }
 
+// PairQuota is a declared production quota for one (SKU, material) pair.
+type PairQuota struct {
+	SKUID      uint
+	MaterialID uint
+	Quota      int
+}
+
+// SetPairQuotas writes declared quotas onto existing sku_materials rows, ONE
+// UPDATE per chunk (a CASE over the pairs) — an import of a few hundred pairs
+// must not cost a few hundred round-trips. Pairs that are not mapped are
+// silently left alone; the importer only sends mapped pairs.
+func (r *SKURepository) SetPairQuotas(pairs []PairQuota) error {
+	for start := 0; start < len(pairs); start += idChunk {
+		end := start + idChunk
+		if end > len(pairs) {
+			end = len(pairs)
+		}
+		chunk := pairs[start:end]
+		var cases strings.Builder
+		var where strings.Builder
+		args := make([]any, 0, len(chunk)*5)
+		whereArgs := make([]any, 0, len(chunk)*2)
+		for i, pq := range chunk {
+			cases.WriteString(" WHEN sku_id = ? AND material_id = ? THEN ?")
+			args = append(args, pq.SKUID, pq.MaterialID, pq.Quota)
+			if i > 0 {
+				where.WriteString(" OR ")
+			}
+			where.WriteString("(sku_id = ? AND material_id = ?)")
+			whereArgs = append(whereArgs, pq.SKUID, pq.MaterialID)
+		}
+		sql := "UPDATE sku_materials SET products_per_unit = CASE" + cases.String() + " ELSE products_per_unit END WHERE " + where.String()
+		if err := r.db.Exec(sql, append(args, whereArgs...)...).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // AddMaterial appends a single material to a SKU (idempotent per unique index).
 // It never removes existing materials, so it is safe for additive legacy imports.
 func (r *SKURepository) AddMaterial(skuID, materialID uint, qty int, note string) error {

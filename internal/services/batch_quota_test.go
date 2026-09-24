@@ -195,24 +195,145 @@ func TestBatchQuota_GroupsBySKUThenSplitsEach(t *testing.T) {
 	}
 }
 
-// TestBatchQuota_SiblingSKUsNotMerged: hai SKU con cùng một SKU cha (hộp nhựa
-// bé / lớn) vẫn là hai file cắt khác nhau → không chung batch.
-func TestBatchQuota_SiblingSKUsNotMerged(t *testing.T) {
-	f := newQuotaFixture(t, 10, 10)
-	parent := &models.SKU{Code: "HOP-NHUA", Name: "Hộp nhựa"}
-	if err := f.db.Create(parent).Error; err != nil {
-		t.Fatalf("seed parent: %v", err)
-	}
-	for _, sku := range f.skus {
+// makeSiblings files the fixture's SKUs under one parent (or a parent each when
+// separate=true) — the family the batch splitter groups by.
+func (f *quotaFixture) makeSiblings(t *testing.T, separate bool) {
+	t.Helper()
+	var parent *models.SKU
+	for i, sku := range f.skus {
+		if parent == nil || separate {
+			parent = &models.SKU{Code: fmt.Sprintf("CHA-%d", i+1), Name: fmt.Sprintf("Cha %d", i+1)}
+			if err := f.db.Create(parent).Error; err != nil {
+				t.Fatalf("seed parent: %v", err)
+			}
+		}
 		if err := f.db.Model(sku).Update("parent_id", parent.ID).Error; err != nil {
 			t.Fatalf("set parent: %v", err)
 		}
 	}
+}
+
+// TestBatchQuota_SiblingsTopUpTheSheet: hai SKU con cùng cha, mỗi SKU 3 sp, định
+// mức 10/tấm → 3/10 + 3/10 = 0,6 tấm → MỘT batch 6 item (khách chốt 24/09: SKU
+// cùng mã cha được nhét vào chỗ trống). Khác cha thì tách (test dưới).
+func TestBatchQuota_SiblingsTopUpTheSheet(t *testing.T) {
+	f := newQuotaFixture(t, 10, 10)
+	f.makeSiblings(t, false)
+	ids := append(f.add(t, 0, 3, 1), f.add(t, 1, 3, 1)...)
+
+	got := f.groupSizes(t, ids)
+	if len(got) != 1 || got[0] != 6 {
+		t.Fatalf("anh em cùng cha, còn chỗ → một batch [6], got %v", got)
+	}
+}
+
+// TestBatchQuota_SiblingsOverflowOpensNextSheet: A 3 sp + B 3 sp, cả hai định
+// mức 4/tấm. A chiếm 3/4, B nhét thêm 1 là đầy tấm; 2 B còn lại sang tấm sau.
+func TestBatchQuota_SiblingsOverflowOpensNextSheet(t *testing.T) {
+	f := newQuotaFixture(t, 4, 4)
+	f.makeSiblings(t, false)
+	ids := append(f.add(t, 0, 3, 1), f.add(t, 1, 3, 1)...)
+
+	got := f.groupSizes(t, ids)
+	if len(got) != 2 || got[0] != 4 || got[1] != 2 {
+		t.Fatalf("3A + 1B đầy tấm, 2B sang tấm sau → [4 2], got %v", got)
+	}
+}
+
+// TestBatchQuota_DifferentParentsNeverMix: hai SKU thuộc hai SKU cha khác nhau,
+// dù còn thừa chỗ vẫn là hai batch — khác dòng sản phẩm là khác file in/cắt.
+func TestBatchQuota_DifferentParentsNeverMix(t *testing.T) {
+	f := newQuotaFixture(t, 10, 10)
+	f.makeSiblings(t, true)
 	ids := append(f.add(t, 0, 3, 1), f.add(t, 1, 3, 1)...)
 
 	got := f.groupSizes(t, ids)
 	if len(got) != 2 || got[0] != 3 || got[1] != 3 {
-		t.Fatalf("hai SKU con cùng cha → vẫn hai batch [3 3], got %v", got)
+		t.Fatalf("khác cha → hai batch [3 3], got %v", got)
+	}
+}
+
+// TestBatchQuota_OwnSKUFirstThenSiblings: trong pool xen kẽ A2 B3 A3 (A định mức
+// 4, B định mức 3, cùng cha), A được gom lại trước: A×4 đầy một tấm; A còn 1
+// (1/4) + B 2 (2/3) = 11/12 vừa; B thứ ba sang tấm nữa → [4 3 1].
+func TestBatchQuota_OwnSKUFirstThenSiblings(t *testing.T) {
+	f := newQuotaFixture(t, 4, 3)
+	f.makeSiblings(t, false)
+	var ids []uint
+	ids = append(ids, f.add(t, 0, 2, 1)...)
+	ids = append(ids, f.add(t, 1, 3, 1)...)
+	ids = append(ids, f.add(t, 0, 3, 1)...)
+
+	got := f.groupSizes(t, ids)
+	if len(got) != 3 || got[0] != 4 || got[1] != 3 || got[2] != 1 {
+		t.Fatalf("cùng SKU xếp trước rồi mới nhét anh em → [4 3 1], got %v", got)
+	}
+}
+
+// TestBatchQuota_SiblingWithoutQuotaStandsAlone: SKU anh em chưa có định mức
+// (không kích thước, không khai) không đo được trên tấm → batch riêng, không
+// bị nhét vào tấm của SKU khác như thể chiếm 0 chỗ.
+func TestBatchQuota_SiblingWithoutQuotaStandsAlone(t *testing.T) {
+	f := newQuotaFixture(t, 10, 0)
+	f.makeSiblings(t, false)
+	ids := append(f.add(t, 0, 3, 1), f.add(t, 1, 3, 1)...)
+
+	got := f.groupSizes(t, ids)
+	if len(got) != 2 || got[0] != 3 || got[1] != 3 {
+		t.Fatalf("SKU không định mức đứng riêng → [3 3], got %v", got)
+	}
+}
+
+// TestBatchQuota_DeclaredQuotaBeatsEstimate: kích thước cho ước tính 4/tấm, nhưng
+// xưởng khai định mức 2 cho cặp → chia theo 2 (khách chốt 24/09: số khai tay là
+// số hệ thống dùng). Số tấm ở màn danh sách/chi tiết cũng phải theo số khai:
+// một dòng 3 sp, định mức 1 → 3 tấm, không phải ⌈3/4⌉ = 1.
+func TestBatchQuota_DeclaredQuotaBeatsEstimate(t *testing.T) {
+	f := newQuotaFixture(t, 4)
+	if err := f.db.Model(&models.SKUMaterial{}).Where("sku_id = ? AND material_id = ?", f.skus[0].ID, f.material.ID).
+		Update("products_per_unit", 2).Error; err != nil {
+		t.Fatalf("declare quota: %v", err)
+	}
+	ids := f.add(t, 0, 5, 1)
+	got := f.groupSizes(t, ids)
+	if len(got) != 3 || got[0] != 2 || got[1] != 2 || got[2] != 1 {
+		t.Fatalf("định mức khai 2 thắng ước tính 4 → [2 2 1], got %v", got)
+	}
+
+	g := newQuotaFixture(t, 4)
+	if err := g.db.Model(&models.SKUMaterial{}).Where("sku_id = ? AND material_id = ?", g.skus[0].ID, g.material.ID).
+		Update("products_per_unit", 1).Error; err != nil {
+		t.Fatalf("declare quota: %v", err)
+	}
+	flat, _, err := g.svc.Create(Actor{ID: 1, Role: models.RoleDesigner}, CreateBatchInput{
+		MaterialID: g.material.ID, OrderItemIDs: g.add(t, 0, 1, 3),
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	repo := repositories.New(g.db)
+	// The declared quota costs the detail payload exactly ONE extra statement
+	// (the pair lookup), on top of TestFindByID_RoundTripBudget's five.
+	var detail *models.Batch
+	n := countQueries(g.db, func(tx *gorm.DB) {
+		var err error
+		detail, err = repositories.New(tx).Batch.FindByID(flat.ID)
+		if err != nil {
+			t.Fatalf("find: %v", err)
+		}
+	})
+	if n > 6 {
+		t.Errorf("FindByID with declared quotas sent %d statements, budget is 6", n)
+	}
+	if detail.MaterialUnits == nil || *detail.MaterialUnits != 3 {
+		t.Fatalf("chi tiết: 3 sp / định mức khai 1 → 3 tấm, got %v", detail.MaterialUnits)
+	}
+	rows, _, err := repo.Batch.List(repositories.BatchFilter{Page: repositories.Page{Page: 1, PageSize: 50}})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 || rows[0].MaterialUnits == nil || *rows[0].MaterialUnits != 3 {
+		t.Fatalf("danh sách: muốn 3 tấm theo định mức khai, got %+v", rows)
 	}
 }
 
@@ -437,10 +558,11 @@ func TestBatchQuota_TwoMaterialSKU_DifferentQuotas(t *testing.T) {
 	}
 }
 
-// TestProductionQuota_FromAreas đơn vị hoá công thức ⌊S_tấm / S_sp⌋ — kể cả ví
-// dụ khách đưa (tấm 10000 mm², sản phẩm 10×15 → 66, không phải 66,67), biên chia
-// hết, và số thực khó chịu 0,3/0,1 phải ra đúng 3.
-func TestProductionQuota_FromAreas(t *testing.T) {
+// TestProductionQuota_GridAndDeclared: định mức ước tính = xếp hộp bao D×R lên
+// tấm theo lưới, lấy chiều tốt hơn — số thật của khách (600×800 mica: 127×127
+// ra 24 chứ không phải 29 như chia diện tích). Định mức khai cho cặp luôn
+// thắng ước tính; khai cho NVL khác thì không ảnh hưởng.
+func TestProductionQuota_GridAndDeclared(t *testing.T) {
 	sku := func(l, w float64) *models.SKU { return &models.SKU{LengthMM: &l, WidthMM: &w} }
 	mat := func(l, w float64) *models.Material { return &models.Material{LengthMM: &l, WidthMM: &w} }
 	cases := []struct {
@@ -449,23 +571,43 @@ func TestProductionQuota_FromAreas(t *testing.T) {
 		mat  *models.Material
 		want int
 	}{
-		{"ví dụ của khách: 100×100 / 10×15 = 66,67 → 66", sku(10, 15), mat(100, 100), 66},
-		{"ví dụ của khách: 100×100 / 15×20 = 33,33 → 33", sku(15, 20), mat(100, 100), 33},
+		{"khách: mica 600×800, hàng 5×5 inch (127) → 4×6 = 24 (diện tích nói 29)", sku(127, 127), mat(600, 800), 24},
+		{"khách: mica 600×800, hàng 6×6 inch (152) → 3×5 = 15 (diện tích nói 20)", sku(152, 152), mat(600, 800), 15},
+		{"khách: mica 600×800, hàng 10 inch (254) → 2×3 = 6 (diện tích nói 7)", sku(254, 254), mat(600, 800), 6},
+		{"xoay 90° lợi hơn: 300×200 trên 600×800 → 2×4 = 8, không phải 3×2 = 6", sku(300, 200), mat(600, 800), 8},
 		{"chia hết: 60×1 / 15×1 = 4", sku(15, 1), mat(60, 1), 4},
 		{"số thực ở biên: 0,3×1 / 0,1×1 = 3 (float cho 2,999…)", sku(0.1, 1), mat(0.3, 1), 3},
-		{"tấm chuẩn 1220×2440 / 88,9×88,9 = 376", sku(88.9, 88.9), mat(1220, 2440), 376},
+		{"tấm 1220×2440 / 88,9×88,9 = 13×27 = 351", sku(88.9, 88.9), mat(1220, 2440), 351},
 		{"sản phẩm to hơn tấm → 1, không phải 0", sku(300, 300), mat(100, 100), 1},
 		{"SKU chưa có kích thước → 0 (không định mức)", &models.SKU{}, mat(100, 100), 0},
-		{"NVL chưa có kích thước → 0", sku(10, 15), &models.Material{}, 0},
-		{"nil → 0", nil, nil, 0},
+		{"tấm chưa có kích thước → 0", sku(10, 10), &models.Material{}, 0},
 	}
 	for _, c := range cases {
-		if got := models.ProductionQuota(c.sku, c.mat); got != c.want {
+		if got := models.EstimatedQuota(c.sku, c.mat); got != c.want {
 			t.Errorf("%s: got %d, want %d", c.name, got, c.want)
 		}
-		if got := resolveProductionQuota(c.sku, c.mat); got != c.want {
-			t.Errorf("%s (resolveProductionQuota): got %d, want %d", c.name, got, c.want)
+		if got, src := models.ProductionQuotaSource(c.sku, c.mat); got != c.want || (c.want > 0 && src != models.QuotaEstimated) {
+			t.Errorf("%s (ProductionQuotaSource): got %d/%q, want %d/estimated", c.name, got, src, c.want)
 		}
+	}
+
+	forty := 40
+	declared := sku(127, 127)
+	declared.Materials = []models.SKUMaterial{{MaterialID: 7, ProductsPerUnit: &forty}}
+	mica := mat(600, 800)
+	mica.ID = 7
+	if q, src := models.ProductionQuotaSource(declared, mica); q != 40 || src != models.QuotaDeclared {
+		t.Errorf("định mức khai 40 phải thắng ước tính 24: got %d/%q", q, src)
+	}
+	other := mat(600, 800)
+	other.ID = 8
+	if q, src := models.ProductionQuotaSource(declared, other); q != 24 || src != models.QuotaEstimated {
+		t.Errorf("khai cho NVL 7 không ảnh hưởng NVL 8: got %d/%q, want 24/estimated", q, src)
+	}
+	zero := 0
+	declared.Materials = []models.SKUMaterial{{MaterialID: 7, ProductsPerUnit: &zero}}
+	if q, src := models.ProductionQuotaSource(declared, mica); q != 24 || src != models.QuotaEstimated {
+		t.Errorf("khai 0 = chưa khai → ước tính: got %d/%q", q, src)
 	}
 	if models.ProductFitsSheet(sku(300, 300), mat(100, 100)) {
 		t.Errorf("300×300 phải KHÔNG vừa tấm 100×100")
@@ -475,9 +617,10 @@ func TestProductionQuota_FromAreas(t *testing.T) {
 	}
 }
 
-// TestBatchMaterialUnits: the sheet count a batch reports is derived from its
-// parts' sizes — a child says ⌈Σ qty/quota⌉, a parent the sum of its children,
-// and a batch whose parts have no quota says nothing rather than guess. It rides on the associations the detail/list queries already load, so
+// TestBatchMaterialUnits: the sheet count a batch reports comes from its parts'
+// quota (declared, else size estimate) — a child says ⌈Σ qty/quota⌉, a parent the
+// sum of its children, and a batch whose parts have no quota says nothing
+// rather than guess. It rides on the associations the detail/list queries already load, so
 // it costs no extra round trip (TestFindByID_RoundTripBudget pins that).
 func TestBatchMaterialUnits(t *testing.T) {
 	f := newQuotaFixture(t, 4)
