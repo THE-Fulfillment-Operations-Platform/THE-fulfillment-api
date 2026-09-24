@@ -223,7 +223,8 @@ paths:
         tích sản phẩm⌋, tức ⌊(Material.length_mm × width_mm) / (SKU.length_mm ×
         width_mm)⌋. Cùng một tấm mica ra 10 khay nhỏ nhưng chỉ 4 khay to, nên
         định mức theo cặp; thiếu kích thước ở một trong hai bên = không có định
-        mức (batch không chẻ). Công thức là cận trên — bỏ qua mạch cắt và cách
+        mức (SKU đó không chẻ). Khi tạo batch, item nhóm theo SKU rồi mỗi SKU
+        chẻ theo định mức này. Công thức là cận trên — bỏ qua mạch cắt và cách
         xếp hình. Trường `products_per_unit` cũ không còn trong API.
 
         `length_mm` × `width_mm` là kích thước D x R của sản phẩm, đơn vị mm
@@ -544,12 +545,15 @@ paths:
       tags: [Batches]
       summary: Tự tạo batch từ toàn bộ pool design-ready (OWNER/ADMIN/OPS/DESIGNER)
       description: >-
-        Hệ thống tự phân loại theo NVL, tự chia theo ĐỊNH MỨC CỦA CẶP (SKU, NVL)
-        — tính từ kích thước: ⌊S_tấm / S_sản phẩm⌋, thiếu kích thước một bên thì
-        không chẻ — rồi tự sinh mã #101xxx và tạo batch; người vận hành
-        không chọn từng sản phẩm, không đặt tên. Mỗi sản phẩm chiếm 1/định mức
-        của một đơn vị NVL nên một batch đầy theo MỨC CHIẾM DỤNG, không theo
-        tổng số sản phẩm (10 khay nhỏ và 4 khay to cùng là một tấm). NVL nào không gom được
+        Hệ thống tự phân loại theo NVL, trong mỗi NVL NHÓM THEO SKU (một batch
+        là một file in + một file cắt của MỘT SKU; SKU khác nhau — kể cả hai SKU
+        con cùng SKU cha — không bao giờ chung batch), rồi mỗi SKU chia theo
+        ĐỊNH MỨC CỦA CẶP (SKU, NVL) — tính từ kích thước: ⌊S_tấm / S_sản phẩm⌋,
+        thiếu kích thước một bên thì SKU đó thành một batch không giới hạn — rồi
+        tự sinh mã #101xxx và tạo batch; người vận hành không chọn từng sản
+        phẩm, không đặt tên. Nhiều nhóm → batch mẹ + mỗi nhóm một batch con
+        (khách chốt 24/09/2026: SKU chỉ có vài sản phẩm lẻ vẫn là batch riêng).
+        NVL nào không gom được
         (pool quá lớn, lỗi giữa chừng) được trả về trong `skipped` kèm lý do;
         material lỗi rollback riêng, không ảnh hưởng material khác.
       responses:

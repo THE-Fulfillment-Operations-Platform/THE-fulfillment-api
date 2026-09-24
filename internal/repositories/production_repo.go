@@ -97,8 +97,21 @@ func (r *BatchRepository) FindByID(id uint) (*models.Batch, error) {
 		b.ScrappedCount = scrapped[b.ID]
 	}
 	b.FillMaterialUnits(&b.Material)
+	// A parent's sheets are the sum of its children's (children are loaded with
+	// their live parts here, so the sum is exact). Any child without a quota
+	// leaves the parent at its child count — one sheet per child.
+	total := 0
+	exact := true
 	for i := range b.ChildBatches {
 		b.ChildBatches[i].FillMaterialUnits(&b.Material)
+		if u := b.ChildBatches[i].MaterialUnits; u != nil {
+			total += *u
+		} else {
+			exact = false
+		}
+	}
+	if b.IsParent && exact && len(b.ChildBatches) > 0 {
+		b.MaterialUnits = &total
 	}
 	return &b, nil
 }

@@ -13,9 +13,10 @@ import (
 // Định mức sản xuất nằm ở CẶP (SKU, NVL), không phải ở NVL, và được TÍNH từ
 // kích thước: ⌊diện tích tấm / diện tích sản phẩm⌋ (khách chốt 2026-09-18).
 // Cùng một tấm mica, một SKU khay nhỏ ra 10 sản phẩm còn một SKU khay lớn chỉ
-// ra 4. Vì thế một batch không thể cộng số sản phẩm đơn thuần — nó cộng MỨC
-// CHIẾM DỤNG của từng sản phẩm trên một tấm (1/10 tấm so với 1/4 tấm), và một
-// batch đầy khi tổng chiếm dụng chạm đúng một tấm.
+// ra 4. Một batch là một file in + một file cắt, tức MỘT SKU lặp trên tấm, nên
+// (khách chốt 2026-09-24) trong một NVL, item nhóm theo SKU trước, mỗi SKU chẻ
+// theo định mức của cặp, SKU khác nhau không bao giờ chung batch — kể cả hai
+// SKU con cùng một SKU cha.
 
 // quotaFixture dựng NVL + các SKU của nó. Tấm NVL 60 × 1 mm; skuQuotas[i] là
 // định mức mong muốn của SKU thứ i, đạt được bằng cách cho SKU kích thước
@@ -164,29 +165,54 @@ func TestBatchQuota_SheetWithoutSize_Unlimited(t *testing.T) {
 	}
 }
 
-// TestBatchQuota_MixedSKUsShareOneUnit: HAI SKU cùng NVL nhưng khác định mức.
-// SKU A 10 sp/tấm (mỗi sp = 1/10 tấm), SKU B 4 sp/tấm (mỗi sp = 1/4 tấm).
-// 5×A + 2×B = 1/2 + 1/2 = đúng 1 tấm → một batch. Cộng số sản phẩm đơn thuần
-// (7 sản phẩm) sẽ nói sai hoàn toàn.
-func TestBatchQuota_MixedSKUsShareOneUnit(t *testing.T) {
+// TestBatchQuota_MixedSKUsNeverShareABatch: HAI SKU cùng NVL, mỗi SKU vài sản
+// phẩm lẻ, đều dưới định mức. Luật cũ (18/09) cho chúng chung một tấm theo mức
+// chiếm dụng (5/10 + 2/4 = 1 tấm); luật mới (24/09): mỗi SKU một batch riêng,
+// vì một batch là một file cắt của một SKU.
+func TestBatchQuota_MixedSKUsNeverShareABatch(t *testing.T) {
 	f := newQuotaFixture(t, 10, 4)
 	ids := append(f.add(t, 0, 5, 1), f.add(t, 1, 2, 1)...)
 
 	got := f.groupSizes(t, ids)
-	if len(got) != 1 || got[0] != 7 {
-		t.Fatalf("5×(1/10) + 2×(1/4) = đúng 1 tấm → một batch 7 item, got %v", got)
+	if len(got) != 2 || got[0] != 5 || got[1] != 2 {
+		t.Fatalf("hai SKU → hai batch riêng [5 2], got %v", got)
 	}
 }
 
-// TestBatchQuota_MixedSKUsOverflowToSecondUnit: thêm một sản phẩm SKU B nữa là
-// vượt một tấm → sản phẩm đó mở tấm thứ hai.
-func TestBatchQuota_MixedSKUsOverflowToSecondUnit(t *testing.T) {
-	f := newQuotaFixture(t, 10, 4)
-	ids := append(f.add(t, 0, 5, 1), f.add(t, 1, 3, 1)...)
+// TestBatchQuota_GroupsBySKUThenSplitsEach: hai SKU trộn lẫn thứ tự trong pool.
+// Nhóm theo SKU theo thứ tự xuất hiện, rồi mỗi nhóm chẻ theo định mức của nó:
+// A (định mức 4) 5 sp → [4 1]; B (định mức 3) 3 sp → [3]. Tổng 3 batch con.
+func TestBatchQuota_GroupsBySKUThenSplitsEach(t *testing.T) {
+	f := newQuotaFixture(t, 4, 3)
+	var ids []uint
+	ids = append(ids, f.add(t, 0, 2, 1)...)
+	ids = append(ids, f.add(t, 1, 3, 1)...)
+	ids = append(ids, f.add(t, 0, 3, 1)...)
 
 	got := f.groupSizes(t, ids)
-	if len(got) != 2 || got[0] != 7 || got[1] != 1 {
-		t.Fatalf("1/2 + 3/4 > 1 tấm → [7 1], got %v", got)
+	if len(got) != 3 || got[0] != 4 || got[1] != 1 || got[2] != 3 {
+		t.Fatalf("A[4 1] rồi B[3] theo thứ tự xuất hiện, got %v", got)
+	}
+}
+
+// TestBatchQuota_SiblingSKUsNotMerged: hai SKU con cùng một SKU cha (hộp nhựa
+// bé / lớn) vẫn là hai file cắt khác nhau → không chung batch.
+func TestBatchQuota_SiblingSKUsNotMerged(t *testing.T) {
+	f := newQuotaFixture(t, 10, 10)
+	parent := &models.SKU{Code: "HOP-NHUA", Name: "Hộp nhựa"}
+	if err := f.db.Create(parent).Error; err != nil {
+		t.Fatalf("seed parent: %v", err)
+	}
+	for _, sku := range f.skus {
+		if err := f.db.Model(sku).Update("parent_id", parent.ID).Error; err != nil {
+			t.Fatalf("set parent: %v", err)
+		}
+	}
+	ids := append(f.add(t, 0, 3, 1), f.add(t, 1, 3, 1)...)
+
+	got := f.groupSizes(t, ids)
+	if len(got) != 2 || got[0] != 3 || got[1] != 3 {
+		t.Fatalf("hai SKU con cùng cha → vẫn hai batch [3 3], got %v", got)
 	}
 }
 
@@ -450,9 +476,8 @@ func TestProductionQuota_FromAreas(t *testing.T) {
 }
 
 // TestBatchMaterialUnits: the sheet count a batch reports is derived from its
-// parts' sizes — a parent says how many children (one sheet each), a child says
-// ⌈Σ 1/quota⌉, and a batch whose parts have no quota says nothing rather than
-// guess. It rides on the associations the detail/list queries already load, so
+// parts' sizes — a child says ⌈Σ qty/quota⌉, a parent the sum of its children,
+// and a batch whose parts have no quota says nothing rather than guess. It rides on the associations the detail/list queries already load, so
 // it costs no extra round trip (TestFindByID_RoundTripBudget pins that).
 func TestBatchMaterialUnits(t *testing.T) {
 	f := newQuotaFixture(t, 4)

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"net/http"
 	"strings"
 	"time"
@@ -64,9 +63,8 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 		priority = models.PriorityNormal
 	}
 
-	// The quota is per (SKU, material) pair — items of different SKUs take up
-	// different shares of the same sheet — with the material's own quota as the
-	// fallback for pairs that never declared one.
+	// The quota is per (SKU, material) pair: how many products of that SKU one
+	// sheet of this material yields (derived from the two sizes).
 	quotaFor := func(it *models.OrderItem) int {
 		return resolveProductionQuota(it.SKU, material)
 	}
@@ -180,7 +178,8 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 			return txRepo.Status.CreateBulk(history)
 		}
 
-		// Within quota (or unlimited): one flat batch — identical to legacy behaviour.
+		// One group (a single SKU within its quota, or without a quota): one flat
+		// batch — identical to legacy behaviour.
 		if len(groups) <= 1 {
 			batch := newBatch()
 			if err := txRepo.Batch.Create(batch); err != nil {
@@ -198,8 +197,9 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) (*models.Batch, 
 			return nil
 		}
 
-		// Over quota: a parent batch (holds no items) + one child batch per group,
-		// each capped at the material's quota. Codes: parent "#<n>", child "#<n>-<seq>".
+		// Several groups (several SKUs, and/or a SKU over its quota): a parent
+		// batch (holds no items) + one child batch per group. Codes: parent "#<n>",
+		// child "#<n>-<seq>".
 		parent := newBatch()
 		parent.IsParent = true
 		parent.ChildCount = len(groups)
@@ -269,52 +269,73 @@ func itemProducts(it *models.OrderItem) int {
 	return it.Quantity
 }
 
-// planBatchSplitByQuota partitions items into groups, each fitting inside ONE
-// unit of the material, never splitting a single order line across groups.
+// planBatchSplitByQuota partitions items into production batches. A batch is
+// one print file + one cut file — ONE product repeated across the sheet — so:
 //
-// Products of different SKUs are not interchangeable, so a group is not "at most
-// N products": each product takes up 1/quota of a unit — a tray at 10 per sheet
-// takes a tenth, one at 4 per sheet takes a quarter — and a group is full when
-// those shares add up to one whole unit. quotaFor returning 0 means that SKU has
-// no quota on this material and takes up nothing.
+//  1. Items are grouped by SKU (exact SKU; two variants of the same parent SKU
+//     are different sizes, hence different cut files, hence different
+//     batches). Products of different SKUs never share a batch.
+//  2. Each SKU's lines are packed, in the caller's order, into batches of at
+//     most `quota` products — the pair's quota, how many of that SKU one sheet
+//     of this material yields. quotaFor returning 0 (a size missing on either
+//     side) means no quota: that SKU's lines form a single batch.
 //
-// The running total is exact rational arithmetic (math/big.Rat), not floating
-// point: at the boundary that actually decides the split, 1/3+1/3+1/3 must be
-// exactly one sheet, and a float would make it 0.999… or 1.000…2 and quietly
-// open a second batch (or overfill the first).
+// Confirmed with the customer on 2026-09-24: three loose products of a SKU
+// still become their own batch rather than sharing a sheet with another SKU,
+// even though that multiplies the batch count. The earlier rule (2026-09-18)
+// let SKUs share a sheet by area — 1/10 + 1/4 of a sheet — which on a mixed
+// pool almost never filled a sheet, so the quota never split anything.
 //
-// A single line that on its own exceeds the quota keeps its own over-quota group
-// — splitting one order line across batches is a business decision the customer
-// has not made yet, so the line stays whole and visible instead.
+// A single line that on its own exceeds the quota keeps its own over-quota
+// batch — splitting one order line across batches is a business decision the
+// customer has not made, so the line stays whole and visible instead.
 func planBatchSplitByQuota(items []*models.OrderItem, quotaFor func(*models.OrderItem) int) [][]*models.OrderItem {
 	if len(items) == 0 {
 		return nil
 	}
-	var groups [][]*models.OrderItem
-	var current []*models.OrderItem
-	used := new(big.Rat) // share of one material unit consumed by `current`
-	one := new(big.Rat).SetInt64(1)
-
-	for _, it := range items {
-		quota := quotaFor(it)
-		share := new(big.Rat) // 0 → unlimited quota, this line takes up nothing
-		if quota > 0 {
-			share.SetFrac64(int64(itemProducts(it)), int64(quota))
+	skuKey := func(it *models.OrderItem) uint {
+		if it.SKU != nil {
+			return it.SKU.ID
 		}
-		next := new(big.Rat).Add(used, share)
-		// Start a new unit when the current one is non-empty and this line no
-		// longer fits in it.
-		if len(current) > 0 && next.Cmp(one) > 0 {
-			groups = append(groups, current)
-			current = nil
-			used = new(big.Rat)
-			next = share
+		if it.SKUID != nil {
+			return *it.SKUID
 		}
-		current = append(current, it)
-		used = next
+		return 0
 	}
-	if len(current) > 0 {
-		groups = append(groups, current)
+	// Group by SKU in first-seen order so batches come out in the caller's order.
+	var order []uint
+	bySKU := map[uint][]*models.OrderItem{}
+	for _, it := range items {
+		k := skuKey(it)
+		if _, seen := bySKU[k]; !seen {
+			order = append(order, k)
+		}
+		bySKU[k] = append(bySKU[k], it)
+	}
+
+	var groups [][]*models.OrderItem
+	for _, k := range order {
+		lines := bySKU[k]
+		quota := quotaFor(lines[0]) // same SKU, same material → same quota for every line
+		if quota <= 0 {
+			groups = append(groups, lines)
+			continue
+		}
+		var current []*models.OrderItem
+		used := 0
+		for _, it := range lines {
+			n := itemProducts(it)
+			if len(current) > 0 && used+n > quota {
+				groups = append(groups, current)
+				current = nil
+				used = 0
+			}
+			current = append(current, it)
+			used += n
+		}
+		if len(current) > 0 {
+			groups = append(groups, current)
+		}
 	}
 	return groups
 }

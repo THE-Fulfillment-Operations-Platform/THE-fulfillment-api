@@ -60,11 +60,13 @@ func (Batch) TableName() string { return "batches" }
 // ⌈Σ quantity / quota⌉ with each part's quota derived from its SKU's size and
 // `material` (the batch's own — passed in because a child batch loaded under
 // its parent carries no Material of its own). Items must be loaded with their
-// OrderItem and its SKU. A parent reports its child count. nil when any part
-// has no quota (a size is missing on either side) — the screen then shows "—"
-// instead of a number nobody can vouch for. The sum is added as exact
-// fractions: at the boundary where a sheet is precisely full, float rounding
-// would turn "one sheet" into two.
+// OrderItem and its SKU. A parent reports its child count (each child is one
+// SKU within its quota, i.e. one sheet — the detail query replaces this with
+// the children's exact sum, which only differs when a single order line
+// exceeds its quota). nil when any part has no quota (a size is missing on
+// either side) — the screen then shows "—" instead of a number nobody can
+// vouch for. The sum is added as exact fractions: at the boundary where a
+// sheet is precisely full, float rounding would turn "one sheet" into two.
 func (b *Batch) FillMaterialUnits(material *Material) {
 	b.MaterialUnits = nil
 	if b.IsParent {
