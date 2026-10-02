@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>THE Fulfillment — Tài liệu kết nối API</title>
+<style>
+  :root {
+    --bg: #f7f8fa; --card: #ffffff; --text: #1c2330; --muted: #5d6778; --line: #e3e7ee;
+    --accent: #0f6fde; --code-bg: #0f1724; --code-text: #e6edf7; --chip: #eef3fb;
+    --ok: #177245; --warn: #9a5b00; --bad: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e131b; --card: #161d28; --text: #e6ebf3; --muted: #9aa6b8; --line: #263142;
+      --accent: #6fb0ff; --code-bg: #0a0f17; --code-text: #dfe7f3; --chip: #1e2a3b;
+      --ok: #5fd39a; --warn: #f0b860; --bad: #ff8a80;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 32px 16px 80px; }
+  header h1 { font-size: 28px; line-height: 1.25; margin: 0 0 6px; }
+  header p { color: var(--muted); margin: 0; }
+  nav { margin: 24px 0 8px; display: flex; flex-wrap: wrap; gap: 8px; }
+  nav a {
+    font-size: 14px; text-decoration: none; color: var(--accent);
+    background: var(--chip); padding: 5px 12px; border-radius: 999px;
+  }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 22px 22px 8px; margin-top: 18px; }
+  h2 { font-size: 20px; margin: 0 0 12px; }
+  h3 { font-size: 16px; margin: 22px 0 8px; }
+  p, li { max-width: 72ch; }
+  ul, ol { padding-left: 22px; }
+  a { color: var(--accent); }
+  code { font: 13.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--chip); padding: 1px 6px; border-radius: 6px; }
+  pre {
+    background: var(--code-bg); color: var(--code-text); border-radius: 10px; padding: 14px 16px;
+    overflow-x: auto; margin: 10px 0 16px; font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  pre code { background: none; padding: 0; color: inherit; font: inherit; }
+  .table { overflow-x: auto; margin: 10px 0 16px; }
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+  td code { white-space: nowrap; }
+  .req { color: var(--bad); font-weight: 600; }
+  .method { display: inline-block; font: 600 12px/1 ui-monospace, Menlo, monospace; padding: 5px 8px; border-radius: 6px; color: #fff; margin-right: 8px; vertical-align: 2px; }
+  .get { background: #1a7f4b; } .post { background: #0f6fde; }
+  .note { border-left: 3px solid var(--accent); background: var(--chip); padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 12px 0 16px; }
+  .note.warn { border-left-color: var(--warn); }
+  footer { color: var(--muted); font-size: 14px; margin-top: 28px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Tài liệu kết nối API</h1>
+  <p>THE Fulfillment — Open API v1. Dành cho đội kỹ thuật của seller muốn đẩy đơn tự động vào xưởng.</p>
+</header>
+
+<nav>
+  <a href="#tong-quan">Tổng quan</a>
+  <a href="#bat-dau">Bắt đầu nhanh</a>
+  <a href="#xac-thuc">Xác thực</a>
+  <a href="#tao-don">Tạo đơn</a>
+  <a href="#tra-don">Tra đơn</a>
+  <a href="#trang-thai">Trạng thái</a>
+  <a href="#loi">Mã lỗi</a>
+  <a href="#gioi-han">Giới hạn</a>
+  <a href="#hoi-dap">Hỏi đáp</a>
+</nav>
+
+<section id="tong-quan">
+  <h2>Tổng quan</h2>
+  <p>Khi hệ thống của bạn có đơn mới, gọi API này để đơn tự vào xưởng — không cần xuất Excel rồi import. Sau đó bạn hỏi lại API để biết đơn đang ở đâu và lấy mã vận đơn.</p>
+  <div class="table"><table>
+    <tr><th>Địa chỉ gốc</th><td><code><span class="base">https://fulfillment.bacgiangdecor.com</span>/api/open/v1</code></td></tr>
+    <tr><th>Định dạng</th><td>JSON, UTF-8. Gửi header <code>Content-Type: application/json</code>.</td></tr>
+    <tr><th>Xác thực</th><td>API key do xưởng cấp, gửi trong header.</td></tr>
+    <tr><th>Đặc tả máy đọc</th><td><a href="/api/open/v1/openapi.yaml">openapi.yaml</a> (OpenAPI 3) — nạp được vào Postman, Insomnia.</td></tr>
+  </table></div>
+  <p>Mọi câu trả lời dùng chung một khung:</p>
+<pre><code>// Thành công
+{ "success": true, "data": { ... } }
+
+// Thất bại
+{ "success": false, "error": { "code": "MÃ_LỖI", "message": "Mô tả", "details": [ ... ] } }</code></pre>
+  <p>Hãy xử lý theo <strong>mã HTTP</strong> và <code>error.code</code>. Câu chữ trong <code>message</code> có thể thay đổi.</p>
+</section>
+
+<section id="bat-dau">
+  <h2>Bắt đầu nhanh</h2>
+  <ol>
+    <li><strong>Xin API key</strong> từ xưởng. Key có dạng <code>ffm_…</code>, chỉ hiện một lần lúc tạo — lưu vào nơi cất bí mật của hệ thống bạn.</li>
+    <li><strong>Thử key</strong>:
+<pre><code>curl <span class="base">https://fulfillment.bacgiangdecor.com</span>/api/open/v1/ping \
+  -H "Authorization: Bearer ffm_KEY_CỦA_BẠN"</code></pre>
+      Trả về tên seller của bạn là key đúng.</li>
+    <li><strong>Gửi đơn đầu tiên</strong>:
+<pre><code>curl -X POST <span class="base">https://fulfillment.bacgiangdecor.com</span>/api/open/v1/orders \
+  -H "Authorization: Bearer ffm_KEY_CỦA_BẠN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "order_id": "ETSY-3391820455",
+    "shipping": {
+      "name": "Jane Doe",
+      "address1": "1 Main St",
+      "city": "Saint Paul",
+      "province": "MN",
+      "zip": "55112",
+      "country": "US",
+      "phone": "+1 651 555 0100"
+    },
+    "items": [
+      {
+        "sku": "ASK-3L-ONM-5-X-5",
+        "quantity": 2,
+        "mockup_url": "https://cdn.example.com/mockups/3391820455-1.png",
+        "design_url": "https://cdn.example.com/designs/3391820455-1.png"
+      }
+    ]
+  }'</code></pre></li>
+    <li><strong>Tra đơn</strong> bằng chính <code>order_id</code> của bạn:
+<pre><code>curl <span class="base">https://fulfillment.bacgiangdecor.com</span>/api/open/v1/orders/ETSY-3391820455 \
+  -H "Authorization: Bearer ffm_KEY_CỦA_BẠN"</code></pre></li>
+  </ol>
+</section>
+
+<section id="xac-thuc">
+  <h2>Xác thực</h2>
+  <p>Mỗi request phải mang API key, theo một trong hai cách:</p>
+<pre><code>Authorization: Bearer ffm_KEY_CỦA_BẠN
+// hoặc
+X-API-Key: ffm_KEY_CỦA_BẠN</code></pre>
+  <ul>
+    <li>Một key thuộc về đúng một seller. Đơn tạo bằng key nào thuộc seller của key đó — không có trường nào để chọn seller khác.</li>
+    <li>Chỉ gọi API từ máy chủ của bạn. Đừng để key trong ứng dụng di động hay mã chạy trên trình duyệt.</li>
+    <li>Lộ key thì báo xưởng thu hồi và cấp key mới. Key bị thu hồi ngừng hoạt động gần như ngay lập tức.</li>
+  </ul>
+</section>
+
+<section id="tao-don">
+  <h2>Tạo đơn</h2>
+  <p><span class="method post">POST</span><code>/orders</code></p>
+  <p>Mỗi lần gọi tạo một đơn. Đơn vào hàng <strong>chờ xưởng duyệt</strong> rồi mới sản xuất.</p>
+
+  <h3>Thông tin đơn</h3>
+  <div class="table"><table>
+    <tr><th>Trường</th><th>Kiểu</th><th>Ghi chú</th></tr>
+    <tr><td><code>order_id</code> <span class="req">*</span></td><td>chuỗi ≤ 120</td><td>Mã đơn bên hệ thống của bạn. Là khoá chống trùng (xem bên dưới).</td></tr>
+    <tr><td><code>order_date</code></td><td><code>YYYY-MM-DD</code></td><td>Ngày đặt hàng. Bỏ trống = hôm nay theo giờ Việt Nam.</td></tr>
+    <tr><td><code>store_name</code></td><td>chuỗi ≤ 160</td><td>Tên shop.</td></tr>
+    <tr><td><code>account</code></td><td>chuỗi ≤ 120</td><td>Tài khoản bán hàng của đơn.</td></tr>
+    <tr><td><code>note</code></td><td>chuỗi ≤ 1000</td><td>Ghi chú cho xưởng.</td></tr>
+    <tr><td><code>shipping</code> <span class="req">*</span></td><td>object</td><td>Người nhận, xem bảng dưới.</td></tr>
+    <tr><td><code>items</code> <span class="req">*</span></td><td>mảng 1–100</td><td>Các dòng sản phẩm, xem bảng dưới.</td></tr>
+  </table></div>
+
+  <h3>Người nhận — <code>shipping</code></h3>
+  <div class="table"><table>
+    <tr><th>Trường</th><th>Kiểu</th><th>Ghi chú</th></tr>
+    <tr><td><code>name</code> <span class="req">*</span></td><td>chuỗi ≤ 160</td><td>Tên người nhận.</td></tr>
+    <tr><td><code>address1</code> <span class="req">*</span></td><td>chuỗi ≤ 255</td><td>Địa chỉ.</td></tr>
+    <tr><td><code>address2</code></td><td>chuỗi ≤ 255</td><td>Căn hộ, tầng…</td></tr>
+    <tr><td><code>city</code></td><td>chuỗi ≤ 120</td><td>Thành phố.</td></tr>
+    <tr><td><code>province</code></td><td>chuỗi ≤ 120</td><td>Bang / tỉnh (ví dụ <code>MN</code>).</td></tr>
+    <tr><td><code>zip</code></td><td>chuỗi ≤ 40</td><td>Mã bưu chính.</td></tr>
+    <tr><td><code>country</code> <span class="req">*</span></td><td>chuỗi ≤ 80</td><td>Quốc gia (ví dụ <code>US</code>).</td></tr>
+    <tr><td><code>phone</code></td><td>chuỗi ≤ 60</td><td>Số điện thoại người nhận. Nên có.</td></tr>
+  </table></div>
+
+  <h3>Dòng sản phẩm — <code>items[]</code></h3>
+  <div class="table"><table>
+    <tr><th>Trường</th><th>Kiểu</th><th>Ghi chú</th></tr>
+    <tr><td><code>sku</code> <span class="req">*</span></td><td>chuỗi ≤ 48</td><td>Mã SKU <strong>của xưởng</strong> (xưởng gửi danh sách). Không phân biệt hoa thường.</td></tr>
+    <tr><td><code>quantity</code></td><td>số nguyên ≥ 1</td><td>Mặc định 1.</td></tr>
+    <tr><td><code>mockup_url</code></td><td>link http(s)</td><td>Ảnh mockup để xưởng đối chiếu khi QC. <strong>Nên có</strong> — thiếu thì dòng đó phải chờ bổ sung.</td></tr>
+    <tr><td><code>design_url</code></td><td>link hoặc mã</td><td>File thiết kế mặt trước.</td></tr>
+    <tr><td><code>back_design_url</code></td><td>link hoặc mã</td><td>File thiết kế mặt sau, chỉ với sản phẩm 2 mặt. Phải khác <code>design_url</code>.</td></tr>
+    <tr><td><code>image_code</code></td><td>chuỗi ≤ 120</td><td>Mã ảnh / mã thiết kế bên bạn.</td></tr>
+    <tr><td><code>engrave_text</code></td><td>chuỗi ≤ 500</td><td>Nội dung khắc, cá nhân hoá.</td></tr>
+  </table></div>
+  <p>Các link phải mở được mà không cần đăng nhập (link công khai hoặc đã chia sẻ quyền xem).</p>
+
+  <h3>Gửi lại không sợ trùng đơn</h3>
+  <div class="note">
+    Tạo đơn là <strong>idempotent theo <code>order_id</code></strong>. Gửi lại một <code>order_id</code> đã gửi thì API trả về đúng đơn đã tạo, không tạo đơn thứ hai.
+  </div>
+  <div class="table"><table>
+    <tr><th>Mã HTTP</th><th><code>data.created</code></th><th>Nghĩa là</th></tr>
+    <tr><td><code>201</code></td><td><code>true</code></td><td>Vừa tạo đơn mới.</td></tr>
+    <tr><td><code>200</code></td><td><code>false</code></td><td><code>order_id</code> này đã có. <code>data.order</code> là đơn cũ, không thay đổi gì.</td></tr>
+  </table></div>
+  <p>Vì vậy khi gặp timeout, mất mạng hay lỗi <code>5xx</code>, cứ <strong>gửi lại nguyên request</strong> (nên cách nhau vài giây, tăng dần). Cả <code>200</code> và <code>201</code> đều nghĩa là đơn đã nằm trong hệ thống xưởng.</p>
+  <div class="note warn">
+    API không sửa đơn. Gửi lại cùng <code>order_id</code> với nội dung khác thì đơn cũ vẫn giữ nguyên. Cần sửa hoặc huỷ đơn đã gửi, xem <a href="#hoi-dap">Hỏi đáp</a>.
+  </div>
+
+  <h3>Câu trả lời</h3>
+<pre><code>HTTP/1.1 201 Created
+
+{
+  "success": true,
+  "data": {
+    "created": true,
+    "warnings": [],
+    "order": {
+      "code": "100123",
+      "order_id": "ETSY-3391820455",
+      "status": "PENDING_REVIEW",
+      "status_text": "Chờ xưởng duyệt",
+      "order_date": "2026-10-01",
+      "store_name": "",
+      "account": "",
+      "shipping": {
+        "name": "Jane Doe", "address1": "1 Main St", "address2": "",
+        "city": "Saint Paul", "province": "MN", "zip": "55112",
+        "country": "US", "phone": "+1 651 555 0100"
+      },
+      "note": "",
+      "tracking": null,
+      "items": [
+        {
+          "line": 1,
+          "sku": "ASK-3L-ONM-5-X-5",
+          "product_name": "Ornament mica 5x5",
+          "quantity": 2,
+          "status": "ACTIVE",
+          "image_code": "",
+          "design_url": "https://cdn.example.com/designs/3391820455-1.png",
+          "back_design_url": "",
+          "mockup_url": "https://cdn.example.com/mockups/3391820455-1.png",
+          "engrave_text": ""
+        }
+      ],
+      "created_at": "2026-10-01T10:15:30+07:00",
+      "updated_at": "2026-10-01T10:15:30+07:00"
+    }
+  }
+}</code></pre>
+  <ul>
+    <li><code>code</code> là mã đơn nội bộ của xưởng, in trên tem. Hãy lưu lại để trao đổi với xưởng khi cần.</li>
+    <li><code>warnings</code>: đơn vẫn được nhận, nhưng có điểm nên xem lại (ví dụ zip và bang có vẻ bị điền ngược).</li>
+  </ul>
+
+  <h3>Đơn bị từ chối</h3>
+  <p>Sai ở bất kỳ trường nào thì <strong>cả đơn không được tạo</strong>. API trả <code>422</code> và liệt kê mọi lỗi cùng lúc:</p>
+<pre><code>HTTP/1.1 422 Unprocessable Entity
+
+{
+  "success": false,
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Đơn chưa hợp lệ: 2 lỗi — xem error.details",
+    "details": [
+      { "field": "shipping.country", "code": "REQUIRED",      "message": "Thiếu shipping.country" },
+      { "field": "items[0].sku",     "code": "SKU_NOT_FOUND", "message": "SKU không có trên hệ thống của xưởng — ..." }
+    ]
+  }
+}</code></pre>
+  <p><code>field</code> là đường dẫn tới trường trong body bạn gửi; <code>items[0]</code> là dòng sản phẩm đầu tiên.</p>
+</section>
+
+<section id="tra-don">
+  <h2>Tra đơn</h2>
+
+  <h3>Một đơn</h3>
+  <p><span class="method get">GET</span><code>/orders/{order_id}</code></p>
+  <p>Tra bằng <code>order_id</code> của bạn, hoặc bằng <code>code</code> của xưởng. <code>data</code> là đơn, cùng cấu trúc với <code>data.order</code> ở trên.</p>
+  <ul>
+    <li>Nhớ URL-encode <code>order_id</code>. Nếu mã chứa dấu <code>/</code>, dùng <code>GET /orders?order_id=…</code>.</li>
+    <li>Không có đơn: <code>404</code>, <code>error.code = ORDER_NOT_FOUND</code>.</li>
+  </ul>
+
+  <h3>Nhiều đơn</h3>
+  <p><span class="method get">GET</span><code>/orders</code></p>
+  <div class="table"><table>
+    <tr><th>Tham số</th><th>Ghi chú</th></tr>
+    <tr><td><code>status</code></td><td>Lọc theo <a href="#trang-thai">trạng thái</a>, ví dụ <code>IN_PRODUCTION</code>.</td></tr>
+    <tr><td><code>order_id</code></td><td>Chỉ lấy đúng đơn này (kết quả là danh sách 0 hoặc 1 đơn).</td></tr>
+    <tr><td><code>created_from</code>, <code>created_to</code></td><td>Khoảng thời gian tạo đơn. <code>YYYY-MM-DD</code> hoặc RFC 3339.</td></tr>
+    <tr><td><code>page</code>, <code>page_size</code></td><td>Mặc định trang 1, 20 đơn/trang. Tối đa 100.</td></tr>
+  </table></div>
+<pre><code>curl "<span class="base">https://fulfillment.bacgiangdecor.com</span>/api/open/v1/orders?status=SHIPPED&amp;page_size=100" \
+  -H "Authorization: Bearer ffm_KEY_CỦA_BẠN"
+
+{
+  "success": true,
+  "data": [ { "code": "100123", "order_id": "ETSY-3391820455", "status": "SHIPPED", ... } ],
+  "meta": { "page": 1, "page_size": 100, "total": 37, "total_pages": 1 }
+}</code></pre>
+
+  <h3>Vận đơn — <code>tracking</code></h3>
+  <p>Là <code>null</code> cho tới khi đơn có mã vận đơn. Sau đó:</p>
+<pre><code>"tracking": {
+  "number": "9400111899223344556677",
+  "status": "IN_TRANSIT",
+  "detail": "Arrived at USPS Regional Facility",
+  "location": "JAMAICA, NY",
+  "updated_at": "2026-10-06T02:11:00Z",
+  "delivered_at": null
+}</code></pre>
+  <p><code>tracking.status</code> nhận một trong: <code>PENDING</code>, <code>PRE_TRANSIT</code>, <code>IN_TRANSIT</code>, <code>OUT_FOR_DELIVERY</code>, <code>PICK_UP</code>, <code>DELIVERED</code>, <code>UNDELIVERED</code>, <code>EXCEPTION</code>, <code>EXPIRED</code>, <code>CANCELLED</code>; rỗng khi chưa có lượt quét nào.</p>
+  <div class="note">
+    Để đồng bộ trạng thái, gọi lại định kỳ <strong>15–30 phút một lần</strong> cho các đơn chưa <code>DELIVERED</code>/<code>CANCELLED</code>/<code>REJECTED</code>. Dùng <code>GET /orders?status=…</code> để lấy cả trang thay vì hỏi từng đơn.
+  </div>
+</section>
+
+<section id="trang-thai">
+  <h2>Trạng thái đơn</h2>
+  <div class="table"><table>
+    <tr><th><code>status</code></th><th>Nghĩa là</th><th>Bạn cần làm gì</th></tr>
+    <tr><td><code>PENDING_REVIEW</code></td><td>Chờ xưởng duyệt</td><td>Chờ.</td></tr>
+    <tr><td><code>NEEDS_CORRECTION</code></td><td>Xưởng trả lại, cần sửa thông tin</td><td>Đọc <code>review_note</code>, liên hệ xưởng để sửa.</td></tr>
+    <tr><td><code>REJECTED</code></td><td>Xưởng từ chối</td><td>Đọc <code>review_note</code>. Đơn sẽ không được sản xuất.</td></tr>
+    <tr><td><code>IN_PRODUCTION</code></td><td>Đang sản xuất</td><td>Chờ.</td></tr>
+    <tr><td><code>PACKED</code></td><td>Đã đóng gói</td><td>Chờ.</td></tr>
+    <tr><td><code>HANDED_OFF</code></td><td>Đã xuất xưởng, giao cho vận chuyển</td><td>Theo dõi <code>tracking</code>.</td></tr>
+    <tr><td><code>SHIPPED</code></td><td>Đang vận chuyển</td><td>Theo dõi <code>tracking</code>.</td></tr>
+    <tr><td><code>DELIVERED</code></td><td>Đã giao</td><td>Kết thúc.</td></tr>
+    <tr><td><code>CANCELLED</code></td><td>Đã huỷ</td><td>Kết thúc. Lý do ở <code>cancellation_reason</code>.</td></tr>
+  </table></div>
+  <p>Mỗi dòng sản phẩm có <code>status</code> riêng: <code>ACTIVE</code> hoặc <code>CANCELLED</code> (một sản phẩm trong đơn có thể bị huỷ riêng).</p>
+</section>
+
+<section id="loi">
+  <h2>Mã lỗi</h2>
+  <div class="table"><table>
+    <tr><th>HTTP</th><th><code>error.code</code></th><th>Nguyên nhân</th><th>Xử lý</th></tr>
+    <tr><td>400</td><td><code>INVALID_JSON</code></td><td>Body không phải JSON hợp lệ, hoặc sai kiểu dữ liệu.</td><td>Sửa request.</td></tr>
+    <tr><td>400</td><td><code>STATUS_INVALID</code></td><td>Tham số <code>status</code> không có trong danh sách.</td><td>Sửa request.</td></tr>
+    <tr><td>401</td><td><code>API_KEY_MISSING</code></td><td>Không gửi key.</td><td>Thêm header xác thực.</td></tr>
+    <tr><td>401</td><td><code>API_KEY_INVALID</code></td><td>Key sai hoặc đã bị thu hồi.</td><td>Kiểm tra key, xin xưởng cấp lại.</td></tr>
+    <tr><td>403</td><td><code>SELLER_PAUSED</code></td><td>Seller đang bị tạm dừng.</td><td>Liên hệ xưởng.</td></tr>
+    <tr><td>404</td><td><code>ORDER_NOT_FOUND</code></td><td>Không có đơn với mã này.</td><td>Kiểm tra mã đơn.</td></tr>
+    <tr><td>422</td><td><code>VALIDATION_ERROR</code></td><td>Đơn chưa hợp lệ.</td><td>Sửa theo <code>error.details</code>, gửi lại.</td></tr>
+    <tr><td>429</td><td><code>TOO_MANY_REQUESTS</code></td><td>Gọi quá nhanh.</td><td>Chờ theo header <code>Retry-After</code> rồi gửi lại.</td></tr>
+    <tr><td>5xx</td><td><code>INTERNAL</code></td><td>Lỗi phía xưởng.</td><td>Gửi lại sau vài giây. Lặp lại nhiều lần thì báo xưởng.</td></tr>
+  </table></div>
+
+  <h3>Mã trong <code>error.details</code> của lỗi 422</h3>
+  <div class="table"><table>
+    <tr><th><code>code</code></th><th>Nghĩa là</th></tr>
+    <tr><td><code>REQUIRED</code></td><td>Thiếu trường bắt buộc.</td></tr>
+    <tr><td><code>TOO_LONG</code></td><td>Giá trị dài quá giới hạn của trường.</td></tr>
+    <tr><td><code>TOO_MANY</code></td><td>Đơn có quá 100 dòng sản phẩm.</td></tr>
+    <tr><td><code>DATE_INVALID</code></td><td><code>order_date</code> không đúng dạng <code>YYYY-MM-DD</code>.</td></tr>
+    <tr><td><code>QUANTITY_INVALID</code></td><td>Số lượng không phải số nguyên từ 1 trở lên.</td></tr>
+    <tr><td><code>SKU_NOT_FOUND</code></td><td>SKU không có trên hệ thống xưởng. Kiểm tra lại mã hoặc báo xưởng khai SKU.</td></tr>
+    <tr><td><code>SKU_NOT_READY</code></td><td>SKU có nhưng xưởng chưa khai nguyên vật liệu nên chưa sản xuất được. Báo xưởng.</td></tr>
+    <tr><td><code>URL_INVALID</code></td><td>Link không phải http(s) hợp lệ.</td></tr>
+    <tr><td><code>DESIGN_SIDE_DUPLICATE</code></td><td>Thiết kế mặt trước và mặt sau trùng nhau.</td></tr>
+  </table></div>
+</section>
+
+<section id="gioi-han">
+  <h2>Giới hạn</h2>
+  <ul>
+    <li><strong>120 request/phút</strong> cho mỗi key. Vượt thì nhận <code>429</code>.</li>
+    <li>Tối đa <strong>100 dòng sản phẩm</strong> một đơn.</li>
+    <li>Danh sách đơn: tối đa <strong>100 đơn</strong> một trang.</li>
+    <li>Chỉ hỗ trợ HTTPS.</li>
+  </ul>
+</section>
+
+<section id="hoi-dap">
+  <h2>Hỏi đáp</h2>
+  <h3>Sửa hoặc huỷ đơn đã gửi thế nào?</h3>
+  <p>Bản v1 chưa có API sửa/huỷ. Đăng nhập cổng seller để huỷ hoặc gửi yêu cầu huỷ, hoặc liên hệ xưởng. Đừng gửi lại đơn với <code>order_id</code> mới để "sửa" — xưởng sẽ sản xuất cả hai.</p>
+  <h3>Tôi không có mã SKU của xưởng?</h3>
+  <p>Xưởng gửi bạn danh sách SKU. Hệ thống của bạn cần một bảng đổi từ mã sản phẩm của bạn sang mã SKU của xưởng trước khi gọi API.</p>
+  <h3>Một khách mua nhiều sản phẩm thì gửi mấy đơn?</h3>
+  <p>Một đơn, nhiều dòng trong <code>items</code>. Các dòng cùng đơn được xưởng gom và gửi chung một kiện.</p>
+  <h3>Đơn tôi gửi có được sản xuất ngay không?</h3>
+  <p>Không. Xưởng duyệt trước (<code>PENDING_REVIEW</code>), duyệt xong mới vào sản xuất (<code>IN_PRODUCTION</code>).</p>
+  <h3>Có môi trường thử không?</h3>
+  <p>Chưa có môi trường riêng. Khi thử, báo trước với xưởng và đặt <code>order_id</code> bắt đầu bằng <code>TEST-</code> để xưởng biết đó là đơn thử và xoá đi.</p>
+</section>
+
+<footer>THE Fulfillment · Open API v1</footer>
+</div>
+<script>
+  // Hiện đúng tên miền đang phục vụ trang này trong mọi ví dụ.
+  document.querySelectorAll('.base').forEach(function (el) { el.textContent = location.origin; });
+</script>
+</body>
+</html>

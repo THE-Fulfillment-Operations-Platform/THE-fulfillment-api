@@ -61,6 +61,11 @@ var routeCases = []routeCase{
 	{"POST", "/api/sellers", oOpsAdmin, nil},
 	{"PUT", "/api/sellers/1", oOpsAdmin, nil},
 	{"DELETE", "/api/sellers/1", oAdminOwner, nil},
+	// Open-API keys: listing is master data; issuing/revoking decides who may send
+	// orders in a seller's name, so it stays with ADMIN/OWNER.
+	{"GET", "/api/sellers/1/api-keys", oOpsAdmin, nil},
+	{"POST", "/api/sellers/1/api-keys", oAdminOwner, nil},
+	{"DELETE", "/api/sellers/1/api-keys/1", oAdminOwner, nil},
 	// Reference data: CS may now read stores/materials/SKUs like the sellers
 	// list they could already read.
 	{"GET", "/api/stores", oInternal, []models.Role{models.RoleCS}},

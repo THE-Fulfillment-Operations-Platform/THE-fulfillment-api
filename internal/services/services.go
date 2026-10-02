@@ -52,10 +52,14 @@ func (a Actor) IDPtr() *uint {
 
 // Services bundles every service for easy injection into handlers.
 type Services struct {
-	Auth         *AuthService
-	User         *UserService
-	Access       *AccessService
-	Seller       *SellerService
+	Auth   *AuthService
+	User   *UserService
+	Access *AccessService
+	Seller *SellerService
+	// APIKey issues the sellers' open-API keys and resolves the key a request
+	// presents; Open is the open API itself (/api/open/v1).
+	APIKey       *APIKeyService
+	Open         *OpenAPIService
 	Catalog      *CatalogService
 	Import       *ImportService
 	MasterImport *MasterImportService
@@ -90,13 +94,16 @@ func New(repo *repositories.Repositories, jwt *auth.Manager, carrier shipping.Ca
 	trackingSync := NewTrackingSyncService(repo, audit, track.Client, track.Tag, track.Resolve)
 	thumb := NewThumbService(repo, thumbs)
 	access := NewAccessService(repo)
+	imports := &ImportService{repo: repo, audit: audit}
 	return &Services{
 		Auth:         &AuthService{repo: repo, jwt: jwt, audit: audit},
 		User:         &UserService{repo: repo, audit: audit, access: access},
 		Access:       access,
 		Seller:       &SellerService{repo: repo, audit: audit},
+		APIKey:       NewAPIKeyService(repo, audit),
+		Open:         &OpenAPIService{repo: repo, audit: audit, imports: imports},
 		Catalog:      &CatalogService{repo: repo, audit: audit},
-		Import:       &ImportService{repo: repo, audit: audit},
+		Import:       imports,
 		MasterImport: &MasterImportService{repo: repo, audit: audit},
 		Order:        &OrderService{repo: repo, audit: audit, tracking: trackingSync},
 		Review:       &ReviewService{repo: repo, audit: audit},

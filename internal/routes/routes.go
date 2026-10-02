@@ -78,6 +78,26 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	// handlers.ThumbnailAsset.
 	api.GET("/assets/thumb/:name", h.ThumbnailAsset)
 
+	// Open API: the endpoints a seller's own system calls. A program has no login,
+	// so these sit outside the JWT group and authenticate with the seller's API
+	// key (Master Data → Seller → "API"); the key decides which seller every
+	// request acts for. Its reference lives next to it — and under /api on
+	// purpose, because the reverse proxy only forwards /api/* to this service.
+	api.GET("/open/docs", docs.OpenUI)
+	api.GET("/open/v1/openapi.yaml", docs.OpenSpec)
+	open := api.Group("/open/v1")
+	// Per IP before the key is even looked at (blunts key guessing and keeps a
+	// misconfigured client from hammering the database), then per key.
+	open.Use(middleware.RateLimit(300, time.Minute))
+	open.Use(middleware.APIKeyAuth(h.APIKeyResolver()))
+	open.Use(middleware.RateLimitAPIKey(120, time.Minute))
+	{
+		open.GET("/ping", h.OpenPing)
+		open.POST("/orders", h.OpenCreateOrder)
+		open.GET("/orders", h.OpenListOrders)
+		open.GET("/orders/:ref", h.OpenGetOrder)
+	}
+
 	// Authenticated routes. LoadAccess re-reads the caller's role and permission
 	// ticks from the database (cached ~30s), so every guard below judges the
 	// account as it is now, not as it was when the token was issued.
@@ -127,6 +147,12 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		sellers.POST("", masterManage, h.CreateSeller)
 		sellers.PUT("/:id", masterManage, h.UpdateSeller)
 		sellers.DELETE("/:id", adminOwner, masterManage, h.DeleteSeller)
+		// Open-API keys. Seeing which keys exist is Master Data's; issuing or
+		// revoking one decides who may send orders in a seller's name, so it takes
+		// ADMIN/OWNER on top — the same bar as deleting master data.
+		sellers.GET("/:id/api-keys", masterManage, h.ListSellerAPIKeys)
+		sellers.POST("/:id/api-keys", adminOwner, masterManage, h.CreateSellerAPIKey)
+		sellers.DELETE("/:id/api-keys/:key_id", adminOwner, masterManage, h.RevokeSellerAPIKey)
 	}
 
 	stores := authd.Group("/stores")

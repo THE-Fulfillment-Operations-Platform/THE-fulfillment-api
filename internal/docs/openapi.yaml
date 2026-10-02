@@ -166,6 +166,37 @@ paths:
     get: { tags: [Sellers], summary: Chi tiết seller, responses: { '200': { description: OK } } }
     put: { tags: [Sellers], summary: Cập nhật seller, responses: { '200': { description: OK } } }
     delete: { tags: [Sellers], summary: Xóa seller, responses: { '200': { description: OK } } }
+  /api/sellers/{id}/api-keys:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    get:
+      tags: [Sellers]
+      summary: Danh sách API key của seller
+      description: >-
+        Key để hệ thống của seller gọi Open API (`/api/open/v1`, tài liệu ở
+        `/api/open/docs`). Trả cả key đã thu hồi. Không bao giờ trả key gốc hay
+        hash — chỉ `prefix` (12 ký tự đầu) để phân biệt. Quyền: Master Data →
+        Thao tác.
+      responses: { '200': { description: OK } }
+    post:
+      tags: [Sellers]
+      summary: Tạo API key cho seller
+      description: >-
+        Body `{ name }`. Response có `key` — key gốc, CHỈ hiện lần này (DB chỉ
+        lưu SHA-256). Tối đa 5 key đang hoạt động mỗi seller. Chỉ ADMIN/OWNER
+        (kèm Master Data → Thao tác): key quyết định ai được đẩy đơn dưới tên
+        seller.
+      responses: { '201': { description: Created } }
+  /api/sellers/{id}/api-keys/{key_id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+      - { name: key_id, in: path, required: true, schema: { type: integer } }
+    delete:
+      tags: [Sellers]
+      summary: Thu hồi API key
+      description: >-
+        Đóng dấu `revoked_at`; request kế tiếp dùng key này bị 401. Dòng key được
+        giữ lại làm lịch sử. Thu hồi lần hai không đổi gì. Chỉ ADMIN/OWNER.
+      responses: { '200': { description: OK } }
   /api/stores:
     get: { tags: [Stores], summary: Danh sách store, responses: { '200': { description: OK } } }
     post: { tags: [Stores], summary: Tạo store, responses: { '201': { description: Created } } }

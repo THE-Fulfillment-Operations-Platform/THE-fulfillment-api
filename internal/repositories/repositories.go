@@ -52,6 +52,7 @@ type Repositories struct {
 	DB           *gorm.DB
 	User         *UserRepository
 	Seller       *SellerRepository
+	APIKey       *APIKeyRepository
 	Store        *StoreRepository
 	Material     *MaterialRepository
 	SKU          *SKURepository
@@ -76,6 +77,7 @@ func New(db *gorm.DB) *Repositories {
 		DB:           db,
 		User:         &UserRepository{db: db},
 		Seller:       &SellerRepository{db: db},
+		APIKey:       &APIKeyRepository{db: db},
 		Store:        &StoreRepository{db: db},
 		Material:     &MaterialRepository{db: db},
 		SKU:          &SKURepository{db: db},

@@ -85,6 +85,14 @@ type Order struct {
 	// column for lookups; the legacy unique index is dropped in AutoMigrate.
 	StoreOrderRef string `json:"-" gorm:"size:120;index"`
 
+	// APIRef is set only on orders created through the open API (/api/open/v1):
+	// the caller's own order id, which is that channel's idempotency key. A
+	// machine retries on a timeout, so the same id arriving twice must be the same
+	// order — unlike a file import, where a repeated StoreOrderID is legitimate.
+	// NULL for every order that came in by file or by hand. Unique per seller among
+	// live orders (uniq_orders_seller_api_ref in ensurePerformanceIndexes).
+	APIRef *string `json:"api_ref,omitempty" gorm:"column:api_ref;size:120"`
+
 	SellerStatus SellerStatus `json:"seller_status" gorm:"size:20;not null;index;default:'PRODUCTION'"`
 
 	// HandedOverAt is the moment the order first left the factory for THE — the

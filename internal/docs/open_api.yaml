@@ -1,0 +1,372 @@
+openapi: 3.0.3
+info:
+  title: THE Fulfillment — Open API
+  version: "1.0"
+  description: |
+    API để hệ thống của seller tự đẩy đơn vào xưởng và tra trạng thái đơn.
+
+    - Xác thực bằng API key do xưởng cấp (mỗi key gắn với đúng một seller).
+    - Tạo đơn là **idempotent** theo `order_id`: gửi lại cùng `order_id` trả về đơn đã tạo, không tạo đơn thứ hai.
+    - Mọi response dùng chung một khung: `{ "success": true, "data": ... }` hoặc
+      `{ "success": false, "error": { "code", "message", "details" } }`.
+
+    Hướng dẫn đầy đủ kèm ví dụ: `/api/open/docs`.
+servers:
+  - url: https://fulfillment.bacgiangdecor.com/api/open/v1
+security:
+  - bearerKey: []
+  - headerKey: []
+tags:
+  - name: Kết nối
+  - name: Đơn hàng
+paths:
+  /ping:
+    get:
+      tags: [Kết nối]
+      summary: Kiểm tra API key
+      description: Trả về seller mà key này thuộc về. Gọi đầu tiên khi mới kết nối.
+      responses:
+        "200":
+          description: Key hợp lệ
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: object
+                    properties:
+                      seller_code: { type: string, example: "SELLER02" }
+                      seller_name: { type: string, example: "Cửa hàng ABC" }
+                      key_name: { type: string, example: "Hệ thống đơn hàng ABC" }
+                      key_prefix: { type: string, example: "ffm_3fa9c2d1" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerPaused" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /orders:
+    post:
+      tags: [Đơn hàng]
+      summary: Tạo đơn
+      description: |
+        Tạo một đơn cho seller của key. Đơn vào hàng **chờ xưởng duyệt** (`PENDING_REVIEW`).
+
+        **Idempotent theo `order_id`.** Nếu `order_id` này đã được gửi trước đó, API trả `200`
+        với `created: false` và đơn đã có — không tạo đơn mới, không sửa đơn cũ. Vì vậy khi gặp
+        timeout hay lỗi mạng, cứ gửi lại nguyên request.
+
+        Đơn sai ở bất kỳ dòng nào thì **cả đơn bị từ chối** (`422`), `error.details` liệt kê từng lỗi.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OrderInput" }
+            example:
+              order_id: "ETSY-3391820455"
+              order_date: "2026-10-01"
+              store_name: "ABC Gifts"
+              shipping:
+                name: "Jane Doe"
+                address1: "1 Main St"
+                city: "Saint Paul"
+                province: "MN"
+                zip: "55112"
+                country: "US"
+                phone: "+1 651 555 0100"
+              note: "Giao trước 10/10"
+              items:
+                - sku: "ASK-3L-ONM-5-X-5"
+                  quantity: 2
+                  mockup_url: "https://cdn.example.com/mockups/3391820455-1.png"
+                  design_url: "https://cdn.example.com/designs/3391820455-1.png"
+                  engrave_text: "Happy Birthday Anna"
+      responses:
+        "201":
+          description: Đã tạo đơn mới
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateResponse" }
+        "200":
+          description: "`order_id` này đã được gửi trước đó — trả về đơn đã có (`created: false`)"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateResponse" }
+        "400":
+          description: Body không phải JSON hợp lệ (`INVALID_JSON`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerPaused" }
+        "422":
+          description: Đơn chưa hợp lệ (`VALIDATION_ERROR`) — `error.details` là danh sách lỗi theo trường
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                success: false
+                error:
+                  code: VALIDATION_ERROR
+                  message: "Đơn chưa hợp lệ: 2 lỗi — xem error.details"
+                  details:
+                    - field: "shipping.country"
+                      code: REQUIRED
+                      message: "Thiếu shipping.country"
+                    - field: "items[0].sku"
+                      code: SKU_NOT_FOUND
+                      message: "SKU không có trên hệ thống của xưởng — kiểm tra lại mã, hoặc báo xưởng khai SKU này"
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+    get:
+      tags: [Đơn hàng]
+      summary: Danh sách đơn
+      description: Đơn của seller, mới nhất trước. Dùng để đồng bộ trạng thái hàng loạt.
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/OrderStatus" }
+        - name: order_id
+          in: query
+          description: Chỉ lấy đúng đơn có `order_id` này (dùng khi mã đơn chứa ký tự `/` không đặt được trên đường dẫn). Khi có tham số này các bộ lọc khác bị bỏ qua.
+          schema: { type: string }
+        - name: created_from
+          in: query
+          description: Thời điểm tạo từ (RFC 3339 hoặc `YYYY-MM-DD`)
+          schema: { type: string }
+        - name: created_to
+          in: query
+          description: Thời điểm tạo đến (RFC 3339 hoặc `YYYY-MM-DD`)
+          schema: { type: string }
+        - name: page
+          in: query
+          schema: { type: integer, default: 1, minimum: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+      responses:
+        "200":
+          description: Một trang đơn
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Order" }
+                  meta: { $ref: "#/components/schemas/Meta" }
+        "400":
+          description: "`status` không hợp lệ (`STATUS_INVALID`)"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerPaused" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /orders/{order_id}:
+    get:
+      tags: [Đơn hàng]
+      summary: Chi tiết một đơn
+      description: |
+        Tra theo `order_id` của hệ thống bạn (hoặc `code` — mã nội bộ của xưởng).
+        Nhớ URL-encode `order_id`; nếu mã chứa `/` thì dùng `GET /orders?order_id=`.
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Đơn
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data: { $ref: "#/components/schemas/Order" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerPaused" }
+        "404":
+          description: Không có đơn này (`ORDER_NOT_FOUND`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+components:
+  securitySchemes:
+    bearerKey:
+      type: http
+      scheme: bearer
+      description: "`Authorization: Bearer ffm_…`"
+    headerKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  responses:
+    Unauthorized:
+      description: Thiếu key (`API_KEY_MISSING`) hoặc key sai / đã bị thu hồi (`API_KEY_INVALID`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    SellerPaused:
+      description: Seller đang tạm dừng (`SELLER_PAUSED`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyRequests:
+      description: Quá giới hạn 120 request/phút cho mỗi key (`TOO_MANY_REQUESTS`) — chờ theo header `Retry-After`
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    OrderStatus:
+      type: string
+      enum:
+        - PENDING_REVIEW
+        - NEEDS_CORRECTION
+        - REJECTED
+        - CANCELLED
+        - IN_PRODUCTION
+        - PACKED
+        - HANDED_OFF
+        - SHIPPED
+        - DELIVERED
+      description: |
+        - `PENDING_REVIEW` — chờ xưởng duyệt
+        - `NEEDS_CORRECTION` — xưởng trả lại, cần sửa thông tin (xem `review_note`)
+        - `REJECTED` — xưởng từ chối (xem `review_note`)
+        - `CANCELLED` — đã huỷ
+        - `IN_PRODUCTION` — đang sản xuất
+        - `PACKED` — đã đóng gói
+        - `HANDED_OFF` — đã xuất xưởng, giao cho vận chuyển
+        - `SHIPPED` — đang vận chuyển
+        - `DELIVERED` — đã giao
+    Shipping:
+      type: object
+      required: [name, address1, country]
+      properties:
+        name: { type: string, maxLength: 160 }
+        address1: { type: string, maxLength: 255 }
+        address2: { type: string, maxLength: 255 }
+        city: { type: string, maxLength: 120 }
+        province: { type: string, maxLength: 120, description: Bang / tỉnh }
+        zip: { type: string, maxLength: 40 }
+        country: { type: string, maxLength: 80 }
+        phone: { type: string, maxLength: 60 }
+    ItemInput:
+      type: object
+      required: [sku]
+      properties:
+        sku:
+          type: string
+          maxLength: 48
+          description: Mã SKU của xưởng (xưởng cung cấp danh sách). Không phân biệt hoa thường.
+        quantity: { type: integer, minimum: 1, default: 1 }
+        image_code: { type: string, maxLength: 120, description: Mã ảnh / mã thiết kế của bạn }
+        mockup_url: { type: string, maxLength: 500, description: "Link ảnh mockup (http/https) — xưởng dùng để đối chiếu khi QC. Nên có." }
+        design_url: { type: string, maxLength: 500, description: Link file thiết kế mặt trước (hoặc mã tham chiếu) }
+        back_design_url: { type: string, maxLength: 500, description: Link file thiết kế mặt sau, chỉ với sản phẩm 2 mặt }
+        engrave_text: { type: string, maxLength: 500, description: Nội dung khắc / cá nhân hoá }
+    OrderInput:
+      type: object
+      required: [order_id, shipping, items]
+      properties:
+        order_id:
+          type: string
+          maxLength: 120
+          description: Mã đơn bên hệ thống của bạn. Là khoá chống trùng — mỗi mã chỉ tạo một đơn.
+        order_date: { type: string, format: date, description: "Ngày đặt hàng `YYYY-MM-DD`. Bỏ trống = hôm nay (giờ Việt Nam)." }
+        store_name: { type: string, maxLength: 160 }
+        account: { type: string, maxLength: 120 }
+        shipping: { $ref: "#/components/schemas/Shipping" }
+        note: { type: string, maxLength: 1000 }
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { $ref: "#/components/schemas/ItemInput" }
+    Item:
+      type: object
+      properties:
+        line: { type: integer, example: 1 }
+        sku: { type: string }
+        product_name: { type: string }
+        quantity: { type: integer }
+        status: { type: string, enum: [ACTIVE, CANCELLED] }
+        image_code: { type: string }
+        design_url: { type: string }
+        back_design_url: { type: string }
+        mockup_url: { type: string }
+        engrave_text: { type: string }
+    Tracking:
+      type: object
+      nullable: true
+      description: "`null` cho tới khi đơn có mã vận đơn."
+      properties:
+        number: { type: string }
+        status:
+          type: string
+          description: "Rỗng khi chưa có trạng thái. Giá trị: PENDING, PRE_TRANSIT, IN_TRANSIT, OUT_FOR_DELIVERY, PICK_UP, DELIVERED, UNDELIVERED, EXCEPTION, EXPIRED, CANCELLED."
+        detail: { type: string }
+        location: { type: string }
+        updated_at: { type: string, format: date-time, nullable: true }
+        delivered_at: { type: string, format: date-time, nullable: true }
+    Order:
+      type: object
+      properties:
+        code: { type: string, example: "100123", description: Mã đơn nội bộ của xưởng — in trên tem, dùng khi cần trao đổi với xưởng }
+        order_id: { type: string, description: Mã đơn bạn đã gửi }
+        status: { $ref: "#/components/schemas/OrderStatus" }
+        status_text: { type: string, example: "Chờ xưởng duyệt" }
+        review_note: { type: string }
+        cancellation_reason: { type: string }
+        order_date: { type: string, format: date }
+        store_name: { type: string }
+        account: { type: string }
+        shipping: { $ref: "#/components/schemas/Shipping" }
+        note: { type: string }
+        tracking: { $ref: "#/components/schemas/Tracking" }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Item" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CreateResponse:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        data:
+          type: object
+          properties:
+            order: { $ref: "#/components/schemas/Order" }
+            created: { type: boolean, description: "`true` = vừa tạo; `false` = `order_id` đã có, đây là đơn cũ" }
+            warnings:
+              type: array
+              description: Đơn vẫn được nhận, nhưng nên xem lại các điểm này
+              items: { $ref: "#/components/schemas/FieldError" }
+    FieldError:
+      type: object
+      properties:
+        field: { type: string, example: "items[0].sku", description: Đường dẫn tới trường trong body bạn gửi }
+        code: { type: string, example: SKU_NOT_FOUND }
+        message: { type: string }
+    Meta:
+      type: object
+      properties:
+        page: { type: integer }
+        page_size: { type: integer }
+        total: { type: integer }
+        total_pages: { type: integer }
+    Error:
+      type: object
+      properties:
+        success: { type: boolean, example: false }
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items: { $ref: "#/components/schemas/FieldError" }

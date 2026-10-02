@@ -21,6 +21,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&models.Seller{},
 		&models.Store{},
 		&models.User{},
+		&models.APIKey{},
 		&models.Material{},
 		&models.SKU{},
 		&models.SKUMaterial{},
@@ -287,6 +288,12 @@ func ensurePerformanceIndexes(db *gorm.DB) error {
 		// Concurrency guard: at most ONE open package per order, so two packing
 		// stations scanning the same order's first item can't each create a package.
 		`CREATE UNIQUE INDEX IF NOT EXISTS uniq_packages_open_order ON packages (order_id) WHERE status = 'OPEN' AND deleted_at IS NULL`,
+		// Open API idempotency: a seller's system resending the same order id (a
+		// retry after a timeout) must hit the order it already created. The service
+		// looks it up first; this index is what holds when two identical requests
+		// race. Partial on live API orders — file imports leave api_ref NULL, and a
+		// deleted order frees its id.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uniq_orders_seller_api_ref ON orders (seller_id, api_ref) WHERE api_ref IS NOT NULL AND deleted_at IS NULL`,
 	}
 	for _, stmt := range stmts {
 		if err := db.Exec(stmt).Error; err != nil {

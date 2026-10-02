@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"the-fulfillment/backend/internal/models"
 )
@@ -393,6 +394,65 @@ func (r *OrderRepository) FindBySellerAndStoreOrder(sellerID uint, storeOrderID 
 		return nil, err
 	}
 	return &o, nil
+}
+
+// IDByAPIRef finds the live order a seller's system already created under this
+// order id through the open API. found=false means it has not been sent before.
+func (r *OrderRepository) IDByAPIRef(sellerID uint, ref string) (id uint, found bool, err error) {
+	var out []uint
+	err = r.db.Model(&models.Order{}).
+		Where("seller_id = ? AND api_ref = ?", sellerID, ref).
+		Limit(1).Pluck("id", &out).Error
+	if err != nil || len(out) == 0 {
+		return 0, false, err
+	}
+	return out[0], true, nil
+}
+
+// FindForOpenAPI loads one of the seller's orders by whatever the caller holds:
+// the order id their system sent, our internal code, or the store order id of an
+// order that came in by file. Checked in that order of trust; when a store order
+// id repeats, the newest order wins. Seller-scoped in the query itself, so an
+// id belonging to another seller is simply not found.
+//
+// Lean on purpose: items and their SKUs only — the open API shows no batch or
+// QC detail, so FindByID's production preloads would be wasted round trips.
+func (r *OrderRepository) FindForOpenAPI(sellerID uint, ref string) (*models.Order, error) {
+	var rows []models.Order
+	err := r.db.
+		Preload("Items", func(db *gorm.DB) *gorm.DB { return db.Order("order_items.line_no asc") }).
+		Preload("Items.SKU").
+		Where("seller_id = ? AND (api_ref = ? OR internal_code = ? OR store_order_id = ?)", sellerID, ref, ref, ref).
+		Clauses(clause.OrderBy{Expression: clause.Expr{
+			SQL:                "CASE WHEN api_ref = ? THEN 0 WHEN internal_code = ? THEN 1 ELSE 2 END, id DESC",
+			Vars:               []interface{}{ref, ref},
+			WithoutParentheses: true,
+		}}).
+		Limit(1).
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, gorm.ErrRecordNotFound
+	}
+	return &rows[0], nil
+}
+
+// ListForOpenAPI pages a seller's orders for the open API, items and SKUs
+// preloaded (the list returns the same shape as a single order).
+func (r *OrderRepository) ListForOpenAPI(f OrderFilter) ([]models.Order, int64, error) {
+	var rows []models.Order
+	var total int64
+	if err := r.baseQuery(f).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	err := r.baseQuery(f).
+		Preload("Items", func(db *gorm.DB) *gorm.DB { return db.Order("order_items.line_no asc") }).
+		Preload("Items.SKU").
+		Order("orders.id desc").
+		Limit(f.PageSize).Offset(f.Offset()).Find(&rows).Error
+	return rows, total, err
 }
 
 // ExistingStoreOrderIDs returns which of the given store order ids already have

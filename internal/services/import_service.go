@@ -1128,34 +1128,7 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 		for i, key := range orderKeys {
 			g := groups[key]
 			orderID := orders[i].ID
-			total := len(g.items)
-			for lineNo, row := range g.items {
-				skuCode := models.NormalizeCode(row.SKU)
-				var skuID *uint
-				if info, ok := skus[skuCode]; ok {
-					id := info.ID
-					skuID = &id
-				}
-				designStatus := models.DesignPending
-				if strings.TrimSpace(row.Mockup) == "" {
-					designStatus = models.DesignMissing
-				}
-				items = append(items, models.OrderItem{
-					OrderID:        orderID,
-					LineNo:         lineNo + 1,
-					InternalCode:   itemInternalCode(orderID, lineNo+1, total),
-					SKUID:          skuID,
-					SKUCode:        skuCode,
-					Quantity:       maxInt(int(row.Quantity), 1),
-					ImageCode:      row.ImageCode,
-					DesignURL:      row.FrontDesignValue(),
-					BackDesignURL:  strings.TrimSpace(row.BackDesign),
-					MockupURL:      row.Mockup,
-					EngraveText:    row.EngraveText,
-					InternalStatus: models.StatusPending,
-					DesignStatus:   designStatus,
-				})
-			}
+			items = append(items, orderItemsFromRows(orderID, g.items, skus)...)
 		}
 		if len(items) > 0 {
 			if err := tx.CreateInBatches(&items, insertBatchSize(tx, &models.OrderItem{})).Error; err != nil {
@@ -1166,49 +1139,7 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 
 		// Assets and required-attention notes need the item ids, so they follow —
 		// again as two bulk inserts for the whole file rather than per order.
-		var assets []models.ItemAsset
-		var notes []models.Note
-		for i := range items {
-			item := &items[i]
-			// Record design assets with their side so the versioned history keeps
-			// front/back distinct. A one-sided item records a SINGLE design.
-			if item.DesignURL != "" {
-				side := models.DesignSideSingle
-				if item.BackDesignURL != "" {
-					side = models.DesignSideFront
-				}
-				assets = append(assets, models.ItemAsset{
-					OrderItemID: item.ID, AssetType: "DESIGN", Side: side, URL: item.DesignURL, Version: 1,
-					UploadedByID: actor.IDPtr(),
-				})
-			}
-			if item.BackDesignURL != "" {
-				assets = append(assets, models.ItemAsset{
-					OrderItemID: item.ID, AssetType: "DESIGN", Side: models.DesignSideBack, URL: item.BackDesignURL, Version: 1,
-					UploadedByID: actor.IDPtr(),
-				})
-			}
-			if item.MockupURL != "" {
-				assets = append(assets, models.ItemAsset{
-					OrderItemID: item.ID, AssetType: "MOCKUP", URL: item.MockupURL, Version: 1,
-					UploadedByID: actor.IDPtr(),
-				})
-			} else {
-				// Missing mockup is a blocking-for-QC issue → required attention.
-				notes = append(notes, models.Note{
-					Title:               "Thiếu Mockup URL",
-					Body:                "Item " + item.InternalCode + " chưa có mockup để QC đối chiếu.",
-					ReasonCode:          "ART_MISSING",
-					Severity:            models.SeverityHigh,
-					Status:              models.NoteOpen,
-					IsRequiredAttention: true,
-					EntityType:          models.EntityOrderItem,
-					EntityID:            &item.ID,
-					OwnerRole:           models.RoleDesigner,
-					CreatedByID:         actor.IDPtr(),
-				})
-			}
-		}
+		assets, notes := itemAssetsAndNotes(items, actor)
 		if len(assets) > 0 {
 			if err := tx.CreateInBatches(&assets, insertBatchSize(tx, &models.ItemAsset{})).Error; err != nil {
 				return err
@@ -1244,6 +1175,92 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 	s.audit.Log(actor, "IMPORT_COMMIT", "import_job", &job.ID,
 		fmt.Sprintf("Committed import: created %d orders", created), nil)
 	return job, nil
+}
+
+// orderItemsFromRows turns one order's rows into its line items, in row order.
+// Shared by the file import and the open API so both produce identical items:
+// the same tem codes, the same "no mockup = design missing" rule.
+func orderItemsFromRows(orderID uint, rows []ImportRow, skus map[string]repositories.SKUInfo) []models.OrderItem {
+	total := len(rows)
+	items := make([]models.OrderItem, 0, total)
+	for lineNo, row := range rows {
+		skuCode := models.NormalizeCode(row.SKU)
+		var skuID *uint
+		if info, ok := skus[skuCode]; ok {
+			id := info.ID
+			skuID = &id
+		}
+		designStatus := models.DesignPending
+		if strings.TrimSpace(row.Mockup) == "" {
+			designStatus = models.DesignMissing
+		}
+		items = append(items, models.OrderItem{
+			OrderID:        orderID,
+			LineNo:         lineNo + 1,
+			InternalCode:   itemInternalCode(orderID, lineNo+1, total),
+			SKUID:          skuID,
+			SKUCode:        skuCode,
+			Quantity:       maxInt(int(row.Quantity), 1),
+			ImageCode:      row.ImageCode,
+			DesignURL:      row.FrontDesignValue(),
+			BackDesignURL:  strings.TrimSpace(row.BackDesign),
+			MockupURL:      row.Mockup,
+			EngraveText:    row.EngraveText,
+			InternalStatus: models.StatusPending,
+			DesignStatus:   designStatus,
+		})
+	}
+	return items
+}
+
+// itemAssetsAndNotes builds what follows freshly inserted items (their ids must
+// already be set): the versioned design/mockup assets, and a required-attention
+// note for every item that arrived without a mockup.
+func itemAssetsAndNotes(items []models.OrderItem, actor Actor) ([]models.ItemAsset, []models.Note) {
+	var assets []models.ItemAsset
+	var notes []models.Note
+	for i := range items {
+		item := &items[i]
+		// Record design assets with their side so the versioned history keeps
+		// front/back distinct. A one-sided item records a SINGLE design.
+		if item.DesignURL != "" {
+			side := models.DesignSideSingle
+			if item.BackDesignURL != "" {
+				side = models.DesignSideFront
+			}
+			assets = append(assets, models.ItemAsset{
+				OrderItemID: item.ID, AssetType: "DESIGN", Side: side, URL: item.DesignURL, Version: 1,
+				UploadedByID: actor.IDPtr(),
+			})
+		}
+		if item.BackDesignURL != "" {
+			assets = append(assets, models.ItemAsset{
+				OrderItemID: item.ID, AssetType: "DESIGN", Side: models.DesignSideBack, URL: item.BackDesignURL, Version: 1,
+				UploadedByID: actor.IDPtr(),
+			})
+		}
+		if item.MockupURL != "" {
+			assets = append(assets, models.ItemAsset{
+				OrderItemID: item.ID, AssetType: "MOCKUP", URL: item.MockupURL, Version: 1,
+				UploadedByID: actor.IDPtr(),
+			})
+		} else {
+			// Missing mockup is a blocking-for-QC issue → required attention.
+			notes = append(notes, models.Note{
+				Title:               "Thiếu Mockup URL",
+				Body:                "Item " + item.InternalCode + " chưa có mockup để QC đối chiếu.",
+				ReasonCode:          "ART_MISSING",
+				Severity:            models.SeverityHigh,
+				Status:              models.NoteOpen,
+				IsRequiredAttention: true,
+				EntityType:          models.EntityOrderItem,
+				EntityID:            &item.ID,
+				OwnerRole:           models.RoleDesigner,
+				CreatedByID:         actor.IDPtr(),
+			})
+		}
+	}
+	return assets, notes
 }
 
 // Get returns an import job with its errors.

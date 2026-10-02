@@ -32,6 +32,30 @@ const swaggerHTML = `<!DOCTYPE html>
 </body>
 </html>`
 
+// The open API's own reference: what a seller's developers are sent. Kept apart
+// from the internal spec above on purpose — that one documents every screen's
+// endpoints, and none of those is theirs to call.
+//
+//go:embed open_api.yaml
+var openAPIPublicSpec []byte
+
+// A hand-written guide rather than Swagger UI: its readers integrate once and
+// need the retry and idempotency rules spelled out, which a generated reference
+// buries. Self-contained (no CDN), so it also prints to PDF as-is.
+//
+//go:embed open_api.html
+var openAPIPublicGuide []byte
+
+// OpenSpec serves the open API's OpenAPI YAML.
+func OpenSpec(c *gin.Context) {
+	c.Data(http.StatusOK, "application/yaml; charset=utf-8", openAPIPublicSpec)
+}
+
+// OpenUI serves the open API's integration guide.
+func OpenUI(c *gin.Context) {
+	c.Data(http.StatusOK, "text/html; charset=utf-8", openAPIPublicGuide)
+}
+
 // Spec serves the raw OpenAPI YAML.
 func Spec(c *gin.Context) {
 	c.Data(http.StatusOK, "application/yaml; charset=utf-8", openAPISpec)
