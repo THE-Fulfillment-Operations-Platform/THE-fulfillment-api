@@ -656,3 +656,44 @@ func (s *OpenAPIService) ListOrders(sellerID uint, q OpenOrderQuery) ([]OpenOrde
 	}
 	return out, page, total, nil
 }
+
+// ---------- SKUs ----------
+
+// ListSKUs is the factory's catalog as an order may use it: every code the
+// create call accepts, with its product name. The catalog is the factory's,
+// not the seller's, so every key sees the same list.
+func (s *OpenAPIService) ListSKUs() ([]repositories.OrderableSKU, error) {
+	rows, err := s.repo.SKU.OrderableSKUs()
+	if err != nil {
+		return nil, apperr.Internal("could not list SKUs").Wrap(err)
+	}
+	if rows == nil {
+		rows = []repositories.OrderableSKU{}
+	}
+	return rows, nil
+}
+
+// ParseOpenTimeBound reads a created_from / created_to query value. A full
+// timestamp (RFC 3339) is taken as is. A bare date is a day in the factory's
+// timezone — the day the caller means — and as an upper bound it covers that
+// whole day: created_to=2026-10-01 includes orders created on 1 October, which
+// a plain midnight bound would silently leave out. Empty = no bound; anything
+// else is an error rather than a filter quietly dropped.
+func ParseOpenTimeBound(raw, param string, upper bool) (*time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return &t, nil
+	}
+	d, err := time.ParseInLocation("2006-01-02", raw, AppLocation())
+	if err != nil {
+		return nil, apperr.New(http.StatusBadRequest, "DATE_INVALID",
+			param+" phải là ngày YYYY-MM-DD hoặc thời điểm RFC 3339, ví dụ 2026-10-01 hoặc 2026-10-01T08:00:00+07:00")
+	}
+	if upper {
+		d = d.AddDate(0, 0, 1).Add(-time.Nanosecond)
+	}
+	return &d, nil
+}

@@ -153,12 +153,22 @@ func (h *Handlers) OpenListOrders(c *gin.Context) {
 	if !ok {
 		return
 	}
+	from, err := services.ParseOpenTimeBound(c.Query("created_from"), "created_from", false)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	to, err := services.ParseOpenTimeBound(c.Query("created_to"), "created_to", true)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
 	rows, page, total, err := h.svc.Open.ListOrders(p.SellerID, services.OpenOrderQuery{
 		Page:        pageFrom(c),
 		OrderID:     c.Query("order_id"),
 		Status:      c.Query("status"),
-		CreatedFrom: timeQueryPtr(c, "created_from"),
-		CreatedTo:   timeQueryPtr(c, "created_to"),
+		CreatedFrom: from,
+		CreatedTo:   to,
 	})
 	if err != nil {
 		response.Fail(c, err)
@@ -182,4 +192,17 @@ func jsonBindHint(err error) string {
 		return ": body rỗng"
 	}
 	return ""
+}
+
+// OpenListSKUs lists the SKU codes an order may use. GET /api/open/v1/skus
+func (h *Handlers) OpenListSKUs(c *gin.Context) {
+	if _, ok := openPrincipal(c); !ok {
+		return
+	}
+	rows, err := h.svc.Open.ListSKUs()
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, rows)
 }

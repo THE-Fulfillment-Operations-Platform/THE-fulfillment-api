@@ -44,6 +44,32 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/SellerPaused" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
+  /skus:
+    get:
+      tags: [Kết nối]
+      summary: Danh sách SKU nhận đơn
+      description: |
+        Mọi mã SKU xưởng đang nhận đơn, kèm tên sản phẩm — đúng tập `items[].sku` mà tạo đơn chấp nhận.
+        Danh sách thay đổi khi xưởng thêm sản phẩm; nên tải lại định kỳ.
+      responses:
+        "200":
+          description: Danh sách SKU
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        sku: { type: string, example: "ASK-3L-ONM-5-X-5" }
+                        product_name: { type: string, example: "Ornament mica 5x5" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/SellerPaused" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
   /orders:
     post:
       tags: [Đơn hàng]
@@ -130,12 +156,12 @@ paths:
           schema: { type: string }
         - name: created_from
           in: query
-          description: Thời điểm tạo từ (RFC 3339 hoặc `YYYY-MM-DD`)
-          schema: { type: string }
+          description: Đơn tạo từ thời điểm này. `YYYY-MM-DD` = đầu ngày đó theo giờ Việt Nam; hoặc RFC 3339.
+          schema: { type: string, example: "2026-10-01" }
         - name: created_to
           in: query
-          description: Thời điểm tạo đến (RFC 3339 hoặc `YYYY-MM-DD`)
-          schema: { type: string }
+          description: Đơn tạo tới thời điểm này. `YYYY-MM-DD` = hết ngày đó theo giờ Việt Nam (gồm cả ngày đó); hoặc RFC 3339.
+          schema: { type: string, example: "2026-10-31" }
         - name: page
           in: query
           schema: { type: integer, default: 1, minimum: 1 }
@@ -156,7 +182,7 @@ paths:
                     items: { $ref: "#/components/schemas/Order" }
                   meta: { $ref: "#/components/schemas/Meta" }
         "400":
-          description: "`status` không hợp lệ (`STATUS_INVALID`)"
+          description: "`status` không hợp lệ (`STATUS_INVALID`) hoặc `created_from` / `created_to` sai định dạng (`DATE_INVALID`)"
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -215,7 +241,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
     TooManyRequests:
-      description: Quá giới hạn 120 request/phút cho mỗi key (`TOO_MANY_REQUESTS`) — chờ theo header `Retry-After`
+      description: Quá giới hạn 120 request/phút cho mỗi key (`TOO_MANY_REQUESTS`) — chờ theo header `Retry-After` (giây)
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -261,7 +287,7 @@ components:
         sku:
           type: string
           maxLength: 48
-          description: Mã SKU của xưởng (xưởng cung cấp danh sách). Không phân biệt hoa thường.
+          description: Mã SKU của xưởng — lấy từ `GET /skus`. Không phân biệt hoa thường.
         quantity: { type: integer, minimum: 1, default: 1 }
         image_code: { type: string, maxLength: 120, description: Mã ảnh / mã thiết kế của bạn }
         mockup_url: { type: string, maxLength: 500, description: "Link ảnh mockup (http/https) — xưởng dùng để đối chiếu khi QC. Nên có." }

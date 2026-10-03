@@ -249,6 +249,11 @@ func TestOpenAPI_EndToEnd(t *testing.T) {
 		t.Errorf("foreign list: %s", res.raw)
 	}
 
+	// The SKU catalog lists what an order may use.
+	if res = h.do("GET", "/api/open/v1/skus", bearer, ""); res.status != http.StatusOK || !strings.Contains(res.raw, `{"sku":"TESTSKU","product_name":"Test SKU"}`) {
+		t.Errorf("skus: %d %s", res.status, res.raw)
+	}
+
 	// X-API-Key works as well as the Authorization header.
 	req := httptest.NewRequest("GET", "/api/open/v1/ping", nil)
 	req.Header.Set("X-API-Key", key)
@@ -300,6 +305,8 @@ func TestOpenAPI_Rejections(t *testing.T) {
 		{"invalid order", "POST", "/api/open/v1/orders", bearer, `{"order_id": "A", "items": [{"sku": "NOPE"}]}`, 422, "VALIDATION_ERROR"},
 		{"unknown status", "GET", "/api/open/v1/orders?status=WHATEVER", bearer, "", 400, "STATUS_INVALID"},
 		{"unknown order", "GET", "/api/open/v1/orders/NOPE", bearer, "", 404, "ORDER_NOT_FOUND"},
+		{"bad date", "GET", "/api/open/v1/orders?created_from=01/10/2026", bearer, "", 400, "DATE_INVALID"},
+		{"skus need a key", "GET", "/api/open/v1/skus", "", "", 401, "API_KEY_MISSING"},
 	}
 	for _, c := range cases {
 		res := h.do(c.method, c.path, c.auth, c.body)

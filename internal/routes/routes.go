@@ -93,6 +93,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	open.Use(middleware.RateLimitAPIKey(120, time.Minute))
 	{
 		open.GET("/ping", h.OpenPing)
+		open.GET("/skus", h.OpenListSKUs)
 		open.POST("/orders", h.OpenCreateOrder)
 		open.GET("/orders", h.OpenListOrders)
 		open.GET("/orders/:ref", h.OpenGetOrder)

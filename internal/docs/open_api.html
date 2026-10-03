@@ -35,14 +35,23 @@
   h2 { font-size: 20px; margin: 0 0 12px; }
   h3 { font-size: 16px; margin: 22px 0 8px; }
   p, li { max-width: 72ch; }
+  li + li { margin-top: 4px; }
   ul, ol { padding-left: 22px; }
   a { color: var(--accent); }
   code { font: 13.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--chip); padding: 1px 6px; border-radius: 6px; }
+  .code { position: relative; margin: 10px 0 16px; }
   pre {
     background: var(--code-bg); color: var(--code-text); border-radius: 10px; padding: 14px 16px;
     overflow-x: auto; margin: 10px 0 16px; font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
+  .code pre { margin: 0; }
   pre code { background: none; padding: 0; color: inherit; font: inherit; }
+  .copy {
+    position: absolute; top: 8px; right: 8px; font: 600 12px/1 -apple-system, "Segoe UI", sans-serif;
+    color: var(--code-text); background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.18);
+    border-radius: 6px; padding: 6px 9px; cursor: pointer;
+  }
+  .copy:hover { background: rgba(255,255,255,.16); }
   .table { overflow-x: auto; margin: 10px 0 16px; }
   table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
@@ -53,9 +62,29 @@
   .get { background: #1a7f4b; } .post { background: #0f6fde; }
   .note { border-left: 3px solid var(--accent); background: var(--chip); padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 12px 0 16px; }
   .note.warn { border-left-color: var(--warn); }
+  .steps { list-style: none; padding: 0; margin: 12px 0 16px; counter-reset: step; }
+  .steps > li { position: relative; padding: 0 0 14px 44px; max-width: none; }
+  .steps > li::before {
+    counter-increment: step; content: counter(step); position: absolute; left: 0; top: 0;
+    width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: #fff;
+    font: 600 14px/28px -apple-system, "Segoe UI", sans-serif; text-align: center;
+  }
+  .steps > li > strong { display: block; }
+  .who { display: inline-block; font-size: 12px; font-weight: 600; color: var(--muted); background: var(--chip); border-radius: 999px; padding: 1px 8px; margin-left: 6px; vertical-align: 1px; }
+  .check { list-style: none; padding-left: 0; }
+  .check li { padding-left: 26px; position: relative; }
+  .check li::before { content: "☐"; position: absolute; left: 2px; color: var(--muted); }
   footer { color: var(--muted); font-size: 14px; margin-top: 28px; }
   footer .contact { color: var(--text); margin: 0 0 6px; }
   footer .contact strong { font-weight: 600; }
+  @media print {
+    nav, .copy { display: none !important; }
+    body { background: #fff; }
+    section { break-inside: auto; }
+    h2, h3 { break-after: avoid; }
+    pre, .table, .note, tr, .steps > li { break-inside: avoid; }
+    pre { white-space: pre-wrap; word-break: break-word; }
+  }
 </style>
 </head>
 <body>
@@ -68,10 +97,14 @@
 
 <nav>
   <a href="#tong-quan">Tổng quan</a>
+  <a href="#quy-trinh">Quy trình kết nối</a>
   <a href="#bat-dau">Bắt đầu nhanh</a>
   <a href="#xac-thuc">Xác thực</a>
+  <a href="#sku">Danh sách SKU</a>
   <a href="#tao-don">Tạo đơn</a>
   <a href="#tra-don">Tra đơn</a>
+  <a href="#dong-bo">Đồng bộ trạng thái</a>
+  <a href="#code-mau">Code mẫu</a>
   <a href="#trang-thai">Trạng thái</a>
   <a href="#loi">Mã lỗi</a>
   <a href="#gioi-han">Giới hạn</a>
@@ -85,6 +118,7 @@
     <tr><th>Địa chỉ gốc</th><td><code><span class="base">https://fulfillment.bacgiangdecor.com</span>/api/open/v1</code></td></tr>
     <tr><th>Định dạng</th><td>JSON, UTF-8. Gửi header <code>Content-Type: application/json</code>.</td></tr>
     <tr><th>Xác thực</th><td>API key do xưởng cấp, gửi trong header.</td></tr>
+    <tr><th>Thời gian</th><td>Mọi mốc thời gian theo RFC 3339 và có múi giờ. "Ngày" (<code>YYYY-MM-DD</code>) tính theo giờ Việt Nam.</td></tr>
     <tr><th>Đặc tả máy đọc</th><td><a href="/api/open/v1/openapi.yaml">openapi.yaml</a> (OpenAPI 3) — nạp được vào Postman, Insomnia.</td></tr>
   </table></div>
   <p>Mọi câu trả lời dùng chung một khung:</p>
@@ -96,10 +130,37 @@
   <p>Hãy xử lý theo <strong>mã HTTP</strong> và <code>error.code</code>. Câu chữ trong <code>message</code> có thể thay đổi.</p>
 </section>
 
+<section id="quy-trinh">
+  <h2>Quy trình kết nối</h2>
+  <p>Các bước từ lúc bắt đầu tới khi đơn thật chạy tự động. Mỗi bước ghi rõ ai làm.</p>
+  <ol class="steps">
+    <li><strong>Nhận API key<span class="who">Xưởng</span></strong>
+      Xưởng tạo key cho tài khoản seller của bạn và gửi qua kênh riêng. Key có dạng <code>ffm_…</code>, chỉ xem được một lần lúc tạo — lưu ngay vào nơi cất bí mật của hệ thống bạn (biến môi trường, secret manager), không ghi vào mã nguồn.</li>
+    <li><strong>Thử key<span class="who">Bạn</span></strong>
+      Gọi <a href="#bat-dau"><code>GET /ping</code></a>. Câu trả lời có tên seller của bạn là key đúng.</li>
+    <li><strong>Đối chiếu mã SKU<span class="who">Bạn</span></strong>
+      Lấy danh sách SKU của xưởng bằng <a href="#sku"><code>GET /skus</code></a>, rồi lập bảng đổi từ mã sản phẩm bên bạn sang mã SKU của xưởng. API chỉ nhận mã SKU của xưởng.</li>
+    <li><strong>Gửi đơn thử<span class="who">Bạn</span></strong>
+      Gửi 2–3 đơn với <code>order_id</code> bắt đầu bằng <code>TEST-</code>, gồm cả trường hợp nhiều sản phẩm và sản phẩm có file thiết kế. Thử luôn việc gửi lại cùng một đơn để chắc hệ thống bạn xử lý đúng <code>200</code> / <code>created: false</code>.</li>
+    <li><strong>Xưởng kiểm và xác nhận<span class="who">Xưởng</span></strong>
+      Báo xưởng mã các đơn thử. Xưởng kiểm đơn trong hàng chờ duyệt (địa chỉ, SKU, file thiết kế mở được), xác nhận rồi xoá đơn thử.</li>
+    <li><strong>Chạy thật<span class="who">Bạn</span></strong>
+      Bật gửi đơn thật và bật đồng bộ trạng thái (<a href="#dong-bo">xem cách làm</a>). Theo dõi kỹ những đơn đầu tiên.</li>
+  </ol>
+  <h3>Kiểm tra trước khi chạy thật</h3>
+  <ul class="check">
+    <li>Key nằm trong biến môi trường / secret manager, không nằm trong mã nguồn hay ứng dụng phía người dùng.</li>
+    <li>Mọi SKU bên bạn đã đổi được sang mã SKU của xưởng.</li>
+    <li>Mỗi đơn có một <code>order_id</code> cố định, không đổi giữa các lần gửi lại.</li>
+    <li>Gặp timeout, lỗi mạng, <code>429</code> hoặc <code>5xx</code> thì tự gửi lại; gặp <code>422</code> thì ghi lại <code>error.details</code> để sửa dữ liệu, không gửi lại nguyên xi.</li>
+    <li>Link <code>mockup_url</code> / <code>design_url</code> mở được mà không cần đăng nhập.</li>
+    <li>Có lịch đồng bộ trạng thái và mã vận đơn về hệ thống bạn.</li>
+  </ul>
+</section>
+
 <section id="bat-dau">
   <h2>Bắt đầu nhanh</h2>
   <ol>
-    <li><strong>Xin API key</strong> từ xưởng. Key có dạng <code>ffm_…</code>, chỉ hiện một lần lúc tạo — lưu vào nơi cất bí mật của hệ thống bạn.</li>
     <li><strong>Thử key</strong>:
 <pre><code>curl <span class="base">https://fulfillment.bacgiangdecor.com</span>/api/open/v1/ping \
   -H "Authorization: Bearer ffm_KEY_CỦA_BẠN"</code></pre>
@@ -109,7 +170,7 @@
   -H "Authorization: Bearer ffm_KEY_CỦA_BẠN" \
   -H "Content-Type: application/json" \
   -d '{
-    "order_id": "ETSY-3391820455",
+    "order_id": "TEST-3391820455",
     "shipping": {
       "name": "Jane Doe",
       "address1": "1 Main St",
@@ -121,7 +182,7 @@
     },
     "items": [
       {
-        "sku": "ASK-3L-ONM-5-X-5",
+        "sku": "MÃ-SKU-CỦA-XƯỞNG",
         "quantity": 2,
         "mockup_url": "https://cdn.example.com/mockups/3391820455-1.png",
         "design_url": "https://cdn.example.com/designs/3391820455-1.png"
@@ -129,7 +190,7 @@
     ]
   }'</code></pre></li>
     <li><strong>Tra đơn</strong> bằng chính <code>order_id</code> của bạn:
-<pre><code>curl <span class="base">https://fulfillment.bacgiangdecor.com</span>/api/open/v1/orders/ETSY-3391820455 \
+<pre><code>curl <span class="base">https://fulfillment.bacgiangdecor.com</span>/api/open/v1/orders/TEST-3391820455 \
   -H "Authorization: Bearer ffm_KEY_CỦA_BẠN"</code></pre></li>
   </ol>
 </section>
@@ -144,7 +205,24 @@ X-API-Key: ffm_KEY_CỦA_BẠN</code></pre>
     <li>Một key thuộc về đúng một seller. Đơn tạo bằng key nào thuộc seller của key đó — không có trường nào để chọn seller khác.</li>
     <li>Chỉ gọi API từ máy chủ của bạn. Đừng để key trong ứng dụng di động hay mã chạy trên trình duyệt.</li>
     <li>Lộ key thì báo xưởng thu hồi và cấp key mới. Key bị thu hồi ngừng hoạt động gần như ngay lập tức.</li>
+    <li>Mỗi hệ thống nên dùng một key riêng, để thu hồi một key không làm gãy hệ thống khác.</li>
   </ul>
+  <p><span class="method get">GET</span><code>/ping</code> — kiểm tra key, trả về seller của key:</p>
+<pre><code>{ "success": true, "data": { "seller_code": "SELLER02", "seller_name": "Cửa hàng ABC", "key_name": "Hệ thống đơn hàng ABC", "key_prefix": "ffm_3fa9c2d1" } }</code></pre>
+</section>
+
+<section id="sku">
+  <h2>Danh sách SKU</h2>
+  <p><span class="method get">GET</span><code>/skus</code></p>
+  <p>Mọi mã SKU mà xưởng đang nhận đơn, kèm tên sản phẩm. Đây chính là danh sách <code>items[].sku</code> chấp nhận — mã không có trong danh sách sẽ bị từ chối với <code>SKU_NOT_FOUND</code> hoặc <code>SKU_NOT_READY</code>.</p>
+<pre><code>{
+  "success": true,
+  "data": [
+    { "sku": "ASK-3L-ONM-5-X-5", "product_name": "Ornament mica 5x5" },
+    { "sku": "ASK-3L-ONM-6-X-6", "product_name": "Ornament mica 6x6" }
+  ]
+}</code></pre>
+  <p>Danh sách thay đổi khi xưởng thêm sản phẩm. Nên tải lại định kỳ (ví dụ mỗi ngày) và báo người vận hành bên bạn khi có sản phẩm chưa đổi được mã.</p>
 </section>
 
 <section id="tao-don">
@@ -180,7 +258,7 @@ X-API-Key: ffm_KEY_CỦA_BẠN</code></pre>
   <h3>Dòng sản phẩm — <code>items[]</code></h3>
   <div class="table"><table>
     <tr><th>Trường</th><th>Kiểu</th><th>Ghi chú</th></tr>
-    <tr><td><code>sku</code> <span class="req">*</span></td><td>chuỗi ≤ 48</td><td>Mã SKU <strong>của xưởng</strong> (xưởng gửi danh sách). Không phân biệt hoa thường.</td></tr>
+    <tr><td><code>sku</code> <span class="req">*</span></td><td>chuỗi ≤ 48</td><td>Mã SKU <strong>của xưởng</strong> — lấy từ <a href="#sku"><code>GET /skus</code></a>. Không phân biệt hoa thường.</td></tr>
     <tr><td><code>quantity</code></td><td>số nguyên ≥ 1</td><td>Mặc định 1.</td></tr>
     <tr><td><code>mockup_url</code></td><td>link http(s)</td><td>Ảnh mockup để xưởng đối chiếu khi QC. <strong>Nên có</strong> — thiếu thì dòng đó phải chờ bổ sung.</td></tr>
     <tr><td><code>design_url</code></td><td>link hoặc mã</td><td>File thiết kế mặt trước.</td></tr>
@@ -192,14 +270,14 @@ X-API-Key: ffm_KEY_CỦA_BẠN</code></pre>
 
   <h3>Gửi lại không sợ trùng đơn</h3>
   <div class="note">
-    Tạo đơn là <strong>idempotent theo <code>order_id</code></strong>. Gửi lại một <code>order_id</code> đã gửi thì API trả về đúng đơn đã tạo, không tạo đơn thứ hai.
+    Tạo đơn là <strong>idempotent theo <code>order_id</code></strong>. Gửi lại một <code>order_id</code> đã gửi thì API trả về đúng đơn đã tạo, không tạo đơn thứ hai — kể cả khi hai request giống nhau tới cùng lúc.
   </div>
   <div class="table"><table>
     <tr><th>Mã HTTP</th><th><code>data.created</code></th><th>Nghĩa là</th></tr>
     <tr><td><code>201</code></td><td><code>true</code></td><td>Vừa tạo đơn mới.</td></tr>
     <tr><td><code>200</code></td><td><code>false</code></td><td><code>order_id</code> này đã có. <code>data.order</code> là đơn cũ, không thay đổi gì.</td></tr>
   </table></div>
-  <p>Vì vậy khi gặp timeout, mất mạng hay lỗi <code>5xx</code>, cứ <strong>gửi lại nguyên request</strong> (nên cách nhau vài giây, tăng dần). Cả <code>200</code> và <code>201</code> đều nghĩa là đơn đã nằm trong hệ thống xưởng.</p>
+  <p>Vì vậy khi gặp timeout, mất mạng, <code>429</code> hay <code>5xx</code>, cứ <strong>gửi lại nguyên request</strong> (cách nhau vài giây, tăng dần). Cả <code>200</code> và <code>201</code> đều nghĩa là đơn đã nằm trong hệ thống xưởng.</p>
   <div class="note warn">
     API không sửa đơn. Gửi lại cùng <code>order_id</code> với nội dung khác thì đơn cũ vẫn giữ nguyên. Cần sửa hoặc huỷ đơn đã gửi, xem <a href="#hoi-dap">Hỏi đáp</a>.
   </div>
@@ -214,10 +292,10 @@ X-API-Key: ffm_KEY_CỦA_BẠN</code></pre>
     "warnings": [],
     "order": {
       "code": "100123",
-      "order_id": "ETSY-3391820455",
+      "order_id": "TEST-3391820455",
       "status": "PENDING_REVIEW",
       "status_text": "Chờ xưởng duyệt",
-      "order_date": "2026-10-01",
+      "order_date": "2026-10-02",
       "store_name": "",
       "account": "",
       "shipping": {
@@ -241,14 +319,14 @@ X-API-Key: ffm_KEY_CỦA_BẠN</code></pre>
           "engrave_text": ""
         }
       ],
-      "created_at": "2026-10-01T10:15:30+07:00",
-      "updated_at": "2026-10-01T10:15:30+07:00"
+      "created_at": "2026-10-02T14:02:12.700253+07:00",
+      "updated_at": "2026-10-02T14:02:12.700253+07:00"
     }
   }
 }</code></pre>
   <ul>
     <li><code>code</code> là mã đơn nội bộ của xưởng, in trên tem. Hãy lưu lại để trao đổi với xưởng khi cần.</li>
-    <li><code>warnings</code>: đơn vẫn được nhận, nhưng có điểm nên xem lại (ví dụ zip và bang có vẻ bị điền ngược).</li>
+    <li><code>warnings</code>: đơn vẫn được nhận, nhưng có điểm nên xem lại (ví dụ <code>ZIP_STATE_SWAPPED</code> — zip và bang có vẻ bị điền ngược).</li>
   </ul>
 
   <h3>Đơn bị từ chối</h3>
@@ -281,12 +359,13 @@ X-API-Key: ffm_KEY_CỦA_BẠN</code></pre>
   </ul>
 
   <h3>Nhiều đơn</h3>
-  <p><span class="method get">GET</span><code>/orders</code></p>
+  <p><span class="method get">GET</span><code>/orders</code> — mới nhất trước.</p>
   <div class="table"><table>
     <tr><th>Tham số</th><th>Ghi chú</th></tr>
     <tr><td><code>status</code></td><td>Lọc theo <a href="#trang-thai">trạng thái</a>, ví dụ <code>IN_PRODUCTION</code>.</td></tr>
-    <tr><td><code>order_id</code></td><td>Chỉ lấy đúng đơn này (kết quả là danh sách 0 hoặc 1 đơn).</td></tr>
-    <tr><td><code>created_from</code>, <code>created_to</code></td><td>Khoảng thời gian tạo đơn. <code>YYYY-MM-DD</code> hoặc RFC 3339.</td></tr>
+    <tr><td><code>order_id</code></td><td>Chỉ lấy đúng đơn này (kết quả là danh sách 0 hoặc 1 đơn). Các bộ lọc khác bị bỏ qua.</td></tr>
+    <tr><td><code>created_from</code></td><td>Đơn tạo từ thời điểm này. <code>YYYY-MM-DD</code> = đầu ngày đó theo giờ Việt Nam; hoặc RFC 3339.</td></tr>
+    <tr><td><code>created_to</code></td><td>Đơn tạo tới thời điểm này. <code>YYYY-MM-DD</code> = <strong>hết</strong> ngày đó theo giờ Việt Nam; hoặc RFC 3339.</td></tr>
     <tr><td><code>page</code>, <code>page_size</code></td><td>Mặc định trang 1, 20 đơn/trang. Tối đa 100.</td></tr>
   </table></div>
 <pre><code>curl "<span class="base">https://fulfillment.bacgiangdecor.com</span>/api/open/v1/orders?status=SHIPPED&amp;page_size=100" \
@@ -294,7 +373,7 @@ X-API-Key: ffm_KEY_CỦA_BẠN</code></pre>
 
 {
   "success": true,
-  "data": [ { "code": "100123", "order_id": "ETSY-3391820455", "status": "SHIPPED", ... } ],
+  "data": [ { "code": "100123", "order_id": "TEST-3391820455", "status": "SHIPPED", ... } ],
   "meta": { "page": 1, "page_size": 100, "total": 37, "total_pages": 1 }
 }</code></pre>
 
@@ -309,9 +388,286 @@ X-API-Key: ffm_KEY_CỦA_BẠN</code></pre>
   "delivered_at": null
 }</code></pre>
   <p><code>tracking.status</code> nhận một trong: <code>PENDING</code>, <code>PRE_TRANSIT</code>, <code>IN_TRANSIT</code>, <code>OUT_FOR_DELIVERY</code>, <code>PICK_UP</code>, <code>DELIVERED</code>, <code>UNDELIVERED</code>, <code>EXCEPTION</code>, <code>EXPIRED</code>, <code>CANCELLED</code>; rỗng khi chưa có lượt quét nào.</p>
-  <div class="note">
-    Để đồng bộ trạng thái, gọi lại định kỳ <strong>15–30 phút một lần</strong> cho các đơn chưa <code>DELIVERED</code>/<code>CANCELLED</code>/<code>REJECTED</code>. Dùng <code>GET /orders?status=…</code> để lấy cả trang thay vì hỏi từng đơn.
-  </div>
+</section>
+
+<section id="dong-bo">
+  <h2>Đồng bộ trạng thái</h2>
+  <p>API chưa tự báo về (chưa có webhook), nên hệ thống của bạn hỏi lại định kỳ. Cách được khuyên dùng:</p>
+  <ol>
+    <li>Cứ <strong>15–30 phút</strong> một lần, gọi <code>GET /orders?created_from=&lt;30 ngày trước&gt;&amp;page_size=100</code> và đi hết các trang (<code>page</code> tới <code>meta.total_pages</code>).</li>
+    <li>Với mỗi đơn, ghép theo <code>order_id</code> và cập nhật <code>status</code> cùng <code>tracking</code> vào hệ thống bạn.</li>
+    <li>Đơn đã ở trạng thái cuối (<code>DELIVERED</code>, <code>CANCELLED</code>, <code>REJECTED</code>) thì thôi theo dõi.</li>
+    <li>Đơn sống lâu hơn 30 ngày mà chưa giao thì tra riêng bằng <code>GET /orders/{order_id}</code>.</li>
+  </ol>
+  <p>Với 120 request/phút mỗi key, cách này đủ cho hàng nghìn đơn mỗi lượt. Code mẫu ở mục dưới có sẵn hàm <code>syncStatuses</code> (Node.js) / <code>sync_statuses</code> (Python, PHP).</p>
+</section>
+
+<section id="code-mau">
+  <h2>Code mẫu</h2>
+  <p>Ba bản dưới đây đã được chạy thử với API: tự gửi lại khi lỗi mạng / <code>429</code> / <code>5xx</code>, in lỗi theo từng trường khi đơn bị từ chối, và có sẵn hàm đồng bộ trạng thái. Key đọc từ biến môi trường <code>FFM_API_KEY</code>.</p>
+
+  <h3>Node.js 18+ — không cần cài thêm thư viện</h3>
+  <p>Lưu thành <code>ffm.mjs</code>, chạy thử: <code>FFM_API_KEY=ffm_… FFM_TEST_SKU=MÃ-SKU node ffm.mjs</code></p>
+<pre><code>// Node.js 18+ (fetch có sẵn), không cần cài thư viện.
+const BASE_URL = process.env.FFM_BASE_URL ?? 'https://fulfillment.bacgiangdecor.com/api/open/v1';
+const API_KEY = process.env.FFM_API_KEY; // ffm_... — đọc từ biến môi trường, đừng ghi thẳng vào code
+
+const sleep = (ms) =&gt; new Promise((r) =&gt; setTimeout(r, ms));
+
+// Gọi API. Tự gửi lại khi mất mạng, timeout, 429 hoặc 5xx — an toàn vì tạo đơn
+// không bao giờ tạo trùng cùng order_id. Lỗi 4xx khác thì ném ra ngay.
+async function ffm(method, path, body, attempts = 5) {
+  for (let i = 1; ; i++) {
+    let res;
+    try {
+      res = await fetch(BASE_URL + path, {
+        method,
+        headers: { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (err) {
+      if (i &gt;= attempts) throw err;
+      await sleep(2 ** i * 1000);
+      continue;
+    }
+    if ((res.status === 429 || res.status &gt;= 500) &amp;&amp; i &lt; attempts) {
+      const retryAfter = Number(res.headers.get('Retry-After'));
+      await sleep(retryAfter &gt; 0 ? retryAfter * 1000 : 2 ** i * 1000);
+      continue;
+    }
+    const json = await res.json();
+    if (!json.success) {
+      const e = new Error(`${res.status} ${json.error.code}: ${json.error.message}`);
+      e.status = res.status;
+      e.code = json.error.code;
+      e.details = json.error.details ?? [];
+      throw e;
+    }
+    return { status: res.status, data: json.data, meta: json.meta };
+  }
+}
+
+// 1) Gửi một đơn.
+export async function sendOrder(order) {
+  try {
+    const { data } = await ffm('POST', '/orders', order);
+    // data.created = false: đơn này đã gửi trước đó — vẫn là thành công.
+    console.log(data.created ? 'Đã tạo' : 'Đã có sẵn', data.order.order_id, '→ mã xưởng', data.order.code);
+    return data.order;
+  } catch (e) {
+    if (e.code === 'VALIDATION_ERROR') {
+      for (const d of e.details) console.error(`  ${d.field}: ${d.code} — ${d.message}`);
+    }
+    throw e;
+  }
+}
+
+// 2) Đồng bộ trạng thái: lấy các đơn tạo từ ngày `since`, từng trang 100 đơn.
+export async function syncStatuses(since) {
+  for (let page = 1; ; page++) {
+    const { data, meta } = await ffm('GET', `/orders?created_from=${since}&amp;page_size=100&amp;page=${page}`);
+    for (const o of data) {
+      console.log(o.order_id, o.status, o.tracking?.number ?? '');
+      // TODO: cập nhật trạng thái / mã vận đơn vào hệ thống của bạn ở đây.
+    }
+    if (page &gt;= meta.total_pages) break;
+  }
+}
+
+// Chạy thử: FFM_API_KEY=ffm_... node ffm.mjs
+if (import.meta.url === `file://${process.argv[1]}`) {
+  await sendOrder({
+    order_id: 'TEST-' + Date.now(),
+    shipping: { name: 'Jane Doe', address1: '1 Main St', city: 'Saint Paul', province: 'MN', zip: '55112', country: 'US' },
+    items: [{ sku: process.env.FFM_TEST_SKU ?? 'MÃ-SKU-CỦA-XƯỞNG', quantity: 1, mockup_url: 'https://example.com/mockup.png' }],
+  });
+  await syncStatuses(new Date(Date.now() - 30 * 86400_000).toISOString().slice(0, 10));
+}</code></pre>
+
+  <h3>Python 3.8+ — chỉ dùng thư viện chuẩn</h3>
+  <p>Lưu thành <code>ffm.py</code>, chạy thử: <code>FFM_API_KEY=ffm_… FFM_TEST_SKU=MÃ-SKU python3 ffm.py</code></p>
+<pre><code># Python 3.8+, chỉ dùng thư viện chuẩn.
+import json, os, time, urllib.error, urllib.request
+from datetime import date, timedelta
+
+BASE_URL = os.environ.get("FFM_BASE_URL", "https://fulfillment.bacgiangdecor.com/api/open/v1")
+API_KEY = os.environ["FFM_API_KEY"]  # ffm_... — đọc từ biến môi trường, đừng ghi thẳng vào code
+
+
+class FFMError(Exception):
+    def __init__(self, status, error):
+        super().__init__(f"{status} {error['code']}: {error['message']}")
+        self.status, self.code, self.details = status, error["code"], error.get("details") or []
+
+
+def ffm(method, path, body=None, attempts=5):
+    """Gọi API. Tự gửi lại khi mất mạng, timeout, 429 hoặc 5xx — an toàn vì tạo
+    đơn không bao giờ tạo trùng cùng order_id. Lỗi 4xx khác thì ném FFMError."""
+    data = json.dumps(body).encode() if body is not None else None
+    for i in range(1, attempts + 1):
+        req = urllib.request.Request(BASE_URL + path, data=data, method=method, headers={
+            "Authorization": "Bearer " + API_KEY, "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as res:
+                payload = json.load(res)
+                return res.status, payload.get("data"), payload.get("meta")
+        except urllib.error.HTTPError as e:
+            if (e.code == 429 or e.code &gt;= 500) and i &lt; attempts:
+                wait = int(e.headers.get("Retry-After") or 0) or 2 ** i
+                time.sleep(wait)
+                continue
+            raise FFMError(e.code, json.load(e)["error"])
+        except (urllib.error.URLError, TimeoutError):
+            if i == attempts:
+                raise
+            time.sleep(2 ** i)
+
+
+def send_order(order):
+    """Gửi một đơn. created=False nghĩa là đơn đã gửi trước đó — vẫn là thành công."""
+    try:
+        _, data, _ = ffm("POST", "/orders", order)
+    except FFMError as e:
+        for d in e.details:
+            print(f"  {d['field']}: {d['code']} — {d['message']}")
+        raise
+    print("Đã tạo" if data["created"] else "Đã có sẵn", data["order"]["order_id"], "→ mã xưởng", data["order"]["code"])
+    return data["order"]
+
+
+def sync_statuses(since):
+    """Đồng bộ trạng thái: các đơn tạo từ ngày `since` (YYYY-MM-DD), từng trang 100 đơn."""
+    page = 1
+    while True:
+        _, orders, meta = ffm("GET", f"/orders?created_from={since}&amp;page_size=100&amp;page={page}")
+        for o in orders:
+            print(o["order_id"], o["status"], (o["tracking"] or {}).get("number", ""))
+            # TODO: cập nhật trạng thái / mã vận đơn vào hệ thống của bạn ở đây.
+        if page &gt;= meta["total_pages"]:
+            break
+        page += 1
+
+
+if __name__ == "__main__":  # Chạy thử: FFM_API_KEY=ffm_... python3 ffm.py
+    send_order({
+        "order_id": f"TEST-{int(time.time() * 1000)}",
+        "shipping": {"name": "Jane Doe", "address1": "1 Main St", "city": "Saint Paul",
+                     "province": "MN", "zip": "55112", "country": "US"},
+        "items": [{"sku": os.environ.get("FFM_TEST_SKU", "MÃ-SKU-CỦA-XƯỞNG"), "quantity": 1,
+                   "mockup_url": "https://example.com/mockup.png"}],
+    })
+    sync_statuses((date.today() - timedelta(days=30)).isoformat())</code></pre>
+  <h3>PHP 7.4+ — chỉ cần extension curl</h3>
+  <p>Lưu thành <code>ffm.php</code>, chạy thử: <code>FFM_API_KEY=ffm_… FFM_TEST_SKU=MÃ-SKU php ffm.php</code></p>
+<pre><code>&lt;?php
+// PHP 7.4+, cần extension curl (có sẵn trên hầu hết hosting).
+$BASE_URL = getenv('FFM_BASE_URL') ?: 'https://fulfillment.bacgiangdecor.com/api/open/v1';
+$API_KEY = getenv('FFM_API_KEY'); // ffm_... — đọc từ biến môi trường, đừng ghi thẳng vào code
+
+class FFMError extends Exception
+{
+    public $status;
+    public $errorCode;
+    public $details;
+
+    public function __construct($status, array $error)
+    {
+        parent::__construct("$status {$error['code']}: {$error['message']}");
+        $this-&gt;status = $status;
+        $this-&gt;errorCode = $error['code'];
+        $this-&gt;details = isset($error['details']) ? $error['details'] : [];
+    }
+}
+
+/**
+ * Gọi API. Tự gửi lại khi mất mạng, timeout, 429 hoặc 5xx — an toàn vì tạo đơn
+ * không bao giờ tạo trùng cùng order_id. Lỗi 4xx khác thì ném FFMError.
+ * Trả về [mã HTTP, data, meta].
+ */
+function ffm($method, $path, $body = null, $attempts = 5)
+{
+    global $BASE_URL, $API_KEY;
+    for ($i = 1; ; $i++) {
+        $retryAfter = 0;
+        $ch = curl_init($BASE_URL . $path);
+        curl_setopt_array($ch, [
+            CURLOPT_CUSTOMREQUEST =&gt; $method,
+            CURLOPT_RETURNTRANSFER =&gt; true,
+            CURLOPT_TIMEOUT =&gt; 30,
+            CURLOPT_HTTPHEADER =&gt; ['Authorization: Bearer ' . $API_KEY, 'Content-Type: application/json'],
+            CURLOPT_HEADERFUNCTION =&gt; function ($ch, $line) use (&amp;$retryAfter) {
+                if (stripos($line, 'Retry-After:') === 0) {
+                    $retryAfter = (int) trim(substr($line, 12));
+                }
+                return strlen($line);
+            },
+        ]);
+        if ($body !== null) {
+            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body, JSON_UNESCAPED_UNICODE));
+        }
+        $raw = curl_exec($ch);
+        $status = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        $netError = curl_error($ch);
+
+        $temporary = $raw === false || $status === 429 || $status &gt;= 500;
+        if ($temporary &amp;&amp; $i &lt; $attempts) {
+            sleep($retryAfter &gt; 0 ? $retryAfter : 2 ** $i);
+            continue;
+        }
+        if ($raw === false) {
+            throw new RuntimeException('Không gọi được API: ' . $netError);
+        }
+        $json = json_decode($raw, true);
+        if (empty($json['success'])) {
+            throw new FFMError($status, $json['error']);
+        }
+        return [$status, $json['data'], isset($json['meta']) ? $json['meta'] : null];
+    }
+}
+
+// 1) Gửi một đơn. created = false nghĩa là đơn đã gửi trước đó — vẫn là thành công.
+function send_order(array $order)
+{
+    try {
+        list(, $data) = ffm('POST', '/orders', $order);
+    } catch (FFMError $e) {
+        foreach ($e-&gt;details as $d) {
+            echo "  {$d['field']}: {$d['code']} — {$d['message']}\n";
+        }
+        throw $e;
+    }
+    echo ($data['created'] ? 'Đã tạo ' : 'Đã có sẵn ') . $data['order']['order_id'] . ' → mã xưởng ' . $data['order']['code'] . "\n";
+    return $data['order'];
+}
+
+// 2) Đồng bộ trạng thái: các đơn tạo từ ngày $since (YYYY-MM-DD), từng trang 100 đơn.
+function sync_statuses($since)
+{
+    for ($page = 1; ; $page++) {
+        list(, $orders, $meta) = ffm('GET', "/orders?created_from=$since&amp;page_size=100&amp;page=$page");
+        foreach ($orders as $o) {
+            echo $o['order_id'] . ' ' . $o['status'] . ' ' . ($o['tracking']['number'] ?? '') . "\n";
+            // TODO: cập nhật trạng thái / mã vận đơn vào hệ thống của bạn ở đây.
+        }
+        if ($page &gt;= $meta['total_pages']) {
+            break;
+        }
+    }
+}
+
+// Chạy thử: FFM_API_KEY=ffm_... php ffm.php
+if (realpath($argv[0] ?? '') === __FILE__) {
+    send_order([
+        'order_id' =&gt; 'TEST-' . (int) (microtime(true) * 1000),
+        'shipping' =&gt; ['name' =&gt; 'Jane Doe', 'address1' =&gt; '1 Main St', 'city' =&gt; 'Saint Paul',
+                       'province' =&gt; 'MN', 'zip' =&gt; '55112', 'country' =&gt; 'US'],
+        'items' =&gt; [['sku' =&gt; getenv('FFM_TEST_SKU') ?: 'MÃ-SKU-CỦA-XƯỞNG', 'quantity' =&gt; 1,
+                     'mockup_url' =&gt; 'https://example.com/mockup.png']],
+    ]);
+    sync_statuses(date('Y-m-d', strtotime('-30 days')));
+}</code></pre>
+  <p>Ngôn ngữ khác: làm theo cùng ý — một hàm gọi API có gửi lại khi lỗi tạm thời, một hàm gửi đơn, một hàm đồng bộ. File <a href="/api/open/v1/openapi.yaml">openapi.yaml</a> sinh được client cho hầu hết ngôn ngữ bằng OpenAPI Generator.</p>
 </section>
 
 <section id="trang-thai">
@@ -337,6 +693,7 @@ X-API-Key: ffm_KEY_CỦA_BẠN</code></pre>
     <tr><th>HTTP</th><th><code>error.code</code></th><th>Nguyên nhân</th><th>Xử lý</th></tr>
     <tr><td>400</td><td><code>INVALID_JSON</code></td><td>Body không phải JSON hợp lệ, hoặc sai kiểu dữ liệu.</td><td>Sửa request.</td></tr>
     <tr><td>400</td><td><code>STATUS_INVALID</code></td><td>Tham số <code>status</code> không có trong danh sách.</td><td>Sửa request.</td></tr>
+    <tr><td>400</td><td><code>DATE_INVALID</code></td><td><code>created_from</code> / <code>created_to</code> sai định dạng.</td><td>Dùng <code>YYYY-MM-DD</code> hoặc RFC 3339.</td></tr>
     <tr><td>401</td><td><code>API_KEY_MISSING</code></td><td>Không gửi key.</td><td>Thêm header xác thực.</td></tr>
     <tr><td>401</td><td><code>API_KEY_INVALID</code></td><td>Key sai hoặc đã bị thu hồi.</td><td>Kiểm tra key, xin xưởng cấp lại.</td></tr>
     <tr><td>403</td><td><code>SELLER_PAUSED</code></td><td>Seller đang bị tạm dừng.</td><td>Liên hệ xưởng.</td></tr>
@@ -354,7 +711,7 @@ X-API-Key: ffm_KEY_CỦA_BẠN</code></pre>
     <tr><td><code>TOO_MANY</code></td><td>Đơn có quá 100 dòng sản phẩm.</td></tr>
     <tr><td><code>DATE_INVALID</code></td><td><code>order_date</code> không đúng dạng <code>YYYY-MM-DD</code>.</td></tr>
     <tr><td><code>QUANTITY_INVALID</code></td><td>Số lượng không phải số nguyên từ 1 trở lên.</td></tr>
-    <tr><td><code>SKU_NOT_FOUND</code></td><td>SKU không có trên hệ thống xưởng. Kiểm tra lại mã hoặc báo xưởng khai SKU.</td></tr>
+    <tr><td><code>SKU_NOT_FOUND</code></td><td>SKU không có trên hệ thống xưởng. Đối chiếu với <a href="#sku"><code>GET /skus</code></a>.</td></tr>
     <tr><td><code>SKU_NOT_READY</code></td><td>SKU có nhưng xưởng chưa khai nguyên vật liệu nên chưa sản xuất được. Báo xưởng.</td></tr>
     <tr><td><code>URL_INVALID</code></td><td>Link không phải http(s) hợp lệ.</td></tr>
     <tr><td><code>DESIGN_SIDE_DUPLICATE</code></td><td>Thiết kế mặt trước và mặt sau trùng nhau.</td></tr>
@@ -364,7 +721,7 @@ X-API-Key: ffm_KEY_CỦA_BẠN</code></pre>
 <section id="gioi-han">
   <h2>Giới hạn</h2>
   <ul>
-    <li><strong>120 request/phút</strong> cho mỗi key. Vượt thì nhận <code>429</code>.</li>
+    <li><strong>120 request/phút</strong> cho mỗi key. Vượt thì nhận <code>429</code> kèm header <code>Retry-After</code> (giây).</li>
     <li>Tối đa <strong>100 dòng sản phẩm</strong> một đơn.</li>
     <li>Danh sách đơn: tối đa <strong>100 đơn</strong> một trang.</li>
     <li>Chỉ hỗ trợ HTTPS.</li>
@@ -374,15 +731,15 @@ X-API-Key: ffm_KEY_CỦA_BẠN</code></pre>
 <section id="hoi-dap">
   <h2>Hỏi đáp</h2>
   <h3>Sửa hoặc huỷ đơn đã gửi thế nào?</h3>
-  <p>Bản v1 chưa có API sửa/huỷ. Đăng nhập cổng seller để huỷ hoặc gửi yêu cầu huỷ, hoặc liên hệ xưởng. Đừng gửi lại đơn với <code>order_id</code> mới để "sửa" — xưởng sẽ sản xuất cả hai.</p>
-  <h3>Tôi không có mã SKU của xưởng?</h3>
-  <p>Xưởng gửi bạn danh sách SKU. Hệ thống của bạn cần một bảng đổi từ mã sản phẩm của bạn sang mã SKU của xưởng trước khi gọi API.</p>
+  <p>Bản v1 chưa có API sửa/huỷ. Liên hệ xưởng (hoặc huỷ trên cổng seller nếu bạn có tài khoản). Đừng gửi lại đơn với <code>order_id</code> mới để "sửa" — xưởng sẽ sản xuất cả hai.</p>
   <h3>Một khách mua nhiều sản phẩm thì gửi mấy đơn?</h3>
   <p>Một đơn, nhiều dòng trong <code>items</code>. Các dòng cùng đơn được xưởng gom và gửi chung một kiện.</p>
   <h3>Đơn tôi gửi có được sản xuất ngay không?</h3>
   <p>Không. Xưởng duyệt trước (<code>PENDING_REVIEW</code>), duyệt xong mới vào sản xuất (<code>IN_PRODUCTION</code>).</p>
   <h3>Có môi trường thử không?</h3>
-  <p>Chưa có môi trường riêng. Khi thử, báo trước với xưởng và đặt <code>order_id</code> bắt đầu bằng <code>TEST-</code> để xưởng biết đó là đơn thử và xoá đi.</p>
+  <p>Chưa có môi trường riêng. Khi thử, đặt <code>order_id</code> bắt đầu bằng <code>TEST-</code> và báo xưởng để xưởng biết đó là đơn thử và xoá đi (xem <a href="#quy-trinh">Quy trình kết nối</a>).</p>
+  <h3>Gửi lại một đơn đã bị xưởng xoá thì sao?</h3>
+  <p>Đơn bị xoá không còn giữ <code>order_id</code>, nên gửi lại sẽ tạo đơn mới. Đơn thử <code>TEST-</code> đã xoá vì vậy gửi lại được bình thường.</p>
 </section>
 
 <footer>
@@ -393,6 +750,23 @@ X-API-Key: ffm_KEY_CỦA_BẠN</code></pre>
 <script>
   // Hiện đúng tên miền đang phục vụ trang này trong mọi ví dụ.
   document.querySelectorAll('.base').forEach(function (el) { el.textContent = location.origin; });
+  // Nút "Copy" trên mọi khối code.
+  document.querySelectorAll('pre').forEach(function (pre) {
+    var box = document.createElement('div');
+    box.className = 'code';
+    pre.parentNode.insertBefore(box, pre);
+    box.appendChild(pre);
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'copy';
+    btn.textContent = 'Copy';
+    btn.addEventListener('click', function () {
+      var text = pre.innerText;
+      var done = function () { btn.textContent = 'Đã copy'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500); };
+      if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, function () { btn.textContent = 'Bôi đen để copy'; });
+    });
+    box.appendChild(btn);
+  });
 </script>
 </body>
 </html>

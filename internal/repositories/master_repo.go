@@ -859,3 +859,22 @@ func (r *MasterImportRepository) List(p Page) ([]models.MasterImportJob, int64, 
 	err := r.db.Order("id desc").Limit(p.PageSize).Offset(p.Offset()).Find(&rows).Error
 	return rows, total, err
 }
+
+// OrderableSKU is one SKU a seller's system may put on an order: it exists and
+// the factory has declared at least one material for it — the same test the
+// order importer applies (SKU_UNMAPPED / SKU_NO_MATERIAL).
+type OrderableSKU struct {
+	Code        string `json:"sku"`
+	ProductName string `json:"product_name"`
+}
+
+// OrderableSKUs lists every SKU an order may use, by code.
+func (r *SKURepository) OrderableSKUs() ([]OrderableSKU, error) {
+	var rows []OrderableSKU
+	err := r.db.Model(&models.SKU{}).
+		Select("skus.code AS code, COALESCE(NULLIF(skus.product_name, ''), skus.name) AS product_name").
+		Where("EXISTS (SELECT 1 FROM sku_materials m WHERE m.sku_id = skus.id AND m.deleted_at IS NULL)").
+		Order("skus.code asc").
+		Scan(&rows).Error
+	return rows, err
+}

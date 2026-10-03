@@ -576,3 +576,60 @@ func TestOpenCreate_LosingARaceIsAReplay(t *testing.T) {
 		t.Errorf("orders=%d items=%d — the losing transaction must leave nothing behind", orders, items)
 	}
 }
+
+// The SKU list is exactly what the create call accepts: a SKU without a
+// material is refused at create time, so it must not be offered here either.
+func TestOpenListSKUs_MatchesWhatCreateAccepts(t *testing.T) {
+	db := newOpenDB(t)
+	svc := openSvc(db)
+	db.Create(&models.SKU{Code: "NOMAT", Name: "No material"})
+
+	rows, err := svc.ListSKUs()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Code != "TESTSKU" || rows[0].ProductName != "Test SKU" {
+		t.Fatalf("skus = %+v", rows)
+	}
+	in := openOrder("SKU-1")
+	in.Items[0].SKU = rows[0].Code
+	if _, err := svc.CreateOrder(sellerPrincipal(1, "S1"), "", in); err != nil {
+		t.Errorf("a listed SKU must be accepted: %v", err)
+	}
+}
+
+// created_to=<a day> covers that whole day in the factory's timezone; a bare
+// midnight bound would drop every order created on it.
+func TestParseOpenTimeBound(t *testing.T) {
+	loc := AppLocation()
+	from, err := ParseOpenTimeBound("2026-10-01", "created_from", false)
+	if err != nil || !from.Equal(time.Date(2026, 10, 1, 0, 0, 0, 0, loc)) {
+		t.Errorf("from = %v, %v", from, err)
+	}
+	to, err := ParseOpenTimeBound("2026-10-01", "created_to", true)
+	if err != nil || !to.Equal(time.Date(2026, 10, 2, 0, 0, 0, 0, loc).Add(-time.Nanosecond)) {
+		t.Errorf("to = %v, %v", to, err)
+	}
+	exact, err := ParseOpenTimeBound("2026-10-01T08:30:00Z", "created_to", true)
+	if err != nil || !exact.Equal(time.Date(2026, 10, 1, 8, 30, 0, 0, time.UTC)) {
+		t.Errorf("rfc3339 = %v, %v", exact, err)
+	}
+	if b, err := ParseOpenTimeBound("  ", "created_to", true); b != nil || err != nil {
+		t.Errorf("empty = %v, %v", b, err)
+	}
+	_, err = ParseOpenTimeBound("01/10/2026", "created_from", false)
+	wantAppErr(t, err, http.StatusBadRequest, "DATE_INVALID")
+
+	// End to end: an order created today is found by created_to=today.
+	db := newOpenDB(t)
+	svc := openSvc(db)
+	if _, err := svc.CreateOrder(sellerPrincipal(1, "S1"), "", openOrder("D-1")); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	today := time.Now().In(loc).Format("2006-01-02")
+	lo, _ := ParseOpenTimeBound(today, "created_from", false)
+	hi, _ := ParseOpenTimeBound(today, "created_to", true)
+	if _, _, total, _ := svc.ListOrders(1, OpenOrderQuery{CreatedFrom: lo, CreatedTo: hi}); total != 1 {
+		t.Errorf("created_from=created_to=today found %d orders, want 1", total)
+	}
+}
