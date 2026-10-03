@@ -27,7 +27,18 @@ type BatchFilter struct {
 	// order's internal code ("100047") or one item's tem code ("100047_1/1") —
 	// exact match, these codes are system-generated.
 	Code string
+	// Files splits "Chờ xử lý" the way the batch list labels it: "ready" = still
+	// PENDING, not closed, and both production links (print + cut) are attached —
+	// the "Đã có file SX" badge; "missing" = every other PENDING batch. Combined
+	// with Status=PENDING by the batch list; other callers leave it empty and get
+	// the plain status filter (the dashboard counts all PENDING together).
+	Files string
 }
+
+// filesReadyCond is the SQL form of the web's batchStatusBadge "Đã có file SX".
+const filesReadyCond = `batches.status = 'PENDING' AND batches.closed_at IS NULL
+	AND EXISTS (SELECT 1 FROM batch_links bl WHERE bl.batch_id = batches.id AND bl.kind = 'PRINT' AND bl.url <> '' AND bl.deleted_at IS NULL)
+	AND EXISTS (SELECT 1 FROM batch_links bl WHERE bl.batch_id = batches.id AND bl.kind = 'CUT' AND bl.url <> '' AND bl.deleted_at IS NULL)`
 
 type BatchRepository struct{ db *gorm.DB }
 
@@ -248,6 +259,12 @@ func (r *BatchRepository) baseQuery(f BatchFilter) *gorm.DB {
 	}
 	if f.ExcludeClosed {
 		q = q.Where("closed_at IS NULL")
+	}
+	switch f.Files {
+	case "ready":
+		q = q.Where(filesReadyCond)
+	case "missing":
+		q = q.Where("batches.status = 'PENDING' AND NOT (" + filesReadyCond + ")")
 	}
 	if code := strings.TrimSpace(f.Code); code != "" {
 		q = q.Where("batches.id IN (?)", r.db.Model(&models.BatchItem{}).

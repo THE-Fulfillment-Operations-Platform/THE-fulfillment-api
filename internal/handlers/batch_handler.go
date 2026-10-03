@@ -44,6 +44,8 @@ func (h *Handlers) ListBatches(c *gin.Context) {
 		// ?open=1 — chỉ batch còn việc (bảng sản xuất dùng), bỏ batch đã đóng vì
 		// toàn bộ hàng bị huỷ ở QC.
 		ExcludeClosed: c.Query("open") == "1" || c.Query("open") == "true",
+		// ?files=ready|missing — tách "Chờ xử lý" theo đã đủ link in + cắt hay chưa.
+		Files: c.Query("files"),
 	}
 	rows, total, err := h.svc.Batch.List(f)
 	if err != nil {
