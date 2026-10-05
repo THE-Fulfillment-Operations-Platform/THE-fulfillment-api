@@ -203,6 +203,7 @@ func itemFilterFrom(c *gin.Context) repositories.ItemFilter {
 		InternalCode:     strings.TrimSpace(c.Query("internal_code")),
 		Search:           strings.TrimSpace(c.Query("q")),
 		InternalStatus:   c.Query("status"),
+		HandedOver:       c.Query("handed_over") == "1" || c.Query("handed_over") == "true",
 		DesignStatus:     c.Query("design_status"),
 		ReviewStatus:     reviewStatus,
 		IncludeCancelled: includeCancelled,

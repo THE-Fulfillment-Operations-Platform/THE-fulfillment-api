@@ -691,6 +691,11 @@ type ItemFilter struct {
 	Search         string // partial, case-insensitive match on EITHER internal_code OR sku_code (one search box)
 	HasDesignFile  bool   // only items that already have a front or back design file (design-download pick-list)
 	InternalStatus string
+	// HandedOver keeps only items whose order has left the workshop: handed to
+	// THE, shipped or delivered. It is the "Đã bàn giao" badge on the order
+	// list, which reads the order's seller status, not the item's internal
+	// status — a handed-off item still sits at QC_PASSED internally.
+	HandedOver     bool
 	DesignStatus   string
 	ReviewStatus   string // exact match on the parent order's review_status
 	BatchID        *uint
@@ -1031,6 +1036,11 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 	}
 	if f.InternalStatus != "" {
 		q = q.Where("order_items.internal_status = ?", f.InternalStatus)
+	}
+	if f.HandedOver {
+		q = q.Where("orders.seller_status IN ?", []models.SellerStatus{
+			models.SellerStatusHandedOff, models.SellerStatusShipped, models.SellerStatusDelivered,
+		})
 	}
 	if f.DesignStatus != "" {
 		q = q.Where("order_items.design_status = ?", f.DesignStatus)

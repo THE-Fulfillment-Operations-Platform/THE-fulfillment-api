@@ -78,3 +78,46 @@ func TestItemList_WithSellerFillsTheColumn(t *testing.T) {
 		t.Fatalf("cột Seller không có dữ liệu: %+v", rows[0].Order.Seller)
 	}
 }
+
+// Bộ lọc "Đã giao hàng" trên màn Đơn hàng: chỉ giữ sản phẩm của đơn đã rời xưởng
+// (bàn giao THE, đã gửi đi, đã giao). Nhãn "Đã bàn giao" ở cột Trạng thái đọc
+// seller_status của đơn, còn trạng thái nội bộ của sản phẩm vẫn đứng ở Đã QC —
+// nên lọc theo trạng thái nội bộ không tách được hai nhóm này.
+func TestItemList_HandedOverFilter(t *testing.T) {
+	db := newQueueTestDB(t)
+	stages := map[string]models.SellerStatus{
+		"100001_1/1": models.SellerStatusProduction,
+		"100002_1/1": models.SellerStatusHandedOff,
+		"100003_1/1": models.SellerStatusShipped,
+		"100004_1/1": models.SellerStatusDelivered,
+	}
+	for code, st := range stages {
+		it := seedQueueItem(t, db, code, models.DesignReady)
+		if err := db.Model(&models.Order{}).Where("id = ?", it.OrderID).
+			Update("seller_status", st).Error; err != nil {
+			t.Fatalf("đặt seller_status %s: %v", st, err)
+		}
+	}
+
+	repo := &OrderItemRepository{db: db}
+	rows, total, err := repo.List(ItemFilter{Page: Page{Page: 1, PageSize: 20}, HandedOver: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 3 || len(rows) != 3 {
+		t.Fatalf("lọc đã giao hàng phải ra 3 dòng, got total=%d len=%d", total, len(rows))
+	}
+	for _, r := range rows {
+		if r.InternalCode == "100001_1/1" {
+			t.Fatalf("đơn còn đang sản xuất lọt vào bộ lọc đã giao hàng")
+		}
+	}
+
+	_, all, err := repo.List(ItemFilter{Page: Page{Page: 1, PageSize: 20}})
+	if err != nil {
+		t.Fatalf("List all: %v", err)
+	}
+	if all != 4 {
+		t.Fatalf("không lọc phải thấy 4 dòng, got %d", all)
+	}
+}
