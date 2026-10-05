@@ -770,94 +770,57 @@ func skuHasMaterial(sku *models.SKU, materialID uint) bool {
 
 // ---------- Legacy production-template export ----------
 
-// productionTemplateHeaders is the exact, ordered legacy production-template
-// header row. The workshop's existing spreadsheet relies on this precise column
-// order and spelling — note "Mã nội bộ" intentionally appears twice (positions 1
-// and 13) for legacy compatibility. Do not reorder or rename.
+// productionTemplateHeaders is the per-batch production sheet ("Tải bảng sản
+// xuất"). The customer cut it down on 2026-10-04 to what the floor actually
+// reads — "chủ yếu là: tên batch / mã nội bộ / sku / sl / link design" — from the
+// 17-column legacy template. Print/cut links are left out on purpose: they are
+// the same for the whole batch and live on the batch itself.
 var productionTemplateHeaders = []string{
+	"Số batch",
 	"Mã nội bộ",
-	"SỐ Batch",
-	"Ngày",
-	"Order ID",
 	"SKU",
-	"Loại VL",
-	"Mô tả Sp để QC (Hiện lên phần QC)",
-	"Mã ảnh (copy bên TĐN Ctr + Ship + V...)",
-	"Số thứ tự",
 	"Số lượng",
-	"Link ảnh",
-	"Mock up",
-	"Mã nội bộ",
-	"Tên khách",
-	"Tên File",
-	"Link in",
-	"Link cắt",
+	"Link design",
 }
 
-// seqStr renders a production sequence, leaving an unassigned (0) sequence blank
-// so the legacy sheet does not show a spurious ordering position.
-func seqStr(n int) string {
-	if n == 0 {
-		return ""
-	}
-	return itoa(n)
-}
+// productionBackDesignHeader is appended only when an item in the batch is
+// two-sided, so a one-sided batch keeps exactly the five columns asked for.
+const productionBackDesignHeader = "Link design mặt sau"
 
-// ProductionTemplateGrid builds the legacy production-template grid — the header
-// row followed by one row per batch item — for a fully-loaded batch (with
-// Items.OrderItem.Order and Items.Material preloaded). It is a pure function so
-// the column order and per-field mapping can be unit-tested without a database.
+// ProductionTemplateGrid builds the production sheet — the header row followed
+// by one row per live batch item — for a fully-loaded batch (Items.OrderItem
+// preloaded). Pure, so the columns can be unit-tested without a database.
 func ProductionTemplateGrid(batch *models.Batch) [][]string {
-	date := batch.CreatedAt.Format("2006-01-02")
-	grid := make([][]string, 0, len(batch.Items)+1)
-	grid = append(grid, productionTemplateHeaders)
-	batchPrintURL, batchCutURL := batchProductionLinks(batch)
-
+	var live []*models.OrderItem
+	twoSided := false
 	for _, bi := range batch.Items {
 		it := bi.OrderItem
 		if it == nil || itemCancelled(it.CancellationStatus) {
 			continue
 		}
-		// Loại VL comes from the batch's material (batches are material-scoped).
-		materialName := batch.Material.Name
-		if bi.Material != nil {
-			if bi.Material.Name != "" {
-				materialName = bi.Material.Name
-			} else {
-				materialName = bi.Material.Code
-			}
+		live = append(live, it)
+		if strings.TrimSpace(it.BackDesignURL) != "" {
+			twoSided = true
 		}
-		var orderID, customer string
-		if it.Order != nil {
-			orderID = it.Order.StoreOrderID
-			customer = it.Order.ShippingName
+	}
+	header := append([]string{}, productionTemplateHeaders...)
+	if twoSided {
+		header = append(header, productionBackDesignHeader)
+	}
+	grid := make([][]string, 0, len(live)+1)
+	grid = append(grid, header)
+	for _, it := range live {
+		row := []string{
+			batch.Code,                      // Số batch
+			it.InternalCode,                 // Mã nội bộ
+			it.SKUCode,                      // SKU
+			itoa(it.Quantity),               // Số lượng
+			strings.TrimSpace(it.DesignURL), // Link design (mặt trước / một mặt)
 		}
-		printURL, cutURL := batchPrintURL, batchCutURL
-		if printURL == "" {
-			printURL = it.PrintFileURL
+		if twoSided {
+			row = append(row, strings.TrimSpace(it.BackDesignURL))
 		}
-		if cutURL == "" {
-			cutURL = it.CutFileURL
-		}
-		grid = append(grid, []string{
-			it.InternalCode,               // Mã nội bộ
-			batch.Code,                    // SỐ Batch
-			date,                          // Ngày
-			orderID,                       // Order ID
-			it.SKUCode,                    // SKU
-			materialName,                  // Loại VL
-			it.QCDescription,              // Mô tả Sp để QC
-			it.ImageCode,                  // Mã ảnh
-			seqStr(it.ProductionSequence), // Số thứ tự (blank when unassigned)
-			itoa(it.Quantity),             // Số lượng
-			it.DesignURL,                  // Link ảnh
-			it.MockupURL,                  // Mock up
-			it.InternalCode,               // Mã nội bộ (legacy 2nd copy)
-			customer,                      // Tên khách
-			it.ProductionFileName,         // Tên File
-			printURL,                      // Link in (batch link overrides legacy item link)
-			cutURL,                        // Link cắt (batch link overrides legacy item link)
-		})
+		grid = append(grid, row)
 	}
 	return grid
 }
@@ -876,27 +839,15 @@ func batchProductionLinks(batch *models.Batch) (printURL, cutURL string) {
 	return strings.TrimSpace(printURL), strings.TrimSpace(cutURL)
 }
 
-// productionColumnWidths sets sensible Excel column widths (in characters) for the
-// 17 production-template columns, keeping URL columns wide and codes/counts compact
-// so the sheet is readable without manual resizing.
+// productionColumnWidths: Excel widths (characters) for the production sheet —
+// codes compact, links wide.
 var productionColumnWidths = []float64{
-	16, // A  Mã nội bộ
-	10, // B  SỐ Batch
-	12, // C  Ngày
-	22, // D  Order ID
-	16, // E  SKU
-	18, // F  Loại VL
-	32, // G  Mô tả QC
-	22, // H  Mã ảnh
-	9,  // I  Số thứ tự
-	9,  // J  Số lượng
-	42, // K  Link ảnh
-	42, // L  Mock up
-	16, // M  Mã nội bộ
-	20, // N  Tên khách
-	22, // O  Tên File
-	42, // P  Link in
-	42, // Q  Link cắt
+	12, // Số batch
+	16, // Mã nội bộ
+	24, // SKU
+	10, // Số lượng
+	70, // Link design
+	70, // Link design mặt sau (only when the batch has two-sided items)
 }
 
 // GetWithScrapHistory loads a batch for viewing/exporting và, với batch ĐÃ ĐÓNG,
@@ -953,8 +904,8 @@ func (s *BatchService) ProductionTemplateXLSX(batchID uint) ([]byte, string, err
 		}
 	}
 
-	lastCol, _ := excelize.ColumnNumberToName(len(productionTemplateHeaders))
-	for i, w := range productionColumnWidths {
+	lastCol, _ := excelize.ColumnNumberToName(len(grid[0]))
+	for i, w := range productionColumnWidths[:len(grid[0])] {
 		name, _ := excelize.ColumnNumberToName(i + 1)
 		_ = f.SetColWidth(sheet, name, name, w)
 	}

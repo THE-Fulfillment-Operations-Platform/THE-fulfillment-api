@@ -545,3 +545,85 @@ func TestCommitBatchLinkImport_CodeMismatchRejected(t *testing.T) {
 		t.Fatalf("nothing may land on mismatch, got %d links", got)
 	}
 }
+
+// The floor's own short file (customer, 2026-10-04): "Số batch | Link Drive",
+// one Drive folder per batch holding both files. It parses without the template
+// columns, resolves each batch by its code (Excel may eat the "#"), fills Link in
+// AND Link cắt with the folder, and commits like a template import.
+func TestBatchLinkImport_ShortFileByBatchCode(t *testing.T) {
+	db, svc, batches := newExcelFixture(t)
+	b1, b2 := batches[0], batches[1]
+	csv := "Số batch,Link Drive\n" +
+		b1.Code + ",https://drive.google.com/open?id=AAA\n" +
+		strings.TrimPrefix(b2.Code, "#") + ",https://drive.google.com/open?id=BBB\n" +
+		"#999999,https://drive.google.com/open?id=CCC\n" +
+		",\n"
+	rows, err := ParseBatchLinkImportCSV(strings.NewReader(csv))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(rows) != 3 || !rows[0].ByCode || rows[0].PrintURL != rows[0].CutURL {
+		t.Fatalf("rows = %+v", rows)
+	}
+
+	prev, err := svc.PreviewBatchLinkImport(Actor{ID: 1, Role: models.RoleDesigner}, rows)
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if prev.Rows[0].BatchID != b1.ID || prev.Rows[1].BatchID != b2.ID || prev.Rows[1].BatchCode != b2.Code {
+		t.Fatalf("resolved = %+v / %+v", prev.Rows[0], prev.Rows[1])
+	}
+	if prev.Rows[2].Severity != BatchLinkRowError || prev.Rows[2].Code != BatchLinkIssueNotFound {
+		t.Errorf("unknown code row = %+v", prev.Rows[2])
+	}
+	if prev.CanCommit {
+		t.Fatal("a file with an unknown batch must not be committable")
+	}
+
+	// Without the bad line it goes through and both links carry the folder.
+	prev, err = svc.PreviewBatchLinkImport(Actor{ID: 1, Role: models.RoleDesigner}, rows[:2])
+	if err != nil || !prev.CanCommit {
+		t.Fatalf("clean preview: %v %+v", err, prev)
+	}
+	if _, err := svc.CommitBatchLinkImport(Actor{ID: 1, Role: models.RoleDesigner},
+		BatchLinkImportCommitInput{Rows: commitRowsFromPreview(t, prev)}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	var links []models.BatchLink
+	db.Where("batch_id = ?", b1.ID).Find(&links)
+	got := map[models.BatchLinkKind]string{}
+	for _, l := range links {
+		got[l.Kind] = l.URL
+	}
+	if got[models.BatchLinkPrint] != "https://drive.google.com/open?id=AAA" || got[models.BatchLinkCut] != "https://drive.google.com/open?id=AAA" {
+		t.Errorf("batch 1 links = %v", got)
+	}
+}
+
+// Separate Link in / Link cắt columns in the short file are honoured too.
+func TestParseBatchLinkImport_ShortFileSeparateLinks(t *testing.T) {
+	rows, err := ParseBatchLinkImportCSV(strings.NewReader("Số batch,Link in,Link cắt\n#101198,https://p,https://c\n"))
+	if err != nil || len(rows) != 1 || rows[0].PrintURL != "https://p" || rows[0].CutURL != "https://c" || !rows[0].ByCode {
+		t.Fatalf("rows = %+v, err %v", rows, err)
+	}
+}
+
+// The exact sheet the customer sent (production-101198_link-drive.xlsx): A1
+// "Số batch", B1 "Link Drive", a Drive "open?id=" link — as an .xlsx.
+func TestParseBatchLinkImport_CustomerShortXLSX(t *testing.T) {
+	f := excelize.NewFile()
+	_ = f.SetSheetRow("Sheet1", "A1", &[]interface{}{"Số batch", "Link Drive"})
+	_ = f.SetSheetRow("Sheet1", "A2", &[]interface{}{"#101198", "https://drive.google.com/open?id=1-sOyApeFqGJ_2-kv2UZoEgPannL12KlZ"})
+	buf, err := f.WriteToBuffer()
+	if err != nil {
+		t.Fatalf("build xlsx: %v", err)
+	}
+	rows, err := ParseBatchLinkImportXLSX(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(rows) != 1 || rows[0].BatchCode != "#101198" || !rows[0].ByCode ||
+		rows[0].PrintURL != "https://drive.google.com/open?id=1-sOyApeFqGJ_2-kv2UZoEgPannL12KlZ" || rows[0].CutURL != rows[0].PrintURL {
+		t.Fatalf("rows = %+v", rows)
+	}
+}

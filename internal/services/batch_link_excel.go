@@ -141,6 +141,11 @@ type BatchLinkImportRow struct {
 	BatchCode  string `json:"batch_code"`
 	PrintURL   string `json:"print_url"`
 	CutURL     string `json:"cut_url"`
+	// ByCode marks a line from the short file the floor keeps by hand — "Số
+	// batch | Link Drive" (customer, 2026-10-04): no template version, no Batch
+	// ID. The batch is resolved from its code, which is unique, and one Drive
+	// folder holding both files fills Link in AND Link cắt.
+	ByCode bool `json:"by_code,omitempty"`
 }
 
 // Header aliases, matched after normalizeTrackingHeader (NFC, lowercase,
@@ -155,6 +160,13 @@ var (
 	}
 	batchLinkCodeHeaderKeys = map[string]bool{
 		"mãbatch": true, "mabatch": true, "batchcode": true, "batch": true,
+		"sốbatch": true, "sobatch": true, "batchno": true, "mãsốbatch": true,
+	}
+	// One link for the whole production package (a Drive folder with the print
+	// and the cut file): fills both links of the batch.
+	batchLinkBothHeaderKeys = map[string]bool{
+		"linkdrive": true, "drive": true, "linkfile": true, "linkfilesx": true,
+		"linksx": true, "link": true, "linkfilesanxuat": true, "linksảnxuất": true, "linkfilesảnxuất": true,
 	}
 	batchLinkPrintHeaderKeys = map[string]bool{
 		"linkin": true, "printurl": true, "printlink": true, "print": true,
@@ -198,7 +210,7 @@ func batchLinkRowsFromRecords(records [][]string) ([]BatchLinkImportRow, error) 
 	if len(records) < 2 {
 		return nil, apperr.BadRequest("File phải có dòng tiêu đề và ít nhất một dòng dữ liệu")
 	}
-	verCol, idCol, codeCol, printCol, cutCol := -1, -1, -1, -1, -1
+	verCol, idCol, codeCol, printCol, cutCol, bothCol := -1, -1, -1, -1, -1, -1
 	for i, h := range records[0] {
 		key := normalizeTrackingHeader(h)
 		switch {
@@ -212,7 +224,14 @@ func batchLinkRowsFromRecords(records [][]string) ([]BatchLinkImportRow, error) 
 			printCol = i
 		case batchLinkCutHeaderKeys[key] && cutCol == -1:
 			cutCol = i
+		case batchLinkBothHeaderKeys[key] && bothCol == -1:
+			bothCol = i
 		}
+	}
+	// The short file: batch code + one Drive link (or separate in/cắt links), no
+	// version and no Batch ID column at all.
+	if verCol == -1 && idCol == -1 && codeCol != -1 && (bothCol != -1 || (printCol != -1 && cutCol != -1)) {
+		return batchLinkRowsByCode(records, codeCol, printCol, cutCol, bothCol)
 	}
 	var missing []string
 	for _, col := range []struct {
@@ -228,7 +247,8 @@ func batchLinkRowsFromRecords(records [][]string) ([]BatchLinkImportRow, error) 
 	}
 	if len(missing) > 0 {
 		return nil, apperr.BadRequest(
-			"File thiếu cột bắt buộc: " + strings.Join(missing, ", ") + " — tải lại file từ hệ thống để có đúng mẫu")
+			"File thiếu cột bắt buộc: " + strings.Join(missing, ", ") +
+				" — tải lại file từ hệ thống để có đúng mẫu, hoặc dùng file 2 cột \"Số batch | Link Drive\"")
 	}
 	cell := func(rec []string, col int) string {
 		if col < len(rec) {
@@ -251,6 +271,42 @@ func batchLinkRowsFromRecords(records [][]string) ([]BatchLinkImportRow, error) 
 			row.BatchID = uint(id)
 		}
 		rows = append(rows, row)
+	}
+	if len(rows) == 0 {
+		return nil, apperr.BadRequest("File không có dòng dữ liệu nào")
+	}
+	if len(rows) > MaxBatchLinkImportRows {
+		return nil, apperr.BadRequest(fmt.Sprintf("File quá lớn: tối đa %d dòng mỗi lần", MaxBatchLinkImportRows))
+	}
+	return rows, nil
+}
+
+// batchLinkRowsByCode reads the short file. A line's single Drive link goes to
+// both links; separate Link in / Link cắt columns win when filled.
+func batchLinkRowsByCode(records [][]string, codeCol, printCol, cutCol, bothCol int) ([]BatchLinkImportRow, error) {
+	cell := func(rec []string, col int) string {
+		if col >= 0 && col < len(rec) {
+			return strings.TrimSpace(rec[col])
+		}
+		return ""
+	}
+	rows := make([]BatchLinkImportRow, 0, len(records)-1)
+	for i, rec := range records[1:] {
+		code, both := cell(rec, codeCol), cell(rec, bothCol)
+		printURL, cutURL := cell(rec, printCol), cell(rec, cutCol)
+		if code == "" && both == "" && printURL == "" && cutURL == "" {
+			continue
+		}
+		if printURL == "" {
+			printURL = both
+		}
+		if cutURL == "" {
+			cutURL = both
+		}
+		rows = append(rows, BatchLinkImportRow{
+			Row: i + 1, Version: BatchLinkTemplateVersion, BatchCode: code,
+			PrintURL: printURL, CutURL: cutURL, ByCode: true,
+		})
 	}
 	if len(rows) == 0 {
 		return nil, apperr.BadRequest("File không có dòng dữ liệu nào")
@@ -310,6 +366,25 @@ func (s *BatchService) PreviewBatchLinkImport(actor Actor, rows []BatchLinkImpor
 	if len(rows) > MaxBatchLinkImportRows {
 		return nil, apperr.BadRequest(fmt.Sprintf("File quá lớn: tối đa %d dòng mỗi lần", MaxBatchLinkImportRows))
 	}
+	// Lines from the short file carry a batch code instead of an id: resolve
+	// them first, so every check below runs on an id exactly as for the template.
+	var codes []string
+	for _, r := range rows {
+		if r.ByCode && normalizeBatchCode(r.BatchCode) != "" {
+			codes = append(codes, normalizeBatchCode(r.BatchCode))
+		}
+	}
+	if len(codes) > 0 {
+		byCode, err := s.repo.Batch.IDsByCodes(codes)
+		if err != nil {
+			return nil, apperr.Internal("could not resolve batch codes").Wrap(err)
+		}
+		for i := range rows {
+			if rows[i].ByCode {
+				rows[i].BatchID = byCode[normalizeBatchCode(rows[i].BatchCode)]
+			}
+		}
+	}
 	ids := make([]uint, 0, len(rows))
 	seen := map[uint]int{}
 	for _, r := range rows {
@@ -341,6 +416,10 @@ func (s *BatchService) PreviewBatchLinkImport(actor Actor, rows []BatchLinkImpor
 		switch {
 		case r.Version != BatchLinkTemplateVersion:
 			fail(BatchLinkIssueBadTemplate, "Dòng không đúng mẫu hiện hành ("+BatchLinkTemplateVersion+") — tải lại file từ hệ thống")
+		case r.ByCode && out.BatchCode == "":
+			fail(BatchLinkIssueMissingCode, "Thiếu số batch")
+		case r.ByCode && r.BatchID == 0:
+			fail(BatchLinkIssueNotFound, "Không có batch nào mang mã "+out.BatchCode)
 		case r.BatchID == 0:
 			fail(BatchLinkIssueMissingBatchID, "Thiếu hoặc sai Batch ID — không tự đoán batch theo tên hay vị trí dòng")
 		case out.BatchCode == "":

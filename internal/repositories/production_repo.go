@@ -348,6 +348,26 @@ func (r *BatchRepository) LinkImportRefs(ids []uint) (map[uint]*models.Batch, er
 	return out, nil
 }
 
+// IDsByCodes maps batch codes ("#101198") to ids among live batches. Codes are
+// unique, so a code names at most one batch; an unknown code is simply absent.
+func (r *BatchRepository) IDsByCodes(codes []string) (map[string]uint, error) {
+	out := make(map[string]uint, len(codes))
+	if len(codes) == 0 {
+		return out, nil
+	}
+	var rows []struct {
+		ID   uint
+		Code string
+	}
+	if err := r.db.Model(&models.Batch{}).Select("id", "code").Where("code IN ?", codes).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		out[row.Code] = row.ID
+	}
+	return out, nil
+}
+
 // BatchLiveCounts tallies one batch's live parts for the link export/preview.
 type BatchLiveCounts struct {
 	BatchID  uint
