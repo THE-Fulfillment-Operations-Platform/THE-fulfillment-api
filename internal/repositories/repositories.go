@@ -69,6 +69,7 @@ type Repositories struct {
 	Note         *NoteRepository
 	Audit        *AuditRepository
 	Admin        *AdminRepository
+	Carrier      *CarrierRepository
 }
 
 // New builds the repository bundle from a GORM handle.
@@ -94,5 +95,6 @@ func New(db *gorm.DB) *Repositories {
 		Note:         &NoteRepository{db: db},
 		Audit:        &AuditRepository{db: db},
 		Admin:        &AdminRepository{db: db},
+		Carrier:      &CarrierRepository{db: db},
 	}
 }

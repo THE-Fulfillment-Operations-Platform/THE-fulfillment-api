@@ -30,6 +30,10 @@ var transactionalTables = []string{
 	"handoffs",
 	"qc_records",
 	"status_histories",
+	// Carrier shipments point at orders by id. RESTART IDENTITY hands those ids
+	// out again, so a surviving row would claim the NEW order with the same id —
+	// and its one-live-shipment index would refuse that order's real shipment.
+	"carrier_shipments",
 }
 
 // ResetTransactional hard-truncates all order/production tables and restarts

@@ -1,6 +1,8 @@
 package services
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -38,17 +40,36 @@ type ShippedOrder struct {
 	OrderID      uint   `json:"order_id"`
 	InternalCode string `json:"internal_code"`
 	HandoffCode  string `json:"handoff_code"`
+	// THE is the shipment created on THE for this order (nil when the
+	// integration is off or the send was a manual handoff).
+	THE *ShipmentOutcome `json:"the,omitempty"`
 }
 
 type SkippedShipOrder struct {
 	OrderID      uint   `json:"order_id"`
 	InternalCode string `json:"internal_code"`
 	Reason       string `json:"reason"`
+	// Code tells the screen which next step fits (ShipErr*): e.g. ADDRESS →
+	// offer "send without the address check".
+	Code string `json:"code,omitempty"`
 }
 
 // MaxShipBatch caps one bulk send. Large enough for a full day's output, small
 // enough that the transaction and the audit trail stay comprehensible.
 const MaxShipBatch = 200
+
+// MaxTHEShipBatch caps one send that creates THE shipments: each order costs
+// two or three THE calls (up to ~80 s for a slow delivery), so the screen sends
+// small chunks and shows progress instead of one request that runs for minutes.
+const MaxTHEShipBatch = 10
+
+// ShipSendOptions: ShipOptions (THE choices) plus ManualHandoff — record the
+// handoff WITHOUT creating a THE shipment, for orders THE cannot take through
+// the API (a country/service it refuses) while the integration is on.
+type ShipSendOptions struct {
+	ShipOptions
+	ManualHandoff bool `json:"manual_handoff"`
+}
 
 // ShipOrdersToCarrier hands finished orders to the carrier.
 //
@@ -56,6 +77,14 @@ const MaxShipBatch = 200
 // item, and every live item has passed QC. Anything else is skipped with a
 // reason rather than silently dropped.
 func (s *PackingService) ShipOrdersToCarrier(actor Actor, orderIDs []uint) (*ShipToCarrierResult, error) {
+	return s.ShipOrdersToCarrierWith(context.Background(), actor, orderIDs, ShipSendOptions{})
+}
+
+// ShipOrdersToCarrierWith is ShipOrdersToCarrier with the operator's choices.
+// When the THE integration is on, each order first gets a paid THE shipment
+// (CarrierService.ShipOrderOnTHE) and only then the handoff is recorded — an
+// order THE refused stays in the queue with the reason.
+func (s *PackingService) ShipOrdersToCarrierWith(ctx context.Context, actor Actor, orderIDs []uint, opts ShipSendOptions) (*ShipToCarrierResult, error) {
 	if !canShipToCarrier(actor) {
 		return nil, apperr.Forbidden("Bạn không có quyền gửi hàng cho THE")
 	}
@@ -65,6 +94,13 @@ func (s *PackingService) ShipOrdersToCarrier(actor Actor, orderIDs []uint) (*Shi
 	}
 	if len(orderIDs) > MaxShipBatch {
 		return nil, apperr.BadRequest(fmt.Sprintf("Chọn tối đa %d đơn mỗi lần", MaxShipBatch))
+	}
+	cfg, cli, err := s.theFor(opts)
+	if err != nil {
+		return nil, err
+	}
+	if cli != nil && len(orderIDs) > MaxTHEShipBatch {
+		return nil, apperr.BadRequest(fmt.Sprintf("Khi tạo đơn THE, gửi tối đa %d đơn mỗi lượt", MaxTHEShipBatch))
 	}
 
 	out := &ShipToCarrierResult{Shipped: []ShippedOrder{}, Skipped: []SkippedShipOrder{}}
@@ -84,15 +120,36 @@ func (s *PackingService) ShipOrdersToCarrier(actor Actor, orderIDs []uint) (*Shi
 			continue
 		}
 
+		var outcome *ShipmentOutcome
+		if cli != nil {
+			outcome, err = s.the.ShipOrderOnTHE(ctx, actor, cfg, cli, order, opts.ShipOptions)
+			if err != nil {
+				out.Skipped = append(out.Skipped, skippedFor(order, err))
+				continue
+			}
+		}
 		handoff, err := s.shipOne(actor, order)
 		if err != nil {
+			reason := err.Error()
+			if outcome != nil {
+				// Paid on THE, handoff not written: resending reuses the paid
+				// shipment and only writes the handoff.
+				reason = "Đã tạo đơn THE " + outcome.TrackingCode + " nhưng chưa ghi được bàn giao — bấm gửi lại (không tạo đơn THE mới)"
+			}
 			out.Skipped = append(out.Skipped, SkippedShipOrder{
-				OrderID: id, InternalCode: order.InternalCode, Reason: err.Error(),
+				OrderID: id, InternalCode: order.InternalCode, Reason: reason,
 			})
 			continue
 		}
+		if outcome != nil {
+			s.the.FollowUp(ctx, cli, order.ID, outcome)
+		}
+		if opts.ManualHandoff && s.the.Enabled() {
+			s.audit.Log(actor, "ORDER_SHIP_MANUAL", "order", &order.ID,
+				"Đơn "+order.InternalCode+" ghi nhận bàn giao THE thủ công, không tạo đơn THE qua API", nil)
+		}
 		out.Shipped = append(out.Shipped, ShippedOrder{
-			OrderID: id, InternalCode: order.InternalCode, HandoffCode: handoff.Code,
+			OrderID: id, InternalCode: order.InternalCode, HandoffCode: handoff.Code, THE: outcome,
 		})
 		pushed = append(pushed, order)
 	}
@@ -117,6 +174,9 @@ type ScannedShip struct {
 	StoreOrderID string `json:"store_order_id"`
 	SellerName   string `json:"seller_name,omitempty"`
 	HandoffCode  string `json:"handoff_code"`
+	// THE is the shipment the scan created on THE (nil when the integration is
+	// off).
+	THE *ShipmentOutcome `json:"the,omitempty"`
 }
 
 // ShipScannedOrder ships exactly one order, identified by whatever the ship
@@ -124,6 +184,12 @@ type ScannedShip struct {
 // bulk action. This turns "tick boxes, press send" into "scan the parcel" — the
 // scan itself is the confirmation.
 func (s *PackingService) ShipScannedOrder(actor Actor, code string) (*ScannedShip, error) {
+	return s.ShipScannedOrderWith(context.Background(), actor, code, ShipSendOptions{})
+}
+
+// ShipScannedOrderWith is ShipScannedOrder with the operator's choices; with
+// the THE integration on, the scan creates the paid THE shipment first.
+func (s *PackingService) ShipScannedOrderWith(ctx context.Context, actor Actor, code string, opts ShipSendOptions) (*ScannedShip, error) {
 	if !canShipToCarrier(actor) {
 		return nil, apperr.Forbidden("Bạn không có quyền gửi hàng cho THE")
 	}
@@ -141,10 +207,30 @@ func (s *PackingService) ShipScannedOrder(actor Actor, code string) (*ScannedShi
 		// order's state that refuses the scan.
 		return nil, apperr.Conflict(reason)
 	}
+	cfg, cli, err := s.theFor(opts)
+	if err != nil {
+		return nil, err
+	}
+	var outcome *ShipmentOutcome
+	if cli != nil {
+		if outcome, err = s.the.ShipOrderOnTHE(ctx, actor, cfg, cli, order, opts.ShipOptions); err != nil {
+			var se *ShipError
+			if errors.As(err, &se) {
+				return nil, apperr.Conflict(se.Message)
+			}
+			return nil, err
+		}
+	}
 
 	handoff, err := s.shipOne(actor, order)
 	if err != nil {
+		if outcome != nil {
+			return nil, apperr.Internal("Đã tạo đơn THE " + outcome.TrackingCode + " nhưng chưa ghi được bàn giao — quét lại (không tạo đơn THE mới)").Wrap(err)
+		}
 		return nil, err
+	}
+	if outcome != nil {
+		s.the.FollowUp(ctx, cli, order.ID, outcome)
 	}
 	s.tracking.RegisterOrderAsync(order)
 	return &ScannedShip{
@@ -153,7 +239,29 @@ func (s *PackingService) ShipScannedOrder(actor Actor, code string) (*ScannedShi
 		StoreOrderID: order.StoreOrderID,
 		SellerName:   order.Seller.Name,
 		HandoffCode:  handoff.Code,
+		THE:          outcome,
 	}, nil
+}
+
+// theFor resolves the THE integration for one send: (nil, nil, nil) when it is
+// off or the operator chose a manual handoff.
+func (s *PackingService) theFor(opts ShipSendOptions) (*models.CarrierConfig, theAPI, error) {
+	if opts.ManualHandoff || s.the == nil {
+		return nil, nil, nil
+	}
+	return s.the.activeTHE()
+}
+
+// skippedFor turns a THE refusal into a skipped row with its next-step code.
+func skippedFor(o *models.Order, err error) SkippedShipOrder {
+	row := SkippedShipOrder{OrderID: o.ID, InternalCode: o.InternalCode, Reason: err.Error()}
+	var se *ShipError
+	if errors.As(err, &se) {
+		row.Reason, row.Code = se.Message, se.Code
+	} else if ae, ok := apperr.As(err); ok {
+		row.Reason = ae.Message
+	}
+	return row
 }
 
 // orderByScanCode resolves what the scanner read into an order. The QR on the

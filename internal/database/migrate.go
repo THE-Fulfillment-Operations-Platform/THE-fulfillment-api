@@ -47,6 +47,9 @@ func AutoMigrate(db *gorm.DB) error {
 		&models.Handoff{},
 		&models.Note{},
 		&models.AuditLog{},
+		// carrier integration (THE)
+		&models.CarrierConfig{},
+		&models.CarrierShipment{},
 	); err != nil {
 		return fmt.Errorf("database: auto-migrate: %w", err)
 	}
@@ -294,6 +297,10 @@ func ensurePerformanceIndexes(db *gorm.DB) error {
 		// race. Partial on live API orders — file imports leave api_ref NULL, and a
 		// deleted order frees its id.
 		`CREATE UNIQUE INDEX IF NOT EXISTS uniq_orders_seller_api_ref ON orders (seller_id, api_ref) WHERE api_ref IS NOT NULL AND deleted_at IS NULL`,
+		// Carrier shipments cost real money: at most ONE live shipment per order.
+		// The service claims the row before calling THE; when two clicks / two
+		// scans race, the second insert fails here instead of paying twice.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uniq_carrier_shipments_live_order ON carrier_shipments (order_id) WHERE status NOT IN ('CANCELLED', 'FAILED') AND deleted_at IS NULL`,
 	}
 	for _, stmt := range stmts {
 		if err := db.Exec(stmt).Error; err != nil {

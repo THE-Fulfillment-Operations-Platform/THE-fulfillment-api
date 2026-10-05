@@ -25,6 +25,7 @@ import (
 	"the-fulfillment/backend/internal/maintenance"
 	"the-fulfillment/backend/internal/repositories"
 	"the-fulfillment/backend/internal/routes"
+	"the-fulfillment/backend/internal/secretbox"
 	"the-fulfillment/backend/internal/seed"
 	"the-fulfillment/backend/internal/services"
 	"the-fulfillment/backend/internal/shipping"
@@ -92,7 +93,15 @@ func main() {
 		Secret: thumbKey.Sum(nil),
 	}
 
-	svc := services.New(repo, jwtManager, carrier, trackOpts, thumbOpts, cfg.AppBaseURL)
+	// THE integration: the API token is stored sealed under a key derived from
+	// the server secret (rotating JWT_SECRET means re-entering the token in
+	// Settings, by design). Off until an owner turns it on.
+	tokenBox, err := secretbox.New(cfg.JWTSecret, "carrier-token")
+	if err != nil {
+		log.Fatalf("secretbox: %v", err)
+	}
+	svc := services.New(repo, jwtManager, carrier, trackOpts, thumbOpts, cfg.AppBaseURL,
+		services.CarrierOptions{Box: tokenBox, NewClient: services.DefaultTHEClient})
 	h := handlers.New(svc)
 	router := routes.New(cfg, h, jwtManager)
 
@@ -117,6 +126,10 @@ func main() {
 	// Shipment tracking sync. Self-disabling when no provider is configured, so
 	// there is no second flag to keep in step with the client above.
 	maintenance.NewTrackingScheduler(svc.TrackingSync, cfg.Track24hSyncInterval, cfg.Track24hBatchSize).Start(purgeCtx)
+
+	// THE last-mile numbers (USPS…) arrive after the label: ask THE every 10
+	// minutes and put them on the orders. Idle while the integration is off.
+	svc.Carrier.StartLastMilePoll(purgeCtx, 10*time.Minute)
 
 	// Evict mockup thumbnails nobody has looked at in a month, so the cache
 	// tracks what is actually in production rather than growing forever.

@@ -239,6 +239,22 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		// Pulling from the provider costs quota and rate limit, so it stays with
 		// whoever owns tracking.
 		orders.POST("/:id/tracking/sync", trackingManage, h.SyncOrderTracking)
+		// THE integration around one order: what a send would do (preflight, no
+		// money), the shipments it got, its label, and cancelling one (owner /
+		// admin — it refunds or voids a paid label).
+		orders.POST("/the/preflight", shipManage, h.PreflightTHE)
+		orders.GET("/:id/the/shipments", orderRead, h.OrderTHEShipments)
+		orders.GET("/:id/the/label", orderRead, h.OrderTHELabel)
+		orders.POST("/:id/the/cancel", adminOwner, h.CancelOrderTHEShipment)
+	}
+
+	// Connection to THE's customer API (token, service, fallback phone). The
+	// token is the factory's wallet: owner / admin only.
+	carrier := authd.Group("/carrier/the", adminOwner)
+	{
+		carrier.GET("/config", h.GetCarrierConfig)
+		carrier.PUT("/config", h.UpdateCarrierConfig)
+		carrier.POST("/check", h.CheckCarrierConnection)
 	}
 
 	// Run one provider pass by hand instead of waiting for the scheduler.

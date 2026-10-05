@@ -67,11 +67,12 @@ func (h *Handlers) ListHandoffs(c *gin.Context) {
 func (h *Handlers) ShipOrdersToCarrier(c *gin.Context) {
 	var in struct {
 		OrderIDs []uint `json:"order_ids" binding:"required,min=1"`
+		services.ShipSendOptions
 	}
 	if !bindJSON(c, &in) {
 		return
 	}
-	res, err := h.svc.Packing.ShipOrdersToCarrier(actor(c), in.OrderIDs)
+	res, err := h.svc.Packing.ShipOrdersToCarrierWith(detached(c), actor(c), in.OrderIDs, in.ShipSendOptions)
 	if err != nil {
 		response.Fail(c, err)
 		return
@@ -85,11 +86,12 @@ func (h *Handlers) ShipOrdersToCarrier(c *gin.Context) {
 func (h *Handlers) ShipScannedOrder(c *gin.Context) {
 	var in struct {
 		Code string `json:"code" binding:"required"`
+		services.ShipSendOptions
 	}
 	if !bindJSON(c, &in) {
 		return
 	}
-	res, err := h.svc.Packing.ShipScannedOrder(actor(c), in.Code)
+	res, err := h.svc.Packing.ShipScannedOrderWith(detached(c), actor(c), in.Code, in.ShipSendOptions)
 	if err != nil {
 		response.Fail(c, err)
 		return

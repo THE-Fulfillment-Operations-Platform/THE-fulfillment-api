@@ -24,6 +24,9 @@ type PackingService struct {
 	// tracking registers a dispatched parcel with the 24hTrack provider the moment
 	// the shipping desk records its tracking number.
 	tracking *TrackingSyncService
+	// the creates the paid shipment on THE when the integration is on (nil in
+	// tests that only exercise the handoff).
+	the *CarrierService
 }
 
 // getOrCreateOpenPackage returns the order's open package, creating one (with an
