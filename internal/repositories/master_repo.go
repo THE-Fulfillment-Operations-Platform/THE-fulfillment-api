@@ -787,6 +787,70 @@ func (r *SKURepository) PatchMany(patches []SKUPatch) error {
 	return nil
 }
 
+// SKUShipping is the complete shipping declaration the shipping import writes
+// onto one SKU: a nil number / "" HS code clears that field, and the SKU then
+// inherits it from its parent (models.EffectiveShipping).
+type SKUShipping struct {
+	ID            uint
+	WeightG       *float64
+	LengthCM      *float64
+	WidthCM       *float64
+	HeightCM      *float64
+	DeclaredValue *float64
+	HSCode        string
+}
+
+// AllForShipping lists every live SKU (no materials) in code order — the rows
+// of the shipping-declaration worksheet.
+func (r *SKURepository) AllForShipping() ([]models.SKU, error) {
+	var rows []models.SKU
+	err := r.db.Order("code").Find(&rows).Error
+	return rows, err
+}
+
+// SetShippingMany writes the shipping columns of many SKUs, one UPDATE per
+// chunk (a CASE per column, like PatchMany), all inside one transaction: the
+// import is all-or-nothing.
+func (r *SKURepository) SetShippingMany(rows []SKUShipping) error {
+	num := func(v *float64) any {
+		if v == nil {
+			return nil
+		}
+		return *v
+	}
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		for start := 0; start < len(rows); start += idChunk {
+			end := start + idChunk
+			if end > len(rows) {
+				end = len(rows)
+			}
+			chunk := rows[start:end]
+			ids := make([]uint, 0, len(chunk))
+			cols := map[string][]any{}
+			for _, p := range chunk {
+				ids = append(ids, p.ID)
+				cols["ship_weight_g"] = append(cols["ship_weight_g"], p.ID, num(p.WeightG))
+				cols["ship_length_cm"] = append(cols["ship_length_cm"], p.ID, num(p.LengthCM))
+				cols["ship_width_cm"] = append(cols["ship_width_cm"], p.ID, num(p.WidthCM))
+				cols["ship_height_cm"] = append(cols["ship_height_cm"], p.ID, num(p.HeightCM))
+				cols["declared_value"] = append(cols["declared_value"], p.ID, num(p.DeclaredValue))
+				cols["hs_code"] = append(cols["hs_code"], p.ID, p.HSCode)
+			}
+			set := make(map[string]any, len(cols))
+			for col, args := range cols {
+				// ELSE col anchors the CASE to the column's type, so a NULL
+				// parameter (= clear) is typed like the column it lands in.
+				sql := "CASE id" + strings.Repeat(" WHEN ? THEN ?", len(args)/2) + " ELSE " + col + " END"
+				set[col] = gorm.Expr(sql, args...)
+			}
+			if err := tx.Model(&models.SKU{}).Where("id IN ?", ids).Updates(set).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // PairQuota is a declared production quota for one (SKU, material) pair.
 type PairQuota struct {
 	SKUID      uint

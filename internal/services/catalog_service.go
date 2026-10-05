@@ -266,6 +266,8 @@ type SKUInput struct {
 	// neither; omitted/≤0 = not declared.
 	LengthMM *float64 `json:"length_mm"`
 	WidthMM  *float64 `json:"width_mm"`
+	// Shipping declaration (weight, box size, value, HS code) — all optional.
+	SKUShippingInput
 	// Materials is optional: a SKU may be created "unmapped" and have its material(s)
 	// assigned later from the Master Data → Mapping screen. On update, an empty/omitted
 	// list leaves the existing material set unchanged (see UpdateSKU).
@@ -290,6 +292,8 @@ type SKUUpdateInput struct {
 	LengthMM    *float64           `json:"length_mm"`
 	WidthMM     *float64           `json:"width_mm"`
 	Materials   []SKUMaterialInput `json:"materials" binding:"omitempty,dive"`
+	// Shipping declaration: omitted = leave as is (see SKUShippingInput).
+	SKUShippingInput
 }
 
 // checkSKUParent enforces the two-level parent → child tree for SKU `selfID`
@@ -385,6 +389,9 @@ func (s *CatalogService) CreateSKU(actor Actor, in SKUInput) (*models.SKU, error
 		WidthMM:     width,
 		Materials:   mats,
 	}
+	if err := applySKUShipping(sku, in.SKUShippingInput); err != nil {
+		return nil, err
+	}
 	if err := s.repo.SKU.Create(sku); err != nil {
 		return nil, apperr.Internal("could not create SKU").Wrap(err)
 	}
@@ -445,6 +452,9 @@ func (s *CatalogService) UpdateSKU(actor Actor, id uint, in SKUUpdateInput) (*mo
 		width = in.WidthMM
 	}
 	if sku.LengthMM, sku.WidthMM, err = normalizeSize(length, width); err != nil {
+		return nil, err
+	}
+	if err := applySKUShipping(sku, in.SKUShippingInput); err != nil {
 		return nil, err
 	}
 	if len(in.Materials) > 0 {

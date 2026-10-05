@@ -191,6 +191,11 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		skus.DELETE("/:id", adminOwner, masterManage, h.DeleteSKU)
 		skus.POST("/bulk-delete", adminOwner, masterManage, h.BulkDeleteSKUs)
 		skus.POST("/bulk-active", masterManage, h.BulkSetSKUsActive)
+		// Shipping declaration (weight, box size, value, HS code) in bulk: export
+		// every SKU, fill, preview, commit the same file.
+		skus.GET("/shipping/export.xlsx", masterManage, h.DownloadSKUShippingExport)
+		skus.POST("/shipping/import/preview", masterManage, h.PreviewSKUShippingImport)
+		skus.POST("/shipping/import/commit", masterManage, h.CommitSKUShippingImport)
 	}
 
 	// Orders. The order list/detail feed several screens (orders, CS lookup,

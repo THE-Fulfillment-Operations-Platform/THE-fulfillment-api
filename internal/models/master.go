@@ -211,12 +211,105 @@ type SKU struct {
 	ParentID *uint `json:"parent_id" gorm:"index"`
 	// LengthMM × WidthMM is the product's "D x R" (dài × rộng), in millimetres.
 	// nil = not declared yet.
-	LengthMM  *float64      `json:"length_mm"`
-	WidthMM   *float64      `json:"width_mm"`
-	Materials []SKUMaterial `json:"materials,omitempty" gorm:"foreignKey:SKUID"`
+	LengthMM *float64 `json:"length_mm"`
+	WidthMM  *float64 `json:"width_mm"`
+	// Shipping declaration for ONE unit of this SKU, packed — what the carrier
+	// (THE) needs to create a shipment: weight in grams, box size in cm,
+	// customs value in USD and the HS code. nil / "" = not declared on this SKU;
+	// a child SKU then takes the field from its parent (EffectiveShipping), so
+	// the factory declares a family once and only overrides what differs.
+	// Nullable / defaulted columns, so AutoMigrate only adds them.
+	ShipWeightG   *float64      `json:"ship_weight_g"`
+	ShipLengthCM  *float64      `json:"ship_length_cm"`
+	ShipWidthCM   *float64      `json:"ship_width_cm"`
+	ShipHeightCM  *float64      `json:"ship_height_cm"`
+	DeclaredValue *float64      `json:"declared_value"`
+	HSCode        string        `json:"hs_code" gorm:"size:20;not null;default:''"`
+	Materials     []SKUMaterial `json:"materials,omitempty" gorm:"foreignKey:SKUID"`
 }
 
 func (SKU) TableName() string { return "skus" }
+
+// ShippingSpec is the shipping declaration that actually applies to a SKU once
+// the parent fallback is resolved. Each field is resolved on its own: a child
+// that only declares its weight still inherits the parent's box size, value
+// and HS code.
+type ShippingSpec struct {
+	WeightG       *float64 `json:"ship_weight_g"`
+	LengthCM      *float64 `json:"ship_length_cm"`
+	WidthCM       *float64 `json:"ship_width_cm"`
+	HeightCM      *float64 `json:"ship_height_cm"`
+	DeclaredValue *float64 `json:"declared_value"`
+	HSCode        string   `json:"hs_code"`
+}
+
+// EffectiveShipping resolves the shipping declaration of sku, falling back
+// field by field to parent (nil when the SKU is top level).
+func EffectiveShipping(sku, parent *SKU) ShippingSpec {
+	pick := func(own, inherited *float64) *float64 {
+		if own != nil {
+			return own
+		}
+		return inherited
+	}
+	var p SKU
+	if parent != nil {
+		p = *parent
+	}
+	spec := ShippingSpec{
+		WeightG:       pick(sku.ShipWeightG, p.ShipWeightG),
+		LengthCM:      pick(sku.ShipLengthCM, p.ShipLengthCM),
+		WidthCM:       pick(sku.ShipWidthCM, p.ShipWidthCM),
+		HeightCM:      pick(sku.ShipHeightCM, p.ShipHeightCM),
+		DeclaredValue: pick(sku.DeclaredValue, p.DeclaredValue),
+		HSCode:        sku.HSCode,
+	}
+	if spec.HSCode == "" {
+		spec.HSCode = p.HSCode
+	}
+	return spec
+}
+
+// MissingPhysical lists what the FACTORY still has to declare for a SKU: the
+// packed weight and the box size — things only the workshop knows. Customs data
+// (HS code, declared value) belong to the carrier side: it sets defaults in the
+// THE connection, and a SKU only overrides them when it must differ.
+func (s ShippingSpec) MissingPhysical() []string {
+	var out []string
+	if s.WeightG == nil {
+		out = append(out, "cân nặng")
+	}
+	if s.LengthCM == nil || s.WidthCM == nil || s.HeightCM == nil {
+		out = append(out, "kích thước hộp")
+	}
+	return out
+}
+
+// WithDefaults fills an undeclared HS code / declared value from the carrier
+// connection's defaults ("" / 0 = no default).
+func (s ShippingSpec) WithDefaults(hsCode string, value float64) ShippingSpec {
+	if s.HSCode == "" {
+		s.HSCode = hsCode
+	}
+	if s.DeclaredValue == nil && value > 0 {
+		v := value
+		s.DeclaredValue = &v
+	}
+	return s
+}
+
+// Missing lists, in the operator's words, everything still undeclared for a
+// carrier shipment (apply WithDefaults first). Empty = complete.
+func (s ShippingSpec) Missing() []string {
+	out := s.MissingPhysical()
+	if s.DeclaredValue == nil {
+		out = append(out, "giá trị khai báo")
+	}
+	if s.HSCode == "" {
+		out = append(out, "mã HS")
+	}
+	return out
+}
 
 // SKUMaterial links a SKU to the materials it is built from. The unique index on
 // (sku_id, material_id) keeps the material set clean per SKU.
