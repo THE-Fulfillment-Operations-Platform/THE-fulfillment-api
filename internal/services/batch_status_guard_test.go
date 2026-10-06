@@ -67,16 +67,15 @@ func TestUpdateStatus_RequiresProductionLinks(t *testing.T) {
 	svc := newBatchService(db)
 	batch := seedGuardBatch(t, db, "#GUARD-1")
 
-	// No links at all — both fabrication stages are refused, and the message names
-	// what is missing.
-	for _, status := range []models.InternalStatus{models.StatusPrinted, models.StatusCut} {
-		_, err := svc.UpdateStatus(Actor{ID: 1}, batch.ID, UpdateStatusInput{Status: string(status)})
-		if err == nil {
-			t.Fatalf("%s must be refused while the batch has no production links", status)
-		}
-		if !strings.Contains(err.Error(), "link in") || !strings.Contains(err.Error(), "link cắt") {
-			t.Errorf("error for %s should name both missing links, got: %v", status, err)
-		}
+	// No links at all — printing is refused, and the message names what is
+	// missing. (Cutting a PENDING batch is refused earlier still: it must be
+	// printed first — TestUpdateStatus_CutNeedsPrint.)
+	_, err0 := svc.UpdateStatus(Actor{ID: 1}, batch.ID, UpdateStatusInput{Status: string(models.StatusPrinted)})
+	if err0 == nil {
+		t.Fatal("PRINTED must be refused while the batch has no production links")
+	}
+	if !strings.Contains(err0.Error(), "link in") || !strings.Contains(err0.Error(), "link cắt") {
+		t.Errorf("error for PRINTED should name both missing links, got: %v", err0)
 	}
 
 	// Print link only is still not enough — the customer requires both files.
@@ -109,5 +108,37 @@ func TestUpdateStatus_PendingNeedsNoLinks(t *testing.T) {
 
 	if _, err := svc.UpdateStatus(Actor{ID: 1}, batch.ID, UpdateStatusInput{Status: string(models.StatusPending)}); err != nil {
 		t.Fatalf("PENDING must not require links: %v", err)
+	}
+}
+
+// TestUpdateStatus_CutNeedsPrint: "Đã cắt" only after "Đã in" — for every role,
+// links or not (the factory, 2026-10-06: "in xong mới ấn được cắt, tránh vượt
+// rào"). Printed → cut goes through; re-sending CUT is harmless.
+func TestUpdateStatus_CutNeedsPrint(t *testing.T) {
+	db := newSplitDB(t)
+	svc := newBatchService(db)
+	batch := seedGuardBatch(t, db, "#GUARD-3")
+	addGuardLink(t, db, batch.ID, models.BatchLinkPrint)
+	addGuardLink(t, db, batch.ID, models.BatchLinkCut)
+
+	for _, who := range []Actor{{ID: 1, Role: models.RoleProduction}, {ID: 2, Role: models.RoleOwner}} {
+		_, err := svc.UpdateStatus(who, batch.ID, UpdateStatusInput{Status: string(models.StatusCut)})
+		if err == nil || !strings.Contains(err.Error(), "chưa in") {
+			t.Fatalf("%s: PENDING → CUT must be refused (print first), got %v", who.Role, err)
+		}
+	}
+	if b, _ := svc.Get(batch.ID); b.Status != models.StatusPending {
+		t.Fatalf("a refused skip must not move the batch, status = %s", b.Status)
+	}
+
+	if _, err := svc.UpdateStatus(Actor{ID: 1, Role: models.RoleProduction}, batch.ID, UpdateStatusInput{Status: string(models.StatusPrinted)}); err != nil {
+		t.Fatalf("PENDING → PRINTED: %v", err)
+	}
+	updated, err := svc.UpdateStatus(Actor{ID: 1, Role: models.RoleProduction}, batch.ID, UpdateStatusInput{Status: string(models.StatusCut)})
+	if err != nil || updated.Status != models.StatusCut {
+		t.Fatalf("PRINTED → CUT must go through: %v", err)
+	}
+	if _, err := svc.UpdateStatus(Actor{ID: 1, Role: models.RoleProduction}, batch.ID, UpdateStatusInput{Status: string(models.StatusCut)}); err != nil {
+		t.Fatalf("re-sending CUT must stay harmless: %v", err)
 	}
 }

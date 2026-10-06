@@ -413,6 +413,9 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 	if newStatus.Rank() < batch.Status.Rank() && actor.Role != models.RoleOwner {
 		return nil, apperr.Unprocessable("Sản xuất chỉ tiến, không lùi: batch đang ở '" + string(batch.Status) + "', không thể hạ về '" + string(newStatus) + "'. (Chỉ OWNER được sửa khi bấm nhầm.)")
 	}
+	if err := cutNeedsPrint(batch.Code, batch.Status, newStatus); err != nil {
+		return nil, err
+	}
 	// Entering fabrication requires the batch's shared production files. The print
 	// and cut files are ganged once per batch, so nobody can have printed or cut
 	// without them on record — and marking a stage done without them would strand
@@ -467,6 +470,10 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 		}
 		if newStatus.Rank() < fresh.Status.Rank() && actor.Role != models.RoleOwner {
 			return apperr.Unprocessable("Sản xuất chỉ tiến, không lùi: batch đang ở '" + string(fresh.Status) + "', không thể hạ về '" + string(newStatus) + "'. (Chỉ OWNER được sửa khi bấm nhầm.)")
+		}
+		// Same gate on the locked row: a concurrent change may have moved it.
+		if err := cutNeedsPrint(fresh.Code, fresh.Status, newStatus); err != nil {
+			return err
 		}
 		batch.Status = fresh.Status
 		// Cancelled parts are filtered out by the query itself — the cascade never
@@ -529,6 +536,21 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 	s.audit.Log(actor, "BATCH_STATUS_UPDATE", "batch", &batch.ID,
 		fmt.Sprintf("Batch %s -> %s", batch.Code, newStatus), nil)
 	return s.Get(batch.ID)
+}
+
+// cutNeedsPrint: "Đã cắt" only after "Đã in". A sheet is printed, then cut —
+// marking a never-printed batch cut is how a step gets skipped unnoticed (the
+// factory asked for the lock on 2026-10-06: "khoá giúp A là in xong mới ấn được
+// cắt, tránh vượt rào"). Applies to every role; an owner fixing a mistake simply
+// clicks "Đã in" first. Moving back (owner) and re-sending CUT are untouched.
+func cutNeedsPrint(code string, current, next models.InternalStatus) error {
+	if next != models.StatusCut || current == models.StatusPrinted || current == models.StatusCut {
+		return nil
+	}
+	if current.Rank() > models.StatusCut.Rank() {
+		return nil // past CUT (QC'd): the regression rules above decide
+	}
+	return apperr.Unprocessable("Batch " + code + " chưa in — bấm \"Đã in\" trước, in xong mới được chuyển sang \"Đã cắt\".")
 }
 
 // Delete removes a batch that production has not touched yet, releasing its
@@ -770,57 +792,120 @@ func skuHasMaterial(sku *models.SKU, materialID uint) bool {
 
 // ---------- Legacy production-template export ----------
 
-// productionTemplateHeaders is the per-batch production sheet ("Tải bảng sản
-// xuất"). The customer cut it down on 2026-10-04 to what the floor actually
-// reads — "chủ yếu là: tên batch / mã nội bộ / sku / sl / link design" — from the
-// 17-column legacy template. Print/cut links are left out on purpose: they are
-// the same for the whole batch and live on the batch itself.
+// productionTemplateHeaders is the exact, ordered legacy production-template
+// header row. The workshop's existing spreadsheet relies on this precise column
+// order and spelling — note "Mã nội bộ" intentionally appears twice (positions 1
+// and 13) for legacy compatibility. Do not reorder or rename.
 var productionTemplateHeaders = []string{
-	"Số batch",
 	"Mã nội bộ",
+	"SỐ Batch",
+	"Ngày",
+	"Order ID",
 	"SKU",
+	"Loại VL",
+	"Mô tả Sp để QC (Hiện lên phần QC)",
+	"Mã ảnh (copy bên TĐN Ctr + Ship + V...)",
+	"Số thứ tự",
 	"Số lượng",
-	"Link design",
+	"Link ảnh",
+	"Mock up",
+	"Mã nội bộ",
+	"Tên khách",
+	"Tên File",
+	"Link in",
+	"Link cắt",
 }
 
-// productionBackDesignHeader is appended only when an item in the batch is
-// two-sided, so a one-sided batch keeps exactly the five columns asked for.
+// productionBackDesignHeader is an 18th column (R), present only when the
+// batch holds a two-sided product — AFTER the 17 legacy columns, so a sheet
+// that reads columns by position keeps working.
+//
+// History: on 2026-10-04 the export was cut down to five columns after the
+// factory wrote "ko cần hết. Chủ yếu là: tên batch/mã nội bộ/sku/sl/link
+// design". "Chủ yếu là" meant "mostly these", not "only these": two days later
+// the factory reported the sheet "thiếu mất mấy trường dữ liệu". The 17 columns
+// are back, unchanged; do not trim them on a "chủ yếu" again.
 const productionBackDesignHeader = "Link design mặt sau"
 
-// ProductionTemplateGrid builds the production sheet — the header row followed
-// by one row per live batch item — for a fully-loaded batch (Items.OrderItem
-// preloaded). Pure, so the columns can be unit-tested without a database.
+// seqStr renders a production sequence, leaving an unassigned (0) sequence blank
+// so the legacy sheet does not show a spurious ordering position.
+func seqStr(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return itoa(n)
+}
+
+// ProductionTemplateGrid builds the legacy production-template grid — the header
+// row followed by one row per batch item — for a fully-loaded batch (with
+// Items.OrderItem.Order and Items.Material preloaded). It is a pure function so
+// the column order and per-field mapping can be unit-tested without a database.
 func ProductionTemplateGrid(batch *models.Batch) [][]string {
-	var live []*models.OrderItem
+	date := batch.CreatedAt.Format("2006-01-02")
+	grid := make([][]string, 0, len(batch.Items)+1)
+	grid = append(grid, productionTemplateHeaders)
+	batchPrintURL, batchCutURL := batchProductionLinks(batch)
+	var backs []string // per data row, for the optional back-design column
 	twoSided := false
+
 	for _, bi := range batch.Items {
 		it := bi.OrderItem
 		if it == nil || itemCancelled(it.CancellationStatus) {
 			continue
 		}
-		live = append(live, it)
-		if strings.TrimSpace(it.BackDesignURL) != "" {
+		back := strings.TrimSpace(it.BackDesignURL)
+		backs = append(backs, back)
+		if back != "" {
 			twoSided = true
 		}
+		// Loại VL comes from the batch's material (batches are material-scoped).
+		materialName := batch.Material.Name
+		if bi.Material != nil {
+			if bi.Material.Name != "" {
+				materialName = bi.Material.Name
+			} else {
+				materialName = bi.Material.Code
+			}
+		}
+		var orderID, customer string
+		if it.Order != nil {
+			orderID = it.Order.StoreOrderID
+			customer = it.Order.ShippingName
+		}
+		printURL, cutURL := batchPrintURL, batchCutURL
+		if printURL == "" {
+			printURL = it.PrintFileURL
+		}
+		if cutURL == "" {
+			cutURL = it.CutFileURL
+		}
+		grid = append(grid, []string{
+			it.InternalCode,               // Mã nội bộ
+			batch.Code,                    // SỐ Batch
+			date,                          // Ngày
+			orderID,                       // Order ID
+			it.SKUCode,                    // SKU
+			materialName,                  // Loại VL
+			it.QCDescription,              // Mô tả Sp để QC
+			it.ImageCode,                  // Mã ảnh
+			seqStr(it.ProductionSequence), // Số thứ tự (blank when unassigned)
+			itoa(it.Quantity),             // Số lượng
+			it.DesignURL,                  // Link ảnh
+			it.MockupURL,                  // Mock up
+			it.InternalCode,               // Mã nội bộ (legacy 2nd copy)
+			customer,                      // Tên khách
+			it.ProductionFileName,         // Tên File
+			printURL,                      // Link in (batch link overrides legacy item link)
+			cutURL,                        // Link cắt (batch link overrides legacy item link)
+		})
 	}
-	header := append([]string{}, productionTemplateHeaders...)
 	if twoSided {
-		header = append(header, productionBackDesignHeader)
-	}
-	grid := make([][]string, 0, len(live)+1)
-	grid = append(grid, header)
-	for _, it := range live {
-		row := []string{
-			batch.Code,                      // Số batch
-			it.InternalCode,                 // Mã nội bộ
-			it.SKUCode,                      // SKU
-			itoa(it.Quantity),               // Số lượng
-			strings.TrimSpace(it.DesignURL), // Link design (mặt trước / một mặt)
+		// Copy the header: appending to the package-level slice could write into
+		// its spare capacity and change the header of every later export.
+		grid[0] = append(append([]string{}, productionTemplateHeaders...), productionBackDesignHeader)
+		for i := 1; i < len(grid); i++ {
+			grid[i] = append(grid[i], backs[i-1])
 		}
-		if twoSided {
-			row = append(row, strings.TrimSpace(it.BackDesignURL))
-		}
-		grid = append(grid, row)
 	}
 	return grid
 }
@@ -839,15 +924,28 @@ func batchProductionLinks(batch *models.Batch) (printURL, cutURL string) {
 	return strings.TrimSpace(printURL), strings.TrimSpace(cutURL)
 }
 
-// productionColumnWidths: Excel widths (characters) for the production sheet —
-// codes compact, links wide.
+// productionColumnWidths sets sensible Excel column widths (in characters) for the
+// 17 production-template columns, keeping URL columns wide and codes/counts compact
+// so the sheet is readable without manual resizing.
 var productionColumnWidths = []float64{
-	12, // Số batch
-	16, // Mã nội bộ
-	24, // SKU
-	10, // Số lượng
-	70, // Link design
-	70, // Link design mặt sau (only when the batch has two-sided items)
+	16, // A  Mã nội bộ
+	10, // B  SỐ Batch
+	12, // C  Ngày
+	22, // D  Order ID
+	16, // E  SKU
+	18, // F  Loại VL
+	32, // G  Mô tả QC
+	22, // H  Mã ảnh
+	9,  // I  Số thứ tự
+	9,  // J  Số lượng
+	42, // K  Link ảnh
+	42, // L  Mock up
+	16, // M  Mã nội bộ
+	20, // N  Tên khách
+	22, // O  Tên File
+	42, // P  Link in
+	42, // Q  Link cắt
+	42, // R  Link design mặt sau (only when the batch has a two-sided item)
 }
 
 // GetWithScrapHistory loads a batch for viewing/exporting và, với batch ĐÃ ĐÓNG,
