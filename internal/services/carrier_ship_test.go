@@ -76,6 +76,7 @@ func (f *fakeTHE) echo(p *fakePkg) *theapi.Package {
 		Weight: theapi.FlexFloat(p.req.Weight), Length: theapi.FlexFloat(p.req.Length),
 		Width: theapi.FlexFloat(p.req.Width), Height: theapi.FlexFloat(p.req.Height),
 		Value: theapi.FlexFloat(p.req.Value), Zipcode: theapi.Flex(p.req.Zipcode), Address1: theapi.Flex(p.req.Address1),
+		HSCode: theapi.Flex(p.req.HSCode),
 	}
 }
 
@@ -458,7 +459,7 @@ func TestTHE_StaleDedupeAnswerIsReplaced(t *testing.T) {
 	e := newTHEEnv(t)
 	o := e.order(t, "100007")
 	e.fake.pkgs["999"] = &fakePkg{id: "999", orderNumber: "100007", status: "pending",
-		req: theapi.CreatePackageRequest{OrderNumber: "100007", Weight: 5, Length: 1, Width: 1, Height: 1, Value: 1, Zipcode: "94612", Address1: "1425 Harrison Street"}}
+		req: theapi.CreatePackageRequest{OrderNumber: "100007", Weight: 5, Length: 1, Width: 1, Height: 1, Value: 1, Zipcode: "94612", Address1: "1425 Harrison Street", HSCode: "44209000"}}
 	res := e.send(t, o)
 	if len(res.Shipped) != 1 {
 		t.Fatalf("want shipped, got %+v", res)
@@ -681,6 +682,33 @@ func TestTHE_CustomsDefaultsFromConnection(t *testing.T) {
 	for _, p := range e.fake.pkgs {
 		if p.orderNumber == "100202" && (p.req.HSCode != "44209000" || p.req.Value != 6) {
 			t.Fatalf("SKU's own customs data must win: hs=%s value=%v", p.req.HSCode, p.req.Value)
+		}
+	}
+}
+
+// THE refused an unknown HS code but (its handler does not stop) stored a
+// hidden pending package without one. After the code is fixed, the resend gets
+// THAT package back from THE's de-dupe — same weight, size, address. It must be
+// archived, never paid: the HS code is part of the consistency check.
+func TestTHE_HiddenPackageWithoutHSIsNeverPaid(t *testing.T) {
+	e := newTHEEnv(t)
+	o := e.order(t, "100301")
+	parcel, _ := e.carrier.BuildParcel(func() *models.CarrierConfig { c, _, _ := e.carrier.activeTHE(); return c }(),
+		func() *models.Order { full, _ := e.carrier.repo.Order.FindByID(o.ID); return full }())
+	hidden := parcel.Request
+	hidden.HSCode = "" // what THE stored after "Hs Code does not exist"
+	e.fake.pkgs["777"] = &fakePkg{id: "777", orderNumber: "100301", status: "pending", req: hidden}
+
+	res := e.send(t, o)
+	if len(res.Shipped) != 1 {
+		t.Fatalf("want shipped on a fresh package, got %+v", res)
+	}
+	if e.fake.pkgs["777"].charged || e.fake.pkgs["777"].status != "archived" {
+		t.Fatal("the hidden package without an HS code must be archived, never paid")
+	}
+	for _, p := range e.fake.pkgs {
+		if p.charged && p.req.HSCode != "44209000" {
+			t.Fatalf("paid package must carry the HS code, got %q", p.req.HSCode)
 		}
 	}
 }

@@ -276,14 +276,19 @@ type Package struct {
 	// Echoed parcel data. THE de-duplicates a create on order_number while the
 	// earlier package is still pending and answers with THAT package's stored
 	// data — these fields show whether what came back is what was sent.
-	Weight    FlexFloat `json:"weight"`
-	Length    FlexFloat `json:"length"`
-	Width     FlexFloat `json:"width"`
-	Height    FlexFloat `json:"height"`
-	Value     FlexFloat `json:"value"`
-	Zipcode   Flex      `json:"zipcode"`
-	Address1  Flex      `json:"address_1"`
-	CreatedAt Flex      `json:"created_at"`
+	Weight   FlexFloat `json:"weight"`
+	Length   FlexFloat `json:"length"`
+	Width    FlexFloat `json:"width"`
+	Height   FlexFloat `json:"height"`
+	Value    FlexFloat `json:"value"`
+	Zipcode  Flex      `json:"zipcode"`
+	Address1 Flex      `json:"address_1"`
+	// HSCode: a fresh create echoes the code sent; a de-duplicated answer
+	// carries the OLD package's hs_codes.system_code — "" when THE stored it
+	// without one (its create handler keeps going after "Hs Code does not
+	// exist" and can leave such a hidden pending package behind).
+	HSCode    Flex `json:"hs_code"`
+	CreatedAt Flex `json:"created_at"`
 
 	ID          Flex      `json:"id"`
 	Code        Flex      `json:"code"` // THE tracking, empty until delivery

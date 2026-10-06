@@ -640,6 +640,12 @@ func staleEcho(pkg *theapi.Package, r theapi.CreatePackageRequest) string {
 	if a := strings.TrimSpace(pkg.Address1.String()); a != "" && !strings.EqualFold(a, r.Address1) {
 		return "địa chỉ"
 	}
+	// The HS code is compared even when THE's answer has none: an empty one is
+	// exactly the hidden package THE leaves behind after refusing an unknown
+	// code — paying for it would ship without a customs code.
+	if r.HSCode != "" && strings.TrimLeft(strings.TrimSpace(pkg.HSCode.String()), "0") != strings.TrimLeft(r.HSCode, "0") {
+		return "mã HS"
+	}
 	return ""
 }
 
