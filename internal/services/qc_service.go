@@ -72,6 +72,9 @@ type QCScanResult struct {
 	ItemCode     string `json:"item_code"`
 	OrderCode    string `json:"order_code"`
 	StoreOrderID string `json:"store_order_id"`
+	// OrderNote is the order's free-text note. The station shows it as a banner the
+	// operator must acknowledge, so an unusual order is not judged like a normal one.
+	OrderNote    string `json:"order_note"`
 	SKUCode      string `json:"sku_code"`
 	Quantity     int    `json:"quantity"`
 	MaterialName string `json:"material_name"` // Loại VL
@@ -128,6 +131,7 @@ func (s *QCService) Scan(actor Actor, ref ScanRef) (*QCScanResult, error) {
 	if item.Order != nil {
 		res.OrderCode = item.Order.InternalCode
 		res.StoreOrderID = item.Order.StoreOrderID
+		res.OrderNote = strings.TrimSpace(item.Order.Note)
 	}
 	if item.SKU != nil {
 		res.SKUDescription = item.SKU.Description
