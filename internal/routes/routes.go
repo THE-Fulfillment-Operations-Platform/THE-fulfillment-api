@@ -23,13 +23,15 @@ import (
 // each screen that may use it. Roles still gate what is not a tick: user admin,
 // the OWNER-only levers, and destructive actions (role AND the screen's manage).
 var (
-	roleAdminOwner = []models.Role{models.RoleOwner, models.RoleAdmin}
+	// "Admin or owner" checks. TECHNICIAN sits here too: it tests the whole
+	// system, deleting its own test orders included (see Role.HasAdminRights).
+	roleAdminOwner = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleTechnician}
 	// Every internal (non-seller) account — for reference data every screen
 	// reads, and the sidebar badges.
 	roleOrderRead = []models.Role{
 		models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleDesigner,
 		models.RoleProduction, models.RoleQC, models.RolePacking, models.RoleShipping,
-		models.RoleCS,
+		models.RoleCS, models.RoleTechnician,
 	}
 	perm   = middleware.RequirePerm
 	view   = models.View

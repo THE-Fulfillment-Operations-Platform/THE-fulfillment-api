@@ -239,7 +239,7 @@ func (s *OrderService) CancelOrder(actor Actor, id uint, reason string) (*models
 	if order.ReviewStatus == models.ReviewCancelled || itemCancelled(order.CancellationStatus) {
 		return nil, apperr.Conflict("Đơn đã huỷ trước đó")
 	}
-	if orderPacked(order.SellerStatus) && actor.Role != models.RoleOwner && actor.Role != models.RoleAdmin {
+	if orderPacked(order.SellerStatus) && !actor.Role.HasAdminRights() {
 		return nil, apperr.Conflict("Đơn đã đóng gói/gửi đi — chỉ Admin/Owner được huỷ")
 	}
 	now := time.Now()
@@ -274,7 +274,7 @@ func (s *OrderService) CancelOrder(actor Actor, id uint, reason string) (*models
 // (soft delete via deleted_at) so linked history is preserved; the order simply
 // disappears from every operational list.
 func (s *OrderService) DeleteOrder(actor Actor, id uint) error {
-	if actor.Role != models.RoleOwner && actor.Role != models.RoleAdmin {
+	if !actor.Role.HasAdminRights() {
 		return apperr.Forbidden("Chỉ Admin/Owner được xoá đơn")
 	}
 	order, err := s.GetOrder(id)
@@ -316,7 +316,7 @@ const maxOrderDeleteIDs = 500
 // far too easy to do to a whole page by accident. Those orders are cancelled
 // instead, or deleted one at a time from the order detail, where OWNER still can.
 func (s *OrderService) DeleteOrders(actor Actor, ids []uint) (*OrderDeleteResult, error) {
-	if actor.Role != models.RoleOwner && actor.Role != models.RoleAdmin {
+	if !actor.Role.HasAdminRights() {
 		return nil, apperr.Forbidden("Chỉ Admin/Owner được xoá đơn")
 	}
 	clean := dedupeIDs(ids)

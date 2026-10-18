@@ -87,7 +87,7 @@ type CarrierConfigInput struct {
 }
 
 func canManageCarrier(a Actor) bool {
-	return a.Role == models.RoleOwner || a.Role == models.RoleAdmin
+	return a.Role.HasAdminRights()
 }
 
 func (s *CarrierService) loadConfig() (*models.CarrierConfig, error) {

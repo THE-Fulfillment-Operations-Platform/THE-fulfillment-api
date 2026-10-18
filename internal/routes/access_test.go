@@ -223,12 +223,18 @@ func (h *accessHarness) status(method, path, token string) int {
 
 // TestRoleDefaultsKeepPreviousAccess: with permissions never customised, every
 // role reaches exactly the routes it reached under the old role guards (plus
-// the few deliberate widenings listed in routeCases).
+// the few deliberate widenings listed in routeCases). TECHNICIAN (added after
+// the old guards) must reach exactly what ADMIN reaches — no more, no less; its
+// own test tool goes through the import routes ADMIN already holds.
 func TestRoleDefaultsKeepPreviousAccess(t *testing.T) {
 	h := newAccessHarness(t)
 	for _, rc := range routeCases {
 		for _, role := range models.AllRoles {
-			want := has(rc.old, role) || has(rc.widened, role)
+			like := role
+			if role == models.RoleTechnician {
+				like = models.RoleAdmin
+			}
+			want := has(rc.old, like) || has(rc.widened, like)
 			code := h.status(rc.method, rc.path, h.tokens[role])
 			if code == http.StatusUnauthorized || code == http.StatusNotFound {
 				t.Fatalf("%s %s as %s: unexpected %d (route missing or auth broken)", rc.method, rc.path, role, code)

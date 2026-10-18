@@ -102,6 +102,8 @@ func resolvePerms(role models.Role, list []string) (models.PermList, error) {
 
 // guardGrant enforces who may hand out what:
 //   - only an OWNER creates, promotes to or edits an OWNER account;
+//   - only an OWNER or a TECHNICIAN creates or promotes to TECHNICIAN — the role
+//     carries the test tools, which an ADMIN must not hand themselves;
 //   - an ADMIN can only grant ticks they hold themselves.
 func guardGrant(actor Actor, targetRole models.Role, perms models.PermList) error {
 	if actor.Role == models.RoleOwner {
@@ -110,12 +112,27 @@ func guardGrant(actor Actor, targetRole models.Role, perms models.PermList) erro
 	if targetRole == models.RoleOwner {
 		return apperr.Forbidden("Chỉ chủ sở hữu (OWNER) mới tạo hoặc sửa được tài khoản OWNER.")
 	}
+	if err := guardTechnicianAccount(actor, targetRole); err != nil {
+		return err
+	}
 	for _, p := range perms {
 		if !actor.Can(p) {
 			return apperr.Forbidden("Không thể cấp quyền mà chính bạn không có: " + p)
 		}
 	}
 	return nil
+}
+
+// guardTechnicianAccount keeps TECHNICIAN accounts in the hands of an OWNER or
+// another TECHNICIAN: creating, editing, locking or deleting one.
+func guardTechnicianAccount(actor Actor, accountRole models.Role) error {
+	if accountRole != models.RoleTechnician {
+		return nil
+	}
+	if actor.Role == models.RoleOwner || actor.Role == models.RoleTechnician {
+		return nil
+	}
+	return apperr.Forbidden("Chỉ chủ sở hữu (OWNER) hoặc kỹ thuật viên mới tạo hoặc sửa được tài khoản kỹ thuật viên.")
 }
 
 func permsAudit(p models.PermList) interface{} {
@@ -287,6 +304,9 @@ func (s *UserService) Update(actor Actor, id uint, in UpdateUserInput) (*models.
 	if prevRole == models.RoleOwner && actor.Role != models.RoleOwner {
 		return nil, apperr.Forbidden("Chỉ chủ sở hữu (OWNER) mới tạo hoặc sửa được tài khoản OWNER.")
 	}
+	if err := guardTechnicianAccount(actor, prevRole); err != nil {
+		return nil, err
+	}
 	if in.FullName != nil {
 		u.FullName = *in.FullName
 	}
@@ -379,6 +399,9 @@ func (s *UserService) Delete(actor Actor, id uint) error {
 	}
 	if actor.ID != 0 && actor.ID == id {
 		return apperr.Unprocessable("Không thể xoá chính tài khoản đang đăng nhập — nhờ chủ sở hữu khác xoá giúp.")
+	}
+	if err := guardTechnicianAccount(actor, victim.Role); err != nil {
+		return err
 	}
 	if victim.Role == models.RoleOwner {
 		if actor.Role != models.RoleOwner {

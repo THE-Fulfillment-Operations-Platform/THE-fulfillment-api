@@ -20,12 +20,25 @@ const (
 	// the catalog or users.
 	RoleCS     Role = "CS"
 	RoleSeller Role = "SELLER"
+	// RoleTechnician is the developer / technician who tests the live system: the
+	// same reach as ADMIN, plus tools that exist only for testing (the single
+	// test-order form). Those tools are hidden from every other role, OWNER
+	// included, so the people running the factory never meet them.
+	RoleTechnician Role = "TECHNICIAN"
 )
 
 // AllRoles is the canonical list used by the seeder.
 var AllRoles = []Role{
 	RoleOwner, RoleAdmin, RoleOps, RoleDesigner,
 	RoleProduction, RoleQC, RolePacking, RoleShipping, RoleCS, RoleSeller,
+	RoleTechnician,
+}
+
+// HasAdminRights reports whether the role passes the checks that used to read
+// "OWNER or ADMIN" (delete an order or a master record, undo a QC pass, the THE
+// settings, user admin). OWNER-only levers stay OWNER-only — this is not them.
+func (r Role) HasAdminRights() bool {
+	return r == RoleOwner || r == RoleAdmin || r == RoleTechnician
 }
 
 // InternalStatus is the factory-internal production status (DTWay flow):

@@ -135,7 +135,7 @@ var roleDefaults = map[Role][]string{
 	RoleCS: manageAll(FeatCS, FeatJourneys, FeatNotes),
 }
 
-// allPerms is every permission in the catalog (OWNER, ADMIN default).
+// allPerms is every permission in the catalog (OWNER, ADMIN, TECHNICIAN default).
 func allPerms() []string {
 	out := make([]string, 0, len(knownPerms))
 	for p := range knownPerms {
@@ -148,7 +148,7 @@ func allPerms() []string {
 // RoleDefaultPerms is the tick set a role starts with, normalised.
 func RoleDefaultPerms(role Role) []string {
 	switch role {
-	case RoleOwner, RoleAdmin:
+	case RoleOwner, RoleAdmin, RoleTechnician:
 		return allPerms()
 	case RoleSeller:
 		return []string{}

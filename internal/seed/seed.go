@@ -60,6 +60,7 @@ func seedRoles(db *gorm.DB) error {
 		models.RoleShipping:   "Bàn giao THE / shipping",
 		models.RoleCS:         "Chăm sóc khách hàng: tra đơn, nhập mã vận đơn",
 		models.RoleSeller:     "Seller: import & theo dõi trạng thái tổng",
+		models.RoleTechnician: "Kỹ thuật viên: test hệ thống, tạo đơn thử",
 	}
 	for _, role := range models.AllRoles {
 		rec := models.RoleRecord{Name: string(role), Description: descriptions[role]}

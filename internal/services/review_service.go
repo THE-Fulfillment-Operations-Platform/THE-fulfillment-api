@@ -933,7 +933,7 @@ func (s *ReviewService) guardResolveStage(actor Actor, stage models.CancelStage)
 	if stage != models.CancelStagePacked && stage != models.CancelStageShipped {
 		return nil
 	}
-	if actor.Role == models.RoleOwner || actor.Role == models.RoleAdmin {
+	if actor.Role.HasAdminRights() {
 		return nil
 	}
 	return apperr.Forbidden("Đơn đã đóng gói/gửi đi — chỉ Admin/Owner được duyệt huỷ")
