@@ -467,9 +467,12 @@ func (r *SKURepository) InUseIDs(ids []uint) (map[uint]string, error) {
 			end = len(ids)
 		}
 		var used []uint
+		// Deleting an order only soft-deletes the orders row — its order_items keep
+		// deleted_at NULL — so an item counts only while its order is still alive.
 		if err := r.db.Table("order_items").
-			Where("sku_id IN ? AND deleted_at IS NULL", ids[start:end]).
-			Distinct().Pluck("sku_id", &used).Error; err != nil {
+			Joins("JOIN orders ON orders.id = order_items.order_id AND orders.deleted_at IS NULL").
+			Where("order_items.sku_id IN ? AND order_items.deleted_at IS NULL", ids[start:end]).
+			Distinct().Pluck("order_items.sku_id", &used).Error; err != nil {
 			return nil, err
 		}
 		for _, id := range used {
