@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -50,6 +51,8 @@ func AutoMigrate(db *gorm.DB) error {
 		// carrier integration (THE)
 		&models.CarrierConfig{},
 		&models.CarrierShipment{},
+		// one-time data changes already applied
+		&models.DataMigration{},
 	); err != nil {
 		return fmt.Errorf("database: auto-migrate: %w", err)
 	}
@@ -73,6 +76,57 @@ func AutoMigrate(db *gorm.DB) error {
 	}
 	if err := flattenParentBatches(db); err != nil {
 		return err
+	}
+	if err := carryExportTicks(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+// carryExportTicks: on 2026-10-19 Kết quả QC and Nhật ký hoạt động gained a
+// "Thao tác" level (export). Before, whoever could view them could export. So
+// every STORED tick list — an account's own ticks, a role's configured ticks —
+// that views one of them gets its export too; lists that follow the defaults are
+// covered by the defaults themselves.
+//
+// Runs once, recorded in data_migrations: run again it would re-tick the export
+// for someone an admin deliberately unticked afterwards.
+func carryExportTicks(db *gorm.DB) error {
+	const name = "2026-10-19-export-ticks"
+	var done int64
+	if err := db.Model(&models.DataMigration{}).Where("name = ?", name).Count(&done).Error; err != nil {
+		return fmt.Errorf("database: carry export ticks: %w", err)
+	}
+	if done > 0 {
+		return nil
+	}
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var users []models.User
+		if err := tx.Unscoped().Where("permissions IS NOT NULL").Find(&users).Error; err != nil {
+			return err
+		}
+		for _, u := range users {
+			if next, changed := models.AddImpliedTicks(u.Permissions, models.ExportTicksAdded19Oct); changed {
+				if err := tx.Unscoped().Model(&models.User{}).Where("id = ?", u.ID).Update("permissions", next).Error; err != nil {
+					return err
+				}
+			}
+		}
+		var roles []models.RoleRecord
+		if err := tx.Where("permissions IS NOT NULL").Find(&roles).Error; err != nil {
+			return err
+		}
+		for _, r := range roles {
+			if next, changed := models.AddImpliedTicks(r.Permissions, models.ExportTicksAdded19Oct); changed {
+				if err := tx.Model(&models.RoleRecord{}).Where("id = ?", r.ID).Update("permissions", next).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return tx.Create(&models.DataMigration{Name: name, AppliedAt: time.Now()}).Error
+	})
+	if err != nil {
+		return fmt.Errorf("database: carry export ticks: %w", err)
 	}
 	return nil
 }

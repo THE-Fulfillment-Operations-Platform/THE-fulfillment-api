@@ -93,11 +93,20 @@ var Features = []Feature{
 	{Key: FeatBatchScrap, Label: "Huỷ batch in/cắt hỏng", Levels: manageOnly, ManageHint: "ghi nhận tấm hỏng, trả sản phẩm về làm lại"},
 	{Key: FeatProduction, Label: "Bảng sản xuất", Levels: both, ManageHint: "chuyển chặng in / cắt"},
 	{Key: FeatQC, Label: "Quét QC", Levels: both, ManageHint: "bấm Pass / Fail (Xem = chỉ quét để tra)"},
-	{Key: FeatQCResults, Label: "Kết quả QC", Levels: viewOnly},
+	{Key: FeatQCResults, Label: "Kết quả QC", Levels: both, ManageHint: "xuất file Excel kết quả QC"},
 	{Key: FeatShipQueue, Label: "Chờ gửi hàng", Levels: both, ManageHint: "quét / gửi đơn cho THE"},
 	{Key: FeatJourneys, Label: "Hành trình đơn hàng", Levels: both, ManageHint: "gắn, import, đồng bộ tracking"},
 	{Key: FeatNotes, Label: "Ghi chú / Cần xử lý", Levels: both, ManageHint: "tạo, sửa, xoá ghi chú"},
-	{Key: FeatAudit, Label: "Nhật ký hoạt động", Levels: viewOnly},
+	{Key: FeatAudit, Label: "Nhật ký hoạt động", Levels: both, ManageHint: "xuất file nhật ký"},
+}
+
+// ExportTicksAdded19Oct are the "Thao tác" levels Kết quả QC and Nhật ký gained
+// on 2026-10-19 (both used to be view-only, their export button open to anyone
+// who could see the screen). Mapping view → manage, used once to carry stored
+// tick lists over without anyone losing the export they had.
+var ExportTicksAdded19Oct = map[string]string{
+	View(FeatQCResults): Manage(FeatQCResults),
+	View(FeatAudit):     Manage(FeatAudit),
 }
 
 var knownPerms = func() map[string]bool {
@@ -123,21 +132,23 @@ func manageAll(features ...string) []string {
 
 // roleDefaults mirrors what each role could reach before per-user permissions
 // existed, so NULL-permission accounts see no change.
+// Kết quả QC is manage (view + export) wherever it used to be view: its export
+// button was open to every viewer before the screen had a "Thao tác" level.
 var roleDefaults = map[Role][]string{
-	RoleOps: append([]string{View(FeatDashboard), View(FeatQCResults)},
+	RoleOps: append([]string{View(FeatDashboard)},
 		manageAll(FeatCS, FeatMasterData, FeatImport, FeatReview, FeatOrders, FeatCancellations,
-			FeatDesign, FeatBatches, FeatBatchScrap, FeatProduction, FeatQC, FeatShipQueue,
+			FeatDesign, FeatBatches, FeatBatchScrap, FeatProduction, FeatQC, FeatQCResults, FeatShipQueue,
 			FeatJourneys, FeatNotes)...),
-	RoleDesigner: append([]string{View(FeatDashboard), View(FeatOrders), View(FeatQCResults)},
-		manageAll(FeatReview, FeatDesign, FeatBatches, FeatProduction, FeatNotes)...),
-	RoleProduction: append([]string{View(FeatDashboard), View(FeatOrders), View(FeatBatches), View(FeatQCResults)},
-		manageAll(FeatProduction, FeatBatchScrap, FeatNotes)...),
-	RoleQC: append([]string{View(FeatDashboard), View(FeatOrders), View(FeatBatches), View(FeatQCResults)},
-		manageAll(FeatQC, FeatBatchScrap, FeatNotes)...),
-	RolePacking: append([]string{View(FeatDashboard), View(FeatOrders), View(FeatBatches), View(FeatQCResults)},
-		manageAll(FeatShipQueue, FeatJourneys, FeatNotes)...),
-	RoleShipping: append([]string{View(FeatDashboard), View(FeatOrders), View(FeatBatches), View(FeatQCResults)},
-		manageAll(FeatShipQueue, FeatJourneys, FeatNotes)...),
+	RoleDesigner: append([]string{View(FeatDashboard), View(FeatOrders)},
+		manageAll(FeatReview, FeatDesign, FeatBatches, FeatProduction, FeatQCResults, FeatNotes)...),
+	RoleProduction: append([]string{View(FeatDashboard), View(FeatOrders), View(FeatBatches)},
+		manageAll(FeatProduction, FeatBatchScrap, FeatQCResults, FeatNotes)...),
+	RoleQC: append([]string{View(FeatDashboard), View(FeatOrders), View(FeatBatches)},
+		manageAll(FeatQC, FeatBatchScrap, FeatQCResults, FeatNotes)...),
+	RolePacking: append([]string{View(FeatDashboard), View(FeatOrders), View(FeatBatches)},
+		manageAll(FeatShipQueue, FeatJourneys, FeatQCResults, FeatNotes)...),
+	RoleShipping: append([]string{View(FeatDashboard), View(FeatOrders), View(FeatBatches)},
+		manageAll(FeatShipQueue, FeatJourneys, FeatQCResults, FeatNotes)...),
 	RoleCS: manageAll(FeatCS, FeatJourneys, FeatNotes),
 }
 
