@@ -134,6 +134,7 @@ var routeCases = []routeCase{
 	{"POST", "/api/batches/1/scrap", oScrap, nil},
 
 	{"POST", "/api/qc/scan", oQCOps, nil},
+	{"POST", "/api/qc/scan-order", oQCOps, nil},
 	{"POST", "/api/qc/pass", oQCOps, nil},
 	{"POST", "/api/qc/fail", oQCOps, nil},
 	{"POST", "/api/qc/undo", oAdminOwner, nil},

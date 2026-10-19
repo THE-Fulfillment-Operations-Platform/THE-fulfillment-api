@@ -1,6 +1,7 @@
 package services
 
 import (
+	"strings"
 	"time"
 
 	"the-fulfillment/backend/internal/apperr"
@@ -83,13 +84,25 @@ func (s *QCService) QCResults(f repositories.QCResultFilter) ([]QCResultOrder, r
 		return []QCResultOrder{}, summary, total, nil
 	}
 
+	out, err := s.buildResultOrders(ids)
+	if err != nil {
+		return nil, summary, 0, err
+	}
+	return out, summary, total, nil
+}
+
+// buildResultOrders turns order ids into QCResultOrder rows (in the given order),
+// each with its live lines and their QC verdicts. Shared by the results list and
+// the per-order QC scan, so both always agree on what "đã QC" means. Fixed number
+// of statements regardless of how many lines the orders hold.
+func (s *QCService) buildResultOrders(ids []uint) ([]QCResultOrder, error) {
 	orders, err := s.repo.Order.FindByIDsWithSeller(ids)
 	if err != nil {
-		return nil, summary, 0, apperr.Internal("could not load orders").Wrap(err)
+		return nil, apperr.Internal("could not load orders").Wrap(err)
 	}
 	lines, err := s.repo.OrderItem.QCResultLines(ids)
 	if err != nil {
-		return nil, summary, 0, apperr.Internal("could not load order lines").Wrap(err)
+		return nil, apperr.Internal("could not load order lines").Wrap(err)
 	}
 	itemIDs := make([]uint, 0, len(lines))
 	for i := range lines {
@@ -97,7 +110,7 @@ func (s *QCService) QCResults(f repositories.QCResultFilter) ([]QCResultOrder, r
 	}
 	checks, err := s.repo.QC.LatestChecks(itemIDs)
 	if err != nil {
-		return nil, summary, 0, apperr.Internal("could not load QC records").Wrap(err)
+		return nil, apperr.Internal("could not load QC records").Wrap(err)
 	}
 
 	byOrder := map[uint]*QCResultOrder{}
@@ -140,7 +153,7 @@ func (s *QCService) QCResults(f repositories.QCResultFilter) ([]QCResultOrder, r
 		}
 		infos, infoErr := s.repo.SKU.InfoByCodes(codes)
 		if infoErr != nil {
-			return nil, summary, 0, apperr.Internal("could not load SKU names").Wrap(infoErr)
+			return nil, apperr.Internal("could not load SKU names").Wrap(infoErr)
 		}
 		for code, info := range infos {
 			skuNames[code] = info.ProductName
@@ -193,5 +206,88 @@ func (s *QCService) QCResults(f repositories.QCResultFilter) ([]QCResultOrder, r
 			o.Status = QCOrderNone
 		}
 	}
-	return out, summary, total, nil
+	return out, nil
+}
+
+// OrderScanRef identifies an order by the code on its paper / QR (internal code,
+// or the seller's store order id) or by id.
+type OrderScanRef struct {
+	Code    string `json:"code"`
+	OrderID *uint  `json:"order_id"`
+}
+
+// QCOrderScan is what the QC station shows when the operator scans a whole ORDER
+// instead of one product tem: the order, how many products it holds and where each
+// one stands, so the operator sees the whole order first and opens the products one
+// by one to judge them.
+type QCOrderScan struct {
+	QCResultOrder
+	OrderNote string `json:"order_note"`
+}
+
+// ScanOrder resolves an order code to the order with the QC state of every live
+// product in it. Read-only: the verdict itself still goes through Pass / Fail on
+// one product at a time.
+func (s *QCService) ScanOrder(actor Actor, ref OrderScanRef) (*QCOrderScan, error) {
+	id, err := s.resolveOrderID(ref)
+	if err != nil {
+		return nil, err
+	}
+	orders, err := s.repo.Order.FindByIDsWithSeller([]uint{id})
+	if err != nil {
+		return nil, apperr.Internal("Không tra cứu được dữ liệu").Wrap(err)
+	}
+	o := orders[id]
+	if o == nil {
+		return nil, apperr.NotFound("Không tìm thấy đơn nào khớp mã vừa quét")
+	}
+	// Only approved work reaches production, and a cancelled order is never
+	// produced — same cut as the QC-results list (qcResultBase).
+	if itemCancelled(o.CancellationStatus) {
+		return nil, apperr.Conflict("Đơn đã huỷ, không thể QC")
+	}
+	if o.ReviewStatus != models.ReviewApproved {
+		return nil, apperr.Conflict("Đơn chưa được duyệt nên chưa vào sản xuất — chưa có gì để QC")
+	}
+	rows, err := s.buildResultOrders([]uint{id})
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, apperr.NotFound("Không tìm thấy đơn nào khớp mã vừa quét")
+	}
+	s.audit.Log(actor, "QC_SCAN_ORDER", "order", &o.ID, "Scanned order "+o.InternalCode+" for QC", nil)
+	return &QCOrderScan{QCResultOrder: rows[0], OrderNote: strings.TrimSpace(o.Note)}, nil
+}
+
+func (s *QCService) resolveOrderID(ref OrderScanRef) (uint, error) {
+	if ref.OrderID != nil {
+		return *ref.OrderID, nil
+	}
+	code := strings.TrimSpace(ref.Code)
+	if code == "" {
+		return 0, apperr.BadRequest("Hãy quét hoặc nhập mã đơn")
+	}
+	id, found, err := s.repo.Order.IDByInternalCode(code)
+	if err != nil {
+		return 0, apperr.Internal("Không tra cứu được dữ liệu").Wrap(err)
+	}
+	if found {
+		return id, nil
+	}
+	// Staff also read the seller's order number off the paperwork. Accept it only
+	// when it points at exactly one order — two orders sharing a store id must not
+	// be guessed between.
+	refs, err := s.repo.Order.RefsByStoreOrderIDs([]string{code})
+	if err != nil {
+		return 0, apperr.Internal("Không tra cứu được dữ liệu").Wrap(err)
+	}
+	switch len(refs) {
+	case 0:
+		return 0, apperr.NotFound("Không tìm thấy đơn nào khớp mã vừa quét")
+	case 1:
+		return refs[0].ID, nil
+	default:
+		return 0, apperr.Conflict("Mã này khớp nhiều đơn — quét mã đơn nội bộ trên tem để chọn đúng đơn")
+	}
 }

@@ -383,6 +383,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	qc := authd.Group("/qc")
 	{
 		qc.POST("/scan", perm(view(models.FeatQC)), h.QCScan)
+		qc.POST("/scan-order", perm(view(models.FeatQC)), h.QCScanOrder)
 		qc.POST("/pass", perm(manage(models.FeatQC)), h.QCPass)
 		qc.POST("/fail", perm(manage(models.FeatQC)), h.QCFail)
 		// Hạ QC (bấm nhầm) chặt hơn: cần thêm vai trò OWNER/ADMIN. Nó mở lại một

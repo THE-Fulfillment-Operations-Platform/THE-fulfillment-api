@@ -24,6 +24,22 @@ func (h *Handlers) QCScan(c *gin.Context) {
 	response.OK(c, res)
 }
 
+// QCScanOrder pulls up a whole order for QC: the products it holds and each one's
+// QC state, so the operator sees the order first and opens products one by one.
+// POST /api/qc/scan-order
+func (h *Handlers) QCScanOrder(c *gin.Context) {
+	var in services.OrderScanRef
+	if !bindJSON(c, &in) {
+		return
+	}
+	res, err := h.svc.QC.ScanOrder(actor(c), in)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, res)
+}
+
 // QCPass confirms the product matches the mockup. POST /api/qc/pass
 func (h *Handlers) QCPass(c *gin.Context) {
 	var in services.QCDecisionInput
