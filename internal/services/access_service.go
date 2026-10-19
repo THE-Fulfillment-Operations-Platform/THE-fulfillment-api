@@ -2,6 +2,7 @@ package services
 
 import (
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -30,6 +31,11 @@ type AccessService struct {
 	mu    sync.Mutex
 	cache map[uint]accessEntry
 	now   func() time.Time
+
+	// Role tick sets (roles.permissions) are re-read on the same TTL as users, so
+	// a change saved through another instance reaches this one within accessTTL.
+	rolesMu     sync.Mutex
+	rolesLoaded time.Time
 }
 
 type accessEntry struct {
@@ -62,6 +68,7 @@ func (s *AccessService) LoadAccess(userID uint) (*models.Access, error) {
 	if !u.IsActive {
 		return nil, ErrAccessRevoked
 	}
+	s.refreshRoles(now)
 	a := models.NewAccess(u)
 	s.mu.Lock()
 	s.cache[userID] = accessEntry{access: a, expires: now.Add(accessTTL)}
@@ -77,4 +84,41 @@ func (s *AccessService) Invalidate(userID uint) {
 	s.mu.Lock()
 	delete(s.cache, userID)
 	s.mu.Unlock()
+}
+
+// RoleTicksChanged is called after a role's tick set is saved: reload the role
+// table now and drop every cached access, since everyone following that role
+// changed at once.
+func (s *AccessService) RoleTicksChanged() {
+	if s == nil {
+		return
+	}
+	s.rolesMu.Lock()
+	s.rolesLoaded = time.Time{}
+	s.rolesMu.Unlock()
+	s.refreshRoles(s.now())
+	s.mu.Lock()
+	s.cache = map[uint]accessEntry{}
+	s.mu.Unlock()
+}
+
+// refreshRoles re-reads roles.permissions when the last read is older than
+// accessTTL. A failed read keeps the previous sets (built-in defaults at worst)
+// and waits a full TTL before trying again rather than hammering the database.
+func (s *AccessService) refreshRoles(now time.Time) {
+	s.rolesMu.Lock()
+	defer s.rolesMu.Unlock()
+	if !s.rolesLoaded.IsZero() && now.Sub(s.rolesLoaded) < accessTTL {
+		return
+	}
+	s.rolesLoaded = now
+	if s.repo == nil || s.repo.Role == nil {
+		return
+	}
+	overrides, err := s.repo.Role.PermissionOverrides()
+	if err != nil {
+		slog.Warn("access: could not load role permissions, keeping previous", "err", err)
+		return
+	}
+	models.SetRoleOverrides(overrides)
 }

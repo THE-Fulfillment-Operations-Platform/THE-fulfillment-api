@@ -55,6 +55,8 @@ var routeCases = []routeCase{
 	{"PUT", "/api/users/1", oAdminOwner, nil},
 	{"DELETE", "/api/users/1", oAdminOwner, nil},
 	{"GET", "/api/audit-logs", oAdminOwner, nil},
+	{"GET", "/api/role-permissions", oAdminOwner, nil},
+	{"PUT", "/api/role-permissions/OPS", oAdminOwner, nil},
 	{"POST", "/api/admin/reset", oOwner, nil},
 
 	{"GET", "/api/sellers", oOrderRead, nil},

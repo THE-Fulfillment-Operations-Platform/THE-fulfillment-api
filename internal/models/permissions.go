@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // Per-user permissions. A permission is "<feature>.<level>": the feature is one
@@ -16,6 +17,11 @@ import (
 // NULL gets exactly their role's defaults, so existing accounts behave as before
 // and pick up any later change to those defaults. Once an admin customises the
 // ticks, the explicit list is stored and the role no longer widens or narrows it.
+//
+// A role's defaults are, in order: what the role is configured with on the
+// "Quyền theo vai trò" screen (roles.permissions, loaded through
+// SetRoleOverrides), else the built-in set in this file. So a user resolves to
+// their own ticks → their role's configured ticks → the built-in defaults.
 //
 // What is NOT a permission, on purpose, and stays with the role:
 //   - OWNER always has everything — nobody can lock the owner out.
@@ -145,8 +151,15 @@ func allPerms() []string {
 	return out
 }
 
-// RoleDefaultPerms is the tick set a role starts with, normalised.
-func RoleDefaultPerms(role Role) []string {
+// RoleTickable reports whether a role's ticks can be configured at all. OWNER
+// always has everything and SELLER none of it — neither is a tick set.
+func RoleTickable(role Role) bool {
+	return role != RoleOwner && role != RoleSeller
+}
+
+// BuiltinRolePerms is the tick set a role has out of the box, before anyone
+// configured it — the "Về mặc định gốc" target.
+func BuiltinRolePerms(role Role) []string {
 	switch role {
 	case RoleOwner, RoleAdmin, RoleTechnician:
 		return allPerms()
@@ -154,6 +167,46 @@ func RoleDefaultPerms(role Role) []string {
 		return []string{}
 	}
 	return NormalizePerms(roleDefaults[role])
+}
+
+// roleOverrides holds the configured tick set of every role that has one (the
+// non-NULL roles.permissions rows). Read on every access resolution, replaced
+// wholesale when the table is (re)loaded — hence the RWMutex.
+var roleOverrides = struct {
+	sync.RWMutex
+	m map[Role][]string
+}{m: map[Role][]string{}}
+
+// SetRoleOverrides replaces the configured tick sets. Roles missing from m fall
+// back to BuiltinRolePerms; OWNER/SELLER entries are ignored.
+func SetRoleOverrides(m map[Role][]string) {
+	next := make(map[Role][]string, len(m))
+	for r, perms := range m {
+		if RoleTickable(r) && perms != nil {
+			next[r] = NormalizePerms(perms)
+		}
+	}
+	roleOverrides.Lock()
+	roleOverrides.m = next
+	roleOverrides.Unlock()
+}
+
+// RoleDefaultPerms is the tick set a role's users get when they have no ticks of
+// their own: the configured set if the role has one, else the built-in set.
+func RoleDefaultPerms(role Role) []string {
+	if RoleTickable(role) {
+		roleOverrides.RLock()
+		perms, ok := roleOverrides.m[role]
+		roleOverrides.RUnlock()
+		if ok {
+			// A copy, never nil: a role configured with no ticks at all is an empty
+			// list (serialised [], not null).
+			out := make([]string, len(perms))
+			copy(out, perms)
+			return out
+		}
+	}
+	return BuiltinRolePerms(role)
 }
 
 // NormalizePerms drops unknown keys and duplicates, adds the view that every

@@ -2,12 +2,17 @@ package models
 
 import "math"
 
-// Role catalog table. Kept as reference/extensibility data; the active role used
-// for permission checks lives on the user as a string for index-friendly lookups.
+// Role catalog table. The active role used for permission checks lives on the
+// user as a string for index-friendly lookups; this row carries what the role
+// itself is configured with.
 type RoleRecord struct {
 	Base
 	Name        string `json:"name" gorm:"uniqueIndex;size:32;not null"`
 	Description string `json:"description" gorm:"size:255"`
+	// Permissions is the role's tick set as configured on the "Quyền theo vai trò"
+	// screen, or NULL for the built-in defaults in code (permissions.go). Every
+	// user whose own Permissions is NULL follows it.
+	Permissions PermList `json:"permissions"`
 }
 
 func (RoleRecord) TableName() string { return "roles" }

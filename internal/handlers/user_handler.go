@@ -3,6 +3,7 @@ package handlers
 import (
 	"github.com/gin-gonic/gin"
 
+	"the-fulfillment/backend/internal/models"
 	"the-fulfillment/backend/internal/response"
 	"the-fulfillment/backend/internal/services"
 )
@@ -81,4 +82,32 @@ func (h *Handlers) DeleteUser(c *gin.Context) {
 // GET /api/permission-catalog
 func (h *Handlers) PermissionCatalog(c *gin.Context) {
 	response.OK(c, h.svc.User.PermissionCatalog())
+}
+
+// ListRolePermissions lists each tickable role with its ticks, for the
+// "Quyền theo vai trò" screen. GET /api/role-permissions
+func (h *Handlers) ListRolePermissions(c *gin.Context) {
+	out, err := h.svc.User.RolePermissions(actor(c))
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, out)
+}
+
+// UpdateRolePermissions sets a role's ticks; {"permissions": null} goes back to
+// the built-in set. PUT /api/role-permissions/:role
+func (h *Handlers) UpdateRolePermissions(c *gin.Context) {
+	var in struct {
+		Permissions services.PermsInput `json:"permissions"`
+	}
+	if !bindJSON(c, &in) {
+		return
+	}
+	out, err := h.svc.User.SetRolePermissions(actor(c), models.Role(c.Param("role")), in.Permissions)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, out)
 }

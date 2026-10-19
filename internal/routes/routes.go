@@ -122,6 +122,10 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	}
 	// The tickable screens + each role's default ticks, for the user form.
 	authd.GET("/permission-catalog", middleware.RequireRoles(roleAdminOwner...), h.PermissionCatalog)
+	// Each role's ticks, editable ("Quyền theo vai trò"). Same gate as users; the
+	// service adds the finer lines (own role, TECHNICIAN, ticks the actor lacks).
+	authd.GET("/role-permissions", middleware.RequireRoles(roleAdminOwner...), h.ListRolePermissions)
+	authd.PUT("/role-permissions/:role", middleware.RequireRoles(roleAdminOwner...), h.UpdateRolePermissions)
 
 	// Audit logs.
 	authd.GET("/audit-logs", perm(view(models.FeatAudit)), h.ListAuditLogs)
