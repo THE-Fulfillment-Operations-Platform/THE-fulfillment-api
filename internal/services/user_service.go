@@ -51,7 +51,7 @@ func (p *PermsInput) UnmarshalJSON(b []byte) error {
 
 // CreateUserInput is the create payload.
 type CreateUserInput struct {
-	Email    string      `json:"email" binding:"required,email"`
+	Email    string      `json:"email" binding:"required"`
 	Password string      `json:"password" binding:"required,min=6"`
 	FullName string      `json:"full_name" binding:"required"`
 	Role     models.Role `json:"role" binding:"required"`

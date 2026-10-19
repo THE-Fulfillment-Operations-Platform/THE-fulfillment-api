@@ -2,6 +2,7 @@ package services
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -28,6 +29,9 @@ type LoginResult struct {
 
 // Login validates credentials and issues a JWT.
 func (s *AuthService) Login(email, password string, ip string) (*LoginResult, error) {
+	// The "email" is a free-form login name (no longer required to look like an
+	// address); accounts store it lower-cased and trimmed, so match the same way.
+	email = strings.ToLower(strings.TrimSpace(email))
 	user, err := s.repo.User.FindByEmail(email)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {

@@ -9,7 +9,7 @@ import (
 
 // LoginRequest is the login payload.
 type LoginRequest struct {
-	Email    string `json:"email" binding:"required,email"`
+	Email    string `json:"email" binding:"required"`
 	Password string `json:"password" binding:"required"`
 }
 
