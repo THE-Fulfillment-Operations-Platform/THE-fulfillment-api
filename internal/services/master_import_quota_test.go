@@ -152,7 +152,7 @@ func TestMasterImport_DeclaredQuota(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read export: %v", err)
 	}
-	if strings.Join(grid[0][:8], "|") != strings.Join(masterTemplateHeaders, "|") || grid[0][8] != masterExportEstimateHeader {
+	if n := len(masterTemplateHeaders); strings.Join(grid[0][:n], "|") != strings.Join(masterTemplateHeaders, "|") || grid[0][n] != masterExportEstimateHeader {
 		t.Fatalf("export header: %v", grid[0])
 	}
 	byCode := map[string][]string{}
@@ -167,13 +167,14 @@ func TestMasterImport_DeclaredQuota(t *testing.T) {
 		}
 		return ""
 	}
-	if r := byCode["MOI"]; cell(r, 3) != "Mica" || cell(r, 6) != "40" || cell(r, 8) != "100" {
+	est := len(masterTemplateHeaders) // the read-only estimate column follows the template's columns
+	if r := byCode["MOI"]; cell(r, 3) != "Mica" || cell(r, 6) != "40" || cell(r, est) != "100" {
 		t.Fatalf("MOI export row: %v (want Mica, declared 40, estimate 100)", r)
 	}
-	if r := byCode["UOC"]; cell(r, 6) != "" || cell(r, 8) != "25" {
+	if r := byCode["UOC"]; cell(r, 6) != "" || cell(r, est) != "25" {
 		t.Fatalf("UOC export row: %v (want blank declared, estimate 25)", r)
 	}
-	if r := byCode["DOI"]; cell(r, 6) != "30" || cell(r, 8) != "" {
+	if r := byCode["DOI"]; cell(r, 6) != "30" || cell(r, est) != "" {
 		t.Fatalf("DOI export row: %v (declared 30, no size → no estimate)", r)
 	}
 }

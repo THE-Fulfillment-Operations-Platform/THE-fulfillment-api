@@ -60,6 +60,16 @@ type LegacyRow struct {
 	// file. Blank = not declared (an existing number stays).
 	Quota       string `json:"quota"`
 	Description string `json:"description"`
+	// Shipping declaration of ONE packed unit (what THE needs to create the
+	// parcel): the raw cells of "Cân nặng (g)", "Dài/Rộng/Cao hộp (cm)", "Giá trị
+	// khai báo (USD)", "Mã HS". Kept raw so a bad number is reported against its
+	// own row. Blank = the file says nothing, the stored value stays.
+	ShipWeight string `json:"ship_weight,omitempty"`
+	ShipLength string `json:"ship_length,omitempty"`
+	ShipWidth  string `json:"ship_width,omitempty"`
+	ShipHeight string `json:"ship_height,omitempty"`
+	ShipValue  string `json:"ship_value,omitempty"`
+	ShipHS     string `json:"ship_hs,omitempty"`
 }
 
 // SKU status codes surfaced in the preview.
@@ -83,6 +93,8 @@ const (
 	errSKUHasChildren   = "SKU_HAS_CHILDREN"  // an existing parent can't become a child
 	errQuotaInvalid     = "QUOTA_INVALID"     // Định mức cell is not a positive whole number, or has no Loại VL
 	errQuotaConflict    = "QUOTA_CONFLICT"    // the SKU's rows declare different quotas for the same material
+	errShipInvalid      = "SHIP_INVALID"      // a shipping cell (weight / box / value / HS) is not a valid value
+	errShipConflict     = "SHIP_CONFLICT"     // the SKU's rows declare different shipping values
 )
 
 // ---------- Preview / plan structures (also stored in MasterImportJob.Plan) ----------
@@ -117,6 +129,9 @@ type SKUPlan struct {
 	// (models.QuotaDeclared / QuotaEstimated) per material name.
 	QuotaByMaterial map[string]int    `json:"quota_by_material,omitempty"`
 	QuotaSources    map[string]string `json:"quota_sources,omitempty"`
+	// Ship is the shipping declaration the file sets (nil = the file says
+	// nothing about shipping for this SKU).
+	Ship *SKUShippingInput `json:"ship,omitempty"`
 }
 
 type MappingPlan struct {
@@ -150,6 +165,8 @@ type MasterImportSummary struct {
 	// distinct parents they go to.
 	ChildSKUs    int `json:"child_skus"`
 	ParentGroups int `json:"parent_groups"`
+	// ShippingSKUs: SKUs the file gives a weight / box / value / HS for.
+	ShippingSKUs int `json:"shipping_skus"`
 }
 
 type MasterImportApplied struct {
@@ -158,6 +175,9 @@ type MasterImportApplied struct {
 	MappingsCreated  int `json:"mappings_created"`
 	// SKUsUpdated: existing SKUs whose parent, D x R or description changed.
 	SKUsUpdated int `json:"skus_updated"`
+	// ShippingSet: SKUs whose shipping declaration (weight / box / value / HS) the
+	// file wrote — new SKUs included.
+	ShippingSet int `json:"shipping_set"`
 	// QuotasSet: (SKU, material) pairs whose declared quota was written.
 	QuotasSet int `json:"quotas_set"`
 }
@@ -281,6 +301,7 @@ func legacyRowsFromGrid(records [][]string) ([]LegacyRow, error) {
 	header := records[0]
 	skuIdx, matIdx, prodIdx := -1, -1, -1
 	parentIdx, lenIdx, widIdx, sizeIdx, descIdx, quotaIdx := -1, -1, -1, -1, -1, -1
+	shipIdx := map[string]int{} // shipping column key → index
 	for i, h := range header {
 		n := normalizeLegacyHeader(h)
 		d := dimHeaderKey(h)
@@ -304,6 +325,12 @@ func legacyRowsFromGrid(records [][]string) ([]LegacyRow, error) {
 			descIdx = i
 		case quotaIdx == -1 && skuQuotaHeaders[q]:
 			quotaIdx = i
+		default:
+			if k := masterShipHeaderKey(h); k != "" {
+				if _, dup := shipIdx[k]; !dup {
+					shipIdx[k] = i
+				}
+			}
 		}
 	}
 	if skuIdx == -1 {
@@ -331,9 +358,130 @@ func legacyRowsFromGrid(records [][]string) ([]LegacyRow, error) {
 			Size:        cell(rec, sizeIdx),
 			Quota:       cell(rec, quotaIdx),
 			Description: cell(rec, descIdx),
+			ShipWeight:  cell(rec, idxOr(shipIdx, shipColWeight)),
+			ShipLength:  cell(rec, idxOr(shipIdx, shipColLength)),
+			ShipWidth:   cell(rec, idxOr(shipIdx, shipColWidth)),
+			ShipHeight:  cell(rec, idxOr(shipIdx, shipColHeight)),
+			ShipValue:   cell(rec, idxOr(shipIdx, shipColValue)),
+			ShipHS:      cell(rec, idxOr(shipIdx, shipColHS)),
 		})
 	}
 	return rows, nil
+}
+
+// masterShipHeaderKey recognises the shipping columns of the master-data file.
+// Narrower than the shipping worksheet's own aliases on purpose: a bare "Dài" /
+// "Rộng" / "Cao" in THIS file is the product's D x R (mm), so a box dimension
+// must say it is the box ("Dài hộp (cm)").
+func masterShipHeaderKey(h string) string {
+	key := shipHeaderKey(h)
+	switch key {
+	case shipColWeight, shipColValue, shipColHS:
+		return key
+	case shipColLength, shipColWidth, shipColHeight:
+		n := removeVietnameseDiacritics(normalizeLegacyHeader(h))
+		if strings.Contains(n, "hop") || strings.Contains(n, "box") {
+			return key
+		}
+	}
+	return ""
+}
+
+func idxOr(m map[string]int, key string) int {
+	if i, ok := m[key]; ok {
+		return i
+	}
+	return -1
+}
+
+// parseRowShip reads one row's shipping cells into a SKUShippingInput. nil when
+// the row says nothing; a message when a cell is not valid (reported against the
+// row, like a bad D x R).
+func parseRowShip(r LegacyRow) (*SKUShippingInput, string) {
+	in := SKUShippingInput{}
+	any := false
+	num := func(raw, label string) (*float64, string) {
+		if strings.TrimSpace(raw) == "" {
+			return nil, ""
+		}
+		v, msg := parseShipCell(raw)
+		if msg != "" {
+			return nil, label + ": " + msg
+		}
+		if v <= 0 {
+			return nil, label + " phải lớn hơn 0 (để trống nếu chưa biết)"
+		}
+		any = true
+		return &v, ""
+	}
+	var msg string
+	if in.ShipWeightG, msg = num(r.ShipWeight, "Cân nặng (g)"); msg != "" {
+		return nil, msg
+	}
+	if in.ShipLengthCM, msg = num(r.ShipLength, "Dài hộp (cm)"); msg != "" {
+		return nil, msg
+	}
+	if in.ShipWidthCM, msg = num(r.ShipWidth, "Rộng hộp (cm)"); msg != "" {
+		return nil, msg
+	}
+	if in.ShipHeightCM, msg = num(r.ShipHeight, "Cao hộp (cm)"); msg != "" {
+		return nil, msg
+	}
+	if in.DeclaredValue, msg = num(r.ShipValue, "Giá trị khai báo (USD)"); msg != "" {
+		return nil, msg
+	}
+	if hs := strings.TrimSpace(r.ShipHS); hs != "" {
+		code, err := normalizeHSCode(hs)
+		if err != nil {
+			return nil, "Mã HS: " + err.Error()
+		}
+		in.HSCode = &code
+		any = true
+	}
+	if !any {
+		return nil, ""
+	}
+	// Range checks (weight < 30 kg, box < 200 cm, value < 5000 USD…) exactly as the
+	// SKU form and the shipping worksheet apply them.
+	if err := applySKUShipping(&models.SKU{}, in); err != nil {
+		return nil, err.Error()
+	}
+	return &in, ""
+}
+
+// mergeShip folds one row's declaration into the SKU's: first value wins; a later
+// row naming a different value is a conflict (reported once, drops the SKU).
+func mergeShip(dst **SKUShippingInput, row *SKUShippingInput) (conflict bool) {
+	if row == nil {
+		return false
+	}
+	if *dst == nil {
+		*dst = &SKUShippingInput{}
+	}
+	d := *dst
+	mergeNum := func(cur **float64, in *float64) {
+		if in == nil {
+			return
+		}
+		if *cur != nil && **cur != *in {
+			conflict = true
+			return
+		}
+		*cur = in
+	}
+	mergeNum(&d.ShipWeightG, row.ShipWeightG)
+	mergeNum(&d.ShipLengthCM, row.ShipLengthCM)
+	mergeNum(&d.ShipWidthCM, row.ShipWidthCM)
+	mergeNum(&d.ShipHeightCM, row.ShipHeightCM)
+	mergeNum(&d.DeclaredValue, row.DeclaredValue)
+	if row.HSCode != nil {
+		if d.HSCode != nil && *d.HSCode != *row.HSCode {
+			conflict = true
+		} else {
+			d.HSCode = row.HSCode
+		}
+	}
+	return conflict
 }
 
 // parseQuota reads a "Định mức" cell: blank → 0 (not declared); a positive whole
@@ -456,8 +604,10 @@ type skuAgg struct {
 	description   string         // first non-blank Mô tả
 	quotas        map[string]int // effective quota per material name (preview)
 	quotaSrc      map[string]string
-	declared      map[string]int // file's Định mức per lower(material name)
-	quotaConflict bool           // two rows declare different quotas for one material
+	declared      map[string]int    // file's Định mức per lower(material name)
+	quotaConflict bool              // two rows declare different quotas for one material
+	ship          *SKUShippingInput // shipping declaration the file gives (first value wins)
+	shipConflict  bool              // two rows declare different shipping values
 }
 
 // skuError reports a SKU-level problem against the SKU's first row.
@@ -594,6 +744,14 @@ func (s *MasterImportService) analyze(rows []LegacyRow) (*MasterImportPreview, e
 			})
 			continue
 		}
+		rowShip, shipMsg := parseRowShip(r)
+		if shipMsg != "" {
+			rowErrors = append(rowErrors, LegacyRowError{
+				RowNumber: r.RowNumber, SKU: sku, Material: strings.TrimSpace(r.Material),
+				ErrorCode: errShipInvalid, Message: shipMsg,
+			})
+			continue
+		}
 		parentCode := ""
 		if parent != "" {
 			parentCode = normalizeSKUCode(parent)
@@ -635,6 +793,9 @@ func (s *MasterImportService) analyze(rows []LegacyRow) (*MasterImportPreview, e
 		}
 		if d := strings.TrimSpace(r.Description); d != "" && agg.description == "" {
 			agg.description = d
+		}
+		if mergeShip(&agg.ship, rowShip) {
+			agg.shipConflict = true
 		}
 		if len(mats) > 0 {
 			if sig := rowSignature(mats); agg.rowSets[sig] == "" {
@@ -718,6 +879,8 @@ func (s *MasterImportService) analyze(rows []LegacyRow) (*MasterImportPreview, e
 			fail(errDimConflict, "Các dòng của SKU này khai D x R khác nhau — sửa cho thống nhất")
 		case agg.quotaConflict:
 			fail(errQuotaConflict, "Các dòng của SKU này khai định mức khác nhau cho cùng một Loại VL — sửa cho thống nhất")
+		case agg.shipConflict:
+			fail(errShipConflict, "Các dòng của SKU này khai cân nặng / hộp / giá trị / mã HS khác nhau — sửa cho thống nhất")
 		case len(agg.parentCodes) > 1:
 			fail(errParentConflict, "Các dòng của SKU này khai nhiều SKU cha khác nhau: "+strings.Join(agg.parentCodes, ", "))
 		case len(agg.parentCodes) == 1:
@@ -831,7 +994,10 @@ func (s *MasterImportService) analyze(rows []LegacyRow) (*MasterImportPreview, e
 			Code: agg.code, Name: agg.name, ProductName: productName, ProductNames: agg.productNames,
 			Exists: skuExists, MaterialNames: agg.matNames, Status: status, RowCount: agg.rowCount, IsCombo: isCombo,
 			LengthMM: agg.length, WidthMM: agg.width, Description: agg.description,
-			QuotaByMaterial: agg.quotas, QuotaSources: agg.quotaSrc,
+			QuotaByMaterial: agg.quotas, QuotaSources: agg.quotaSrc, Ship: agg.ship,
+		}
+		if agg.ship != nil {
+			sum.ShippingSKUs++
 		}
 		if len(agg.parentCodes) == 1 {
 			plan.ParentCode = agg.parentCodes[0]
@@ -1027,6 +1193,9 @@ func (s *MasterImportService) Commit(actor Actor, jobID uint) (*MasterImportPrev
 		// in one CASE-per-column UPDATE, since each carries its own values. A blank
 		// cell never clears: the patch only carries what the file actually says.
 		var patches []repositories.SKUPatch
+		// Shipping declarations to write on existing SKUs: the file's values laid
+		// over what the SKU already holds (a blank cell never clears one).
+		var shipWrites []repositories.SKUShipping
 		for _, sp := range pv.SKUs {
 			var parentID *uint
 			if id, ok := parentIDByCode[sp.ParentCode]; ok {
@@ -1056,6 +1225,15 @@ func (s *MasterImportService) Commit(actor Actor, jobID uint) (*MasterImportPrev
 				if p.ParentID != nil || p.LengthMM != nil || p.WidthMM != nil || p.Description != nil {
 					patches = append(patches, p)
 				}
+				if sp.Ship != nil {
+					merged := *rec
+					if err := applySKUShipping(&merged, *sp.Ship); err == nil && shippingChanged(rec, &merged) {
+						shipWrites = append(shipWrites, repositories.SKUShipping{
+							ID: rec.ID, WeightG: merged.ShipWeightG, LengthCM: merged.ShipLengthCM, WidthCM: merged.ShipWidthCM,
+							HeightCM: merged.ShipHeightCM, DeclaredValue: merged.DeclaredValue, HSCode: merged.HSCode,
+						})
+					}
+				}
 				continue
 			}
 			// Product name comes from the file's "Tên sản phẩm" column; when the file
@@ -1064,15 +1242,25 @@ func (s *MasterImportService) Commit(actor Actor, jobID uint) (*MasterImportPrev
 			if productName == "" {
 				productName = sp.Name
 			}
-			newSKUs = append(newSKUs, models.SKU{
+			created := models.SKU{
 				Code: sp.Code, Name: sp.Name, ProductName: productName, IsActive: true, IsCombo: sp.IsCombo,
 				ParentID: parentID, LengthMM: sp.LengthMM, WidthMM: sp.WidthMM, Description: sp.Description,
-			})
+			}
+			if sp.Ship != nil {
+				if err := applySKUShipping(&created, *sp.Ship); err == nil {
+					applied.ShippingSet++
+				}
+			}
+			newSKUs = append(newSKUs, created)
 		}
 		if err := txRepo.SKU.PatchMany(patches); err != nil {
 			return err
 		}
 		applied.SKUsUpdated = len(patches)
+		if err := txRepo.SKU.SetShippingMany(shipWrites); err != nil {
+			return err
+		}
+		applied.ShippingSet += len(shipWrites)
 		if err := txRepo.SKU.CreateMany(newSKUs, skuInsertBatch); err != nil {
 			return err
 		}
@@ -1332,18 +1520,18 @@ func removeVietnameseDiacritics(s string) string {
 // mức" (products per sheet of that Loại VL) and "Mô tả". Only "SKU" is required. The file the factory uploads may carry many more columns — those
 // are ignored — but the sample we hand back keeps just these so the format is
 // obvious.
-var masterTemplateHeaders = []string{"SKU cha", "SKU", "Tên sản phẩm", "Loại VL", "D (mm)", "R (mm)", "Định mức", "Mô tả"}
+var masterTemplateHeaders = append([]string{"SKU cha", "SKU", "Tên sản phẩm", "Loại VL", "D (mm)", "R (mm)", "Định mức", "Mô tả"}, masterShipHeaders...)
 
 // masterTemplateSample is a handful of example rows so the user can see exactly
 // what a valid row looks like before filling in their own: three children of the
 // parent HOP-NHUA (which must already exist — imported in step 1), a standalone
 // SKU with no parent, and a combo SKU (several materials in one cell joined by " + ").
 var masterTemplateSample = [][]string{
-	{"HOP-NHUA", "HOP-NHUA-BE", "Hộp nhựa bé", "Mica trong 3 ly", "80", "60", "90", "Hộp nắp trượt"},
-	{"HOP-NHUA", "HOP-NHUA-LON", "Hộp nhựa lớn", "Mica trong 3 ly", "160", "120", "20", ""},
-	{"HOP-NHUA", "HOP-NHUA-VUONG", "Hộp nhựa vuông", "Mica trong 3 ly", "100", "100", "", ""},
-	{"", "LWD-12IN", "Thớt gỗ khắc tên", "Gỗ 5 ly 3 lớp", "304.8", "203.2", "12", ""},
-	{"", "COMBO-A2-GAI", "Đèn gỗ combo", "Mica trong 3 ly + Mica Hologram", "", "", "", ""},
+	{"HOP-NHUA", "HOP-NHUA-BE", "Hộp nhựa bé", "Mica trong 3 ly", "80", "60", "90", "Hộp nắp trượt", "120", "20", "15", "5", "", ""},
+	{"HOP-NHUA", "HOP-NHUA-LON", "Hộp nhựa lớn", "Mica trong 3 ly", "160", "120", "20", "", "", "", "", "", "", ""},
+	{"HOP-NHUA", "HOP-NHUA-VUONG", "Hộp nhựa vuông", "Mica trong 3 ly", "100", "100", "", "", "", "", "", "", "", ""},
+	{"", "LWD-12IN", "Thớt gỗ khắc tên", "Gỗ 5 ly 3 lớp", "304.8", "203.2", "12", "", "450", "35", "25", "3", "", ""},
+	{"", "COMBO-A2-GAI", "Đèn gỗ combo", "Mica trong 3 ly + Mica Hologram", "", "", "", "", "", "", "", "", "", ""},
 }
 
 // MasterTemplateXLSX renders the master-data import sample as a real .xlsx
@@ -1351,7 +1539,7 @@ var masterTemplateSample = [][]string{
 // CSV that opened as garbled single-column text).
 func (s *MasterImportService) MasterTemplateXLSX() ([]byte, string, error) {
 	grid := append([][]string{masterTemplateHeaders}, masterTemplateSample...)
-	data, err := buildTemplateXLSX("Master data", grid, []float64{16, 20, 24, 30, 10, 10, 10, 28})
+	data, err := buildTemplateXLSX("Master data", grid, []float64{16, 20, 24, 30, 10, 10, 10, 28, 14, 14, 14, 14, 18, 12})
 	if err != nil {
 		return nil, "", err
 	}
@@ -1408,7 +1596,7 @@ func (s *MasterImportService) MasterExportXLSX() ([]byte, string, error) {
 		}
 		base := []string{parentCode(sku), sku.Code, sku.ProductName}
 		if len(sku.Materials) == 0 {
-			rows = append(rows, row{parent: base[0], cells: append(base, "", dimCell(sku.LengthMM), dimCell(sku.WidthMM), "", sku.Description, "")})
+			rows = append(rows, row{parent: base[0], cells: append(append(base, "", dimCell(sku.LengthMM), dimCell(sku.WidthMM), "", sku.Description), append(shipCells(sku), "")...)})
 			continue
 		}
 		for j := range sku.Materials {
@@ -1421,8 +1609,9 @@ func (s *MasterImportService) MasterExportXLSX() ([]byte, string, error) {
 			if q := models.EstimatedQuota(sku, &sm.Material); q > 0 {
 				estimate = strconv.Itoa(q)
 			}
-			rows = append(rows, row{parent: base[0], cells: append(append([]string{}, base...),
-				sm.Material.Name, dimCell(sku.LengthMM), dimCell(sku.WidthMM), declared, sku.Description, estimate)})
+			rows = append(rows, row{parent: base[0], cells: append(append(append([]string{}, base...),
+				sm.Material.Name, dimCell(sku.LengthMM), dimCell(sku.WidthMM), declared, sku.Description),
+				append(shipCells(sku), estimate)...)})
 		}
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
@@ -1435,11 +1624,38 @@ func (s *MasterImportService) MasterExportXLSX() ([]byte, string, error) {
 	for _, r := range rows {
 		grid = append(grid, r.cells)
 	}
-	data, err := buildTemplateXLSX("SKU", grid, []float64{16, 20, 24, 30, 10, 10, 10, 28, 20})
+	data, err := buildTemplateXLSX("SKU", grid, []float64{16, 20, 24, 30, 10, 10, 10, 28, 14, 14, 14, 14, 18, 12, 20})
 	if err != nil {
 		return nil, "", err
 	}
 	return data, "sku-hien-co.xlsx", nil
+}
+
+// shippingChanged reports whether the shipping declaration differs between two
+// states of one SKU.
+func shippingChanged(a, b *models.SKU) bool {
+	same := func(x, y *float64) bool {
+		if x == nil || y == nil {
+			return x == nil && y == nil
+		}
+		return *x == *y
+	}
+	return !same(a.ShipWeightG, b.ShipWeightG) || !same(a.ShipLengthCM, b.ShipLengthCM) ||
+		!same(a.ShipWidthCM, b.ShipWidthCM) || !same(a.ShipHeightCM, b.ShipHeightCM) ||
+		!same(a.DeclaredValue, b.DeclaredValue) || a.HSCode != b.HSCode
+}
+
+// masterShipHeaders are the six shipping columns of the master-data file: ONE
+// packed unit's weight and box, and (optionally) its customs declaration.
+var masterShipHeaders = []string{"Cân nặng (g)", "Dài hộp (cm)", "Rộng hộp (cm)", "Cao hộp (cm)", "Giá trị khai báo (USD)", "Mã HS"}
+
+// shipCells renders a SKU's own shipping declaration for the export, in the order
+// of masterShipHeaders.
+func shipCells(sku *models.SKU) []string {
+	return []string{
+		fmtShipNumber(sku.ShipWeightG), fmtShipNumber(sku.ShipLengthCM), fmtShipNumber(sku.ShipWidthCM),
+		fmtShipNumber(sku.ShipHeightCM), fmtShipNumber(sku.DeclaredValue), sku.HSCode,
+	}
 }
 
 // skuInsertBatch is how many SKUs / mappings ride in one INSERT.
