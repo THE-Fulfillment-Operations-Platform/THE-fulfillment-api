@@ -69,6 +69,14 @@ const MaxTHEShipBatch = 10
 type ShipSendOptions struct {
 	ShipOptions
 	ManualHandoff bool `json:"manual_handoff"`
+	// ExportOnly is the "quét xuất kho" (XK) scan: the order has left the
+	// warehouse, nothing more. It only COUNTS and records that fact — no THE call
+	// (so no weight / box / HS condition: those belong to the label station, where
+	// the parcel is weighed) and no wait for QC to be complete (most goods are done
+	// by the time they reach the door, and when the system still shows some
+	// product in production the scan goes through with a warning instead of
+	// holding the truck). Only scan-by-scan (ShipScannedOrderWith) honours it.
+	ExportOnly bool `json:"export_only"`
 }
 
 // ShipOrdersToCarrier hands finished orders to the carrier.
@@ -181,6 +189,12 @@ type ScannedShip struct {
 	// THE is the shipment the scan created on THE (nil when the integration is
 	// off).
 	THE *ShipmentOutcome `json:"the,omitempty"`
+	// Exported marks an XK scan (ExportOnly). UnfinishedItems / TotalItems then say
+	// how many live products the system still showed as not QC-passed when the
+	// order went out (0 = nothing to warn about).
+	Exported        bool `json:"exported,omitempty"`
+	UnfinishedItems int  `json:"unfinished_items,omitempty"`
+	TotalItems      int  `json:"total_items,omitempty"`
 }
 
 // ShipScannedOrder ships exactly one order, identified by whatever the ship
@@ -205,6 +219,9 @@ func (s *PackingService) ShipScannedOrderWith(ctx context.Context, actor Actor, 
 	order, err := s.orderByScanCode(code)
 	if err != nil {
 		return nil, err
+	}
+	if opts.ExportOnly {
+		return s.exportScanned(actor, order)
 	}
 	reason := shipBlockReason(order)
 	if reason == "" {
@@ -248,6 +265,60 @@ func (s *PackingService) ShipScannedOrderWith(ctx context.Context, actor Actor, 
 		SellerName:   order.Seller.Name,
 		HandoffCode:  handoff.Code,
 		THE:          outcome,
+	}, nil
+}
+
+// exportNote is the handoff note of an XK scan.
+const exportNote = "Quét xuất kho"
+
+// exportBlockReason is the ONLY thing that stops an XK scan: an order that cannot
+// physically be leaving (unapproved, cancelled, already recorded as out) or that
+// has nothing in it. QC progress and weight / box data are deliberately not here.
+func exportBlockReason(o *models.Order) string {
+	if o.ReviewStatus != models.ReviewApproved {
+		return "Đơn chưa được duyệt"
+	}
+	if o.CancellationStatus == models.CancellationApproved || o.CancellationStatus == models.CancellationSeller {
+		return "Đơn đã huỷ"
+	}
+	if o.SellerStatus.HandedOver() {
+		return "Đơn đã xuất kho / đã gửi rồi"
+	}
+	if len(activeOrderItems(o.Items)) == 0 {
+		return "Đơn không còn sản phẩm nào"
+	}
+	return ""
+}
+
+// exportScanned records one XK scan: the order left the warehouse. Same end state
+// as a send (a Handoff row + seller_status HANDED_OFF) so the journey screen and
+// the tracking gate keep working, but without creating anything on THE.
+func (s *PackingService) exportScanned(actor Actor, order *models.Order) (*ScannedShip, error) {
+	if reason := exportBlockReason(order); reason != "" {
+		return nil, apperr.Conflict(reason)
+	}
+	live := activeOrderItems(order.Items)
+	unfinished := 0
+	for _, it := range live {
+		if it.InternalStatus != models.StatusQCPassed {
+			unfinished++
+		}
+	}
+	handoff, err := s.shipOneNote(actor, order, exportNote)
+	if err != nil {
+		return nil, err
+	}
+	// The goods are out: a waiting basket (giỏ chờ) of this order has nothing left to wait for.
+	_ = s.repo.Basket.ReleaseForOrders([]uint{order.ID}, actor.IDPtr(), "Đơn đã xuất kho", time.Now())
+	if unfinished > 0 {
+		s.audit.Log(actor, "ORDER_EXPORT_UNFINISHED", "order", &order.ID,
+			fmt.Sprintf("Đơn %s xuất kho khi hệ thống còn %d/%d sản phẩm chưa QC đạt", order.InternalCode, unfinished, len(live)), nil)
+	}
+	s.tracking.RegisterOrderAsync(order)
+	return &ScannedShip{
+		OrderID: order.ID, InternalCode: order.InternalCode, StoreOrderID: order.StoreOrderID,
+		SellerName: order.Seller.Name, HandoffCode: handoff.Code,
+		Exported: true, UnfinishedItems: unfinished, TotalItems: len(live),
 	}, nil
 }
 
@@ -322,6 +393,11 @@ func shipBlockReason(o *models.Order) string {
 
 // shipOne records the handoff for a single order inside one transaction.
 func (s *PackingService) shipOne(actor Actor, order *models.Order) (*models.Handoff, error) {
+	return s.shipOneNote(actor, order, "Gửi hàng cho THE sau QC")
+}
+
+// shipOneNote is shipOne with the handoff's note (the XK scan writes its own).
+func (s *PackingService) shipOneNote(actor Actor, order *models.Order, note string) (*models.Handoff, error) {
 	var handoff *models.Handoff
 	now := time.Now()
 	// Kept so a rolled-back transaction does not leave the in-memory order looking
@@ -335,7 +411,7 @@ func (s *PackingService) shipOne(actor Actor, order *models.Order) (*models.Hand
 		handoff = &models.Handoff{
 			OrderID: &order.ID, Carrier: s.carrier.Name(),
 			Status: models.HandoffHandedOff, HandedOffByID: actor.IDPtr(), HandedOffAt: now,
-			Note: "Gửi hàng cho THE sau QC",
+			Note: note,
 		}
 		if err := txRepo.Handoff.Create(handoff); err != nil {
 			return err
@@ -363,8 +439,11 @@ func (s *PackingService) shipOne(actor Actor, order *models.Order) (*models.Hand
 		return nil, fmt.Errorf("không ghi được bàn giao: %w", err)
 	}
 
-	s.audit.Log(actor, "ORDER_SHIP_TO_CARRIER", "order", &order.ID,
-		fmt.Sprintf("Đơn %s gửi cho %s (handoff %s)", order.InternalCode, s.carrier.Name(), handoff.Code), nil)
+	action, msg := "ORDER_SHIP_TO_CARRIER", fmt.Sprintf("Đơn %s gửi cho %s (handoff %s)", order.InternalCode, s.carrier.Name(), handoff.Code)
+	if note == exportNote {
+		action, msg = "ORDER_EXPORT", fmt.Sprintf("Đơn %s xuất kho (handoff %s)", order.InternalCode, handoff.Code)
+	}
+	s.audit.Log(actor, action, "order", &order.ID, msg, nil)
 	return handoff, nil
 }
 
