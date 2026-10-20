@@ -287,6 +287,8 @@ func (s *OrderService) DeleteOrder(actor Actor, id uint) error {
 	if err := s.repo.Order.SoftDelete(order.ID); err != nil {
 		return apperr.Internal("could not delete order").Wrap(err)
 	}
+	// Đơn đã xoá không bao giờ đủ hàng: trả số giỏ chờ của nó (nếu có) lại cho đơn khác.
+	_ = s.repo.Basket.ReleaseForOrders([]uint{order.ID}, actor.IDPtr(), "Đơn đã xoá", time.Now())
 	s.audit.Log(actor, "ORDER_DELETE", "order", &order.ID, "Soft-deleted order "+order.InternalCode,
 		models.JSONMap{"review_status": string(order.ReviewStatus), "seller_status": string(order.SellerStatus)})
 	return nil
@@ -357,6 +359,7 @@ func (s *OrderService) DeleteOrders(actor Actor, ids []uint) (*OrderDeleteResult
 			return nil, apperr.Internal("could not delete orders").Wrap(err)
 		}
 		res.DeletedIDs = deletable
+		_ = s.repo.Basket.ReleaseForOrders(deletable, actor.IDPtr(), "Đơn đã xoá", time.Now())
 	}
 	// One entry per order, same as the single delete: the audit trail is how
 	// someone finds out where a given order went (and restores it).

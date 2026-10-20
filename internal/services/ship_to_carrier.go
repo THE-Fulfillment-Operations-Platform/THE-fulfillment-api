@@ -113,7 +113,11 @@ func (s *PackingService) ShipOrdersToCarrierWith(ctx context.Context, actor Acto
 			out.Skipped = append(out.Skipped, SkippedShipOrder{OrderID: id, Reason: "Không tìm thấy đơn"})
 			continue
 		}
-		if reason := shipBlockReason(order); reason != "" {
+		reason := shipBlockReason(order)
+		if reason == "" {
+			reason = basketBlockReason(s.repo, order.ID)
+		}
+		if reason != "" {
 			out.Skipped = append(out.Skipped, SkippedShipOrder{
 				OrderID: id, InternalCode: order.InternalCode, Reason: reason,
 			})
@@ -202,7 +206,11 @@ func (s *PackingService) ShipScannedOrderWith(ctx context.Context, actor Actor, 
 	if err != nil {
 		return nil, err
 	}
-	if reason := shipBlockReason(order); reason != "" {
+	reason := shipBlockReason(order)
+	if reason == "" {
+		reason = basketBlockReason(s.repo, order.ID)
+	}
+	if reason != "" {
 		// 409, not 400: the code was valid and named a real order — it is the
 		// order's state that refuses the scan.
 		return nil, apperr.Conflict(reason)

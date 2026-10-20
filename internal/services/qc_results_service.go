@@ -57,6 +57,9 @@ type QCResultOrder struct {
 	HandedOver     bool                  `json:"handed_over"`
 	TrackingNumber string                `json:"tracking_number,omitempty"`
 	TrackingStatus models.TrackingStatus `json:"tracking_status,omitempty"`
+	// BasketNumber is the waiting basket (giỏ chờ) the order's finished products
+	// sit in, until a picker bundles them and confirms. nil = not in a basket.
+	BasketNumber *int `json:"basket_number,omitempty"`
 	TotalItems   int    `json:"total_items"`
 	PassedItems  int    `json:"passed_items"`
 	ReworkItems  int    `json:"rework_items"`
@@ -195,8 +198,16 @@ func (s *QCService) buildResultOrders(ids []uint) ([]QCResultOrder, error) {
 		parent.Items = append(parent.Items, item)
 	}
 
+	baskets, err := s.repo.Basket.LiveByOrderIDs(ids)
+	if err != nil {
+		return nil, apperr.Internal("could not load waiting baskets").Wrap(err)
+	}
 	for i := range out {
 		o := &out[i]
+		if b, ok := baskets[o.OrderID]; ok {
+			n := b.Number
+			o.BasketNumber = &n
+		}
 		switch {
 		case o.TotalItems > 0 && o.PassedItems == o.TotalItems:
 			o.Status = QCOrderDone

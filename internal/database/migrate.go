@@ -48,6 +48,8 @@ func AutoMigrate(db *gorm.DB) error {
 		&models.Handoff{},
 		&models.Note{},
 		&models.AuditLog{},
+		// waiting baskets (giỏ chờ) for multi-product orders
+		&models.Basket{},
 		// carrier integration (THE)
 		&models.CarrierConfig{},
 		&models.CarrierShipment{},

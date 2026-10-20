@@ -249,6 +249,8 @@ func (s *CarrierService) PreflightTHE(ctx context.Context, actor Actor, orderIDs
 		po := PreflightOrder{OrderID: id, InternalCode: o.InternalCode}
 		if reason := shipBlockReason(o); reason != "" {
 			po.Reason = reason
+		} else if reason := basketBlockReason(s.repo, id); reason != "" {
+			po.Reason = reason
 		} else if live, _ := s.repo.Carrier.LiveShipment(id); live != nil && live.Status == models.ShipmentLabeled {
 			po.Ready, po.AlreadyPaid = true, true
 		} else if p, problems := s.BuildParcel(c, o); len(problems) > 0 {

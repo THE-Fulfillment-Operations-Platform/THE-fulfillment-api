@@ -201,7 +201,7 @@ type theEnv struct {
 func newTHEEnv(t *testing.T) *theEnv {
 	t.Helper()
 	db := newHandoffDB(t)
-	if err := db.AutoMigrate(&models.CarrierConfig{}, &models.CarrierShipment{}); err != nil {
+	if err := db.AutoMigrate(&models.Basket{}, &models.CarrierConfig{}, &models.CarrierShipment{}); err != nil {
 		t.Fatal(err)
 	}
 	// The production guard (migrate.go): one live shipment per order.

@@ -22,6 +22,8 @@ func newQCDB(t *testing.T) *gorm.DB {
 		&models.QCRecord{}, &models.Note{}, &models.StatusHistory{}, &models.AuditLog{},
 		// Packages: cửa "đơn đã bắt đầu đóng gói chưa" của QC fail / hạ QC đọc bảng này.
 		&models.Package{}, &models.PackageItem{},
+		// Giỏ chờ: Kết quả QC / Chờ gửi hàng đọc số giỏ của đơn.
+		&models.Basket{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

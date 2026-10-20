@@ -395,6 +395,20 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		qc.GET("/results", perm(view(models.FeatQCResults), view(models.FeatShipQueue)), h.QCResults)
 	}
 
+	// Giỏ chờ: đơn nhiều sản phẩm gom ở giỏ tới khi đủ. Người QC tạo giỏ ở trạm QC,
+	// người nhặt hàng (tổ gửi hàng) bó đủ rồi quét xác nhận thả giỏ — nên cả hai
+	// màn Quét QC và Chờ gửi hàng đều dùng được.
+	basketView := perm(view(models.FeatQC), view(models.FeatShipQueue))
+	basketManage := perm(manage(models.FeatQC), manage(models.FeatShipQueue))
+	baskets := authd.Group("/baskets")
+	{
+		baskets.GET("", basketView, h.ListBaskets)
+		baskets.GET("/order/:id", basketView, h.BasketForOrder)
+		baskets.POST("/lookup", basketView, h.LookupBasket)
+		baskets.POST("", basketManage, h.CreateBasket)
+		baskets.POST("/:id/release", basketManage, h.ReleaseBasket)
+	}
+
 	// Packing (the older station flow, still reachable off-menu) belongs to
 	// the ship queue.
 	packing := authd.Group("/packing")

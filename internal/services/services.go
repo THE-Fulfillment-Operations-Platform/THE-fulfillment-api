@@ -67,6 +67,7 @@ type Services struct {
 	Review       *ReviewService
 	Batch        *BatchService
 	QC           *QCService
+	Basket       *BasketService // giỏ chờ cho đơn nhiều sản phẩm
 	Packing      *PackingService
 	Note         *NoteService
 	Audit        *AuditService
@@ -103,6 +104,7 @@ func New(repo *repositories.Repositories, jwt *auth.Manager, carrier shipping.Ca
 	thumb := NewThumbService(repo, thumbs)
 	access := NewAccessService(repo)
 	imports := &ImportService{repo: repo, audit: audit}
+	qc := &QCService{repo: repo, audit: audit, thumb: thumb}
 	return &Services{
 		Auth:         &AuthService{repo: repo, jwt: jwt, audit: audit},
 		User:         &UserService{repo: repo, audit: audit, access: access},
@@ -116,7 +118,8 @@ func New(repo *repositories.Repositories, jwt *auth.Manager, carrier shipping.Ca
 		Order:        &OrderService{repo: repo, audit: audit, tracking: trackingSync},
 		Review:       &ReviewService{repo: repo, audit: audit},
 		Batch:        &BatchService{repo: repo, audit: audit, appBaseURL: appBaseURL},
-		QC:           &QCService{repo: repo, audit: audit, thumb: thumb},
+		QC:           qc,
+		Basket:       &BasketService{repo: repo, audit: audit, qc: qc},
 		Packing:      &PackingService{repo: repo, audit: audit, carrier: carrier, tracking: trackingSync, the: theSvc},
 		Note:         &NoteService{repo: repo, audit: audit},
 		Audit:        audit,

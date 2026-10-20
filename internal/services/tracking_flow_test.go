@@ -166,7 +166,7 @@ func newTrackingDB(t *testing.T) *gorm.DB {
 	// StatusHistory: a sync that moves the order forward records the transition,
 	// so without this table every tracking test logs a failed insert and the
 	// advance path is never really exercised.
-	if err := db.AutoMigrate(
+	if err := db.AutoMigrate(&models.Basket{},
 		&models.Seller{}, &models.Order{}, &models.OrderItem{},
 		&models.OrderTrackingEvent{}, &models.StatusHistory{}, &models.AuditLog{},
 	); err != nil {

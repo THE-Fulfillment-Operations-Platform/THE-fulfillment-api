@@ -71,6 +71,7 @@ type Repositories struct {
 	Admin        *AdminRepository
 	Carrier      *CarrierRepository
 	Role         *RoleRepository
+	Basket       *BasketRepository
 }
 
 // New builds the repository bundle from a GORM handle.
@@ -98,5 +99,6 @@ func New(db *gorm.DB) *Repositories {
 		Admin:        &AdminRepository{db: db},
 		Carrier:      &CarrierRepository{db: db},
 		Role:         &RoleRepository{db: db},
+		Basket:       &BasketRepository{db: db},
 	}
 }

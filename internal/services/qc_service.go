@@ -70,6 +70,7 @@ func (s *QCService) findItemByID(id uint) (*models.OrderItem, error) {
 type QCScanResult struct {
 	ItemID       uint   `json:"item_id"`
 	ItemCode     string `json:"item_code"`
+	OrderID      uint   `json:"order_id"`
 	OrderCode    string `json:"order_code"`
 	StoreOrderID string `json:"store_order_id"`
 	// OrderNote is the order's free-text note. The station shows it as a banner the
@@ -119,7 +120,7 @@ func (s *QCService) Scan(actor Actor, ref ScanRef) (*QCScanResult, error) {
 		return nil, err
 	}
 	res := &QCScanResult{
-		ItemID: item.ID, ItemCode: item.InternalCode, SKUCode: item.SKUCode,
+		ItemID: item.ID, ItemCode: item.InternalCode, SKUCode: item.SKUCode, OrderID: item.OrderID,
 		Quantity:      item.Quantity,
 		QCDescription: item.QCDescription, ImageCode: item.ImageCode,
 		EngraveText: item.EngraveText, DesignURL: item.DesignURL, BackDesignURL: item.BackDesignURL,

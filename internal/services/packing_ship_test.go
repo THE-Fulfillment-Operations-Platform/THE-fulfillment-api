@@ -18,7 +18,7 @@ func newShipDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(
+	if err := db.AutoMigrate(&models.Basket{},
 		&models.User{}, &models.Seller{}, &models.Order{}, &models.OrderItem{},
 		&models.Package{}, &models.PackageItem{}, &models.Handoff{},
 		&models.StatusHistory{}, &models.AuditLog{},

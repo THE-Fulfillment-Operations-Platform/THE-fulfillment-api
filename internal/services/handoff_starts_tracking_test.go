@@ -23,7 +23,7 @@ func newHandoffDB(t *testing.T) *gorm.DB {
 	}
 	// Batch/material tables come along because FindByID preloads an item's batch
 	// parts — the handoff path loads the whole order, not a slim projection.
-	if err := db.AutoMigrate(
+	if err := db.AutoMigrate(&models.Basket{},
 		&models.Seller{}, &models.Order{}, &models.OrderItem{},
 		&models.Material{}, &models.SKU{}, &models.SKUMaterial{},
 		&models.Batch{}, &models.BatchItem{},

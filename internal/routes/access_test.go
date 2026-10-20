@@ -30,6 +30,7 @@ var (
 	oDesignOps   = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleDesigner}
 	oProdOps     = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleProduction, models.RoleDesigner}
 	oQCOps       = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleQC}
+	oQCShip      = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleQC, models.RolePacking, models.RoleShipping}
 	oPackOps     = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RolePacking}
 	oScrap       = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleProduction, models.RoleQC}
 	oShipCarrier = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RolePacking, models.RoleShipping}
@@ -135,6 +136,11 @@ var routeCases = []routeCase{
 
 	{"POST", "/api/qc/scan", oQCOps, nil},
 	{"POST", "/api/qc/scan-order", oQCOps, nil},
+	{"GET", "/api/baskets", oQCShip, nil},
+	{"GET", "/api/baskets/order/1", oQCShip, nil},
+	{"POST", "/api/baskets/lookup", oQCShip, nil},
+	{"POST", "/api/baskets", oQCShip, nil},
+	{"POST", "/api/baskets/1/release", oQCShip, nil},
 	{"POST", "/api/qc/pass", oQCOps, nil},
 	{"POST", "/api/qc/fail", oQCOps, nil},
 	{"POST", "/api/qc/undo", oAdminOwner, nil},
