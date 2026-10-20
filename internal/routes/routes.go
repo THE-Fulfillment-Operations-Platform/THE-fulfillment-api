@@ -396,7 +396,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	}
 
 	// Giỏ chờ: đơn nhiều sản phẩm gom ở giỏ tới khi đủ. Người QC tạo giỏ ở trạm QC,
-	// người nhặt hàng (tổ gửi hàng) bó đủ rồi quét xác nhận thả giỏ — nên cả hai
+	// người nhặt hàng (tổ gửi hàng) bó đủ rồi quét xác nhận xoá giỏ — nên cả hai
 	// màn Quét QC và Chờ gửi hàng đều dùng được.
 	basketView := perm(view(models.FeatQC), view(models.FeatShipQueue))
 	basketManage := perm(manage(models.FeatQC), manage(models.FeatShipQueue))

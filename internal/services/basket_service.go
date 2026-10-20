@@ -40,7 +40,7 @@ type BasketService struct {
 const (
 	BasketOpen      = "OPEN"      // đang gom: còn sản phẩm chưa QC đạt
 	BasketFull      = "FULL"      // đủ hàng: chờ bó + quét xác nhận
-	BasketCancelled = "CANCELLED" // đơn / mọi sản phẩm đã huỷ: bỏ hàng ra, thả giỏ
+	BasketCancelled = "CANCELLED" // đơn / mọi sản phẩm đã huỷ: bỏ hàng ra, xoá giỏ
 )
 
 // BasketView is one basket with its order and every product's QC state.
@@ -361,7 +361,7 @@ func (s *BasketService) Release(actor Actor, id uint, in ReleaseInput) (*BasketV
 		return nil, apperr.NotFound("Không tìm thấy giỏ")
 	}
 	if b.ReleasedAt != nil {
-		return nil, apperr.Conflict(fmt.Sprintf("Giỏ số %d đã được thả rồi", b.Number))
+		return nil, apperr.Conflict(fmt.Sprintf("Giỏ số %d đã được xoá rồi", b.Number))
 	}
 	v, err := s.view(b)
 	if err != nil {
@@ -375,30 +375,30 @@ func (s *BasketService) Release(actor Actor, id uint, in ReleaseInput) (*BasketV
 	default:
 		if !in.Force {
 			return nil, apperr.Conflict(fmt.Sprintf(
-				"Giỏ số %d chưa đủ hàng: mới QC đạt %d/%d sản phẩm — chưa thả được", b.Number, v.PassedItems, v.TotalItems))
+				"Giỏ số %d chưa đủ hàng: mới QC đạt %d/%d sản phẩm — chưa xoá giỏ được", b.Number, v.PassedItems, v.TotalItems))
 		}
 		if !actor.Role.HasAdminRights() {
-			return nil, apperr.Forbidden("Chỉ Admin / Chủ sở hữu được thả giỏ khi đơn chưa đủ hàng")
+			return nil, apperr.Forbidden("Chỉ Admin / Chủ sở hữu được xoá giỏ khi đơn chưa đủ hàng")
 		}
 		reason := strings.TrimSpace(in.Reason)
 		if reason == "" {
-			return nil, apperr.BadRequest("Nhập lý do thả giỏ khi đơn chưa đủ hàng")
+			return nil, apperr.BadRequest("Nhập lý do xoá giỏ khi đơn chưa đủ hàng")
 		}
 		if len([]rune(reason)) > 200 {
 			return nil, apperr.BadRequest("Lý do tối đa 200 ký tự")
 		}
-		note = "Thả khi chưa đủ: " + reason
+		note = "Xoá khi chưa đủ: " + reason
 	}
 	now := time.Now()
 	n, err := s.repo.Basket.Release(b.ID, actor.IDPtr(), note, now)
 	if err != nil {
-		return nil, apperr.Internal("Không thả được giỏ").Wrap(err)
+		return nil, apperr.Internal("Không xoá được giỏ").Wrap(err)
 	}
 	if n == 0 {
-		return nil, apperr.Conflict(fmt.Sprintf("Giỏ số %d vừa được người khác thả", b.Number))
+		return nil, apperr.Conflict(fmt.Sprintf("Giỏ số %d vừa được người khác xoá", b.Number))
 	}
 	s.audit.Log(actor, "BASKET_RELEASE", "order", &b.OrderID,
-		fmt.Sprintf("Thả giỏ chờ số %d của đơn %s — %s", b.Number, v.OrderCode, note), nil)
+		fmt.Sprintf("Xoá giỏ chờ số %d của đơn %s — %s", b.Number, v.OrderCode, note), nil)
 	v.ReleasedAt, v.ReleaseNote = &now, note
 	return v, nil
 }
@@ -414,5 +414,5 @@ func basketBlockReason(repo *repositories.Repositories, orderID uint) string {
 	if b == nil {
 		return ""
 	}
-	return fmt.Sprintf("Đơn đang ở giỏ chờ số %d — ra giỏ bó đủ hàng rồi quét xác nhận ở màn Giỏ chờ trước khi gửi", b.Number)
+	return fmt.Sprintf("Đơn đang ở giỏ chờ số %d — ra giỏ bó đủ hàng rồi quét xác nhận xoá giỏ ở màn Giỏ chờ trước khi gửi", b.Number)
 }

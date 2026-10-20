@@ -59,10 +59,10 @@ func TestBasket_LowestFreeNumberAndIdempotent(t *testing.T) {
 		t.Fatalf("số giỏ phải tăng dần 2, 3: %d, %d", gb.Number, gc.Number)
 	}
 
-	// Thả giỏ 2 → đơn mới tiếp theo lấy lại số 2 (số trống thấp nhất), không phải 4.
+	// Xoá giỏ 2 → đơn mới tiếp theo lấy lại số 2 (số trống thấp nhất), không phải 4.
 	passAll(db, b.ID)
 	if _, err := svc.Release(qcActor, gb.ID, ReleaseInput{}); err != nil {
-		t.Fatalf("thả giỏ đủ hàng: %v", err)
+		t.Fatalf("xoá giỏ đủ hàng: %v", err)
 	}
 	d := seedQCResultOrder(t, db, "100004", models.StatusQCPassed, models.StatusCut)
 	gd, _, err := svc.Create(qcActor, d.ID)
@@ -117,7 +117,7 @@ func TestBasket_AllBasketsInUse(t *testing.T) {
 }
 
 // Trạng thái giỏ đọc từ đơn: QC đạt nốt → ĐỦ; QC fail / hạ QC làm đơn thiếu lại →
-// ĐANG GOM; thả giỏ chỉ được khi ĐỦ (hoặc đơn huỷ), còn thiếu thì chỉ admin thả
+// ĐANG GOM; xoá giỏ chỉ được khi ĐỦ (hoặc đơn huỷ), còn thiếu thì chỉ admin xoá
 // được và phải có lý do.
 func TestBasket_FullAndReleaseRules(t *testing.T) {
 	db, svc := newBasketEnv(t)
@@ -125,12 +125,12 @@ func TestBasket_FullAndReleaseRules(t *testing.T) {
 	g, _, _ := svc.Create(qcActor, o.ID)
 
 	_, err := svc.Release(qcActor, g.ID, ReleaseInput{})
-	wantHTTP(t, "thả giỏ chưa đủ", err, 409)
+	wantHTTP(t, "xoá giỏ chưa đủ", err, 409)
 	_, err = svc.Release(qcActor, g.ID, ReleaseInput{Force: true, Reason: "lấy hàng ra"})
-	wantHTTP(t, "QC ép thả giỏ", err, 403)
+	wantHTTP(t, "QC ép xoá giỏ", err, 403)
 	admin := Actor{ID: 2, Role: models.RoleAdmin}
 	_, err = svc.Release(admin, g.ID, ReleaseInput{Force: true})
-	wantHTTP(t, "ép thả không lý do", err, 400)
+	wantHTTP(t, "ép xoá không lý do", err, 400)
 
 	passAll(db, o.ID)
 	fo, err := svc.ForOrder(o.ID)
@@ -139,22 +139,22 @@ func TestBasket_FullAndReleaseRules(t *testing.T) {
 	}
 	rel, err := svc.Release(qcActor, g.ID, ReleaseInput{})
 	if err != nil || rel.ReleasedAt == nil {
-		t.Fatalf("giỏ đủ phải thả được: %+v err=%v", rel, err)
+		t.Fatalf("giỏ đủ phải xoá được: %+v err=%v", rel, err)
 	}
 	_, err = svc.Release(qcActor, g.ID, ReleaseInput{})
-	wantHTTP(t, "thả lần hai", err, 409)
+	wantHTTP(t, "xoá lần hai", err, 409)
 	if fo, _ := svc.ForOrder(o.ID); fo.Basket != nil {
-		t.Fatalf("thả xong đơn không còn giỏ")
+		t.Fatalf("xoá xong đơn không còn giỏ")
 	}
 
-	// Admin ép thả giỏ chưa đủ, có lý do.
+	// Admin ép xoá giỏ chưa đủ, có lý do.
 	o2 := seedQCResultOrder(t, db, "100031", models.StatusQCPassed, models.StatusCut)
 	g2, _, _ := svc.Create(qcActor, o2.ID)
 	if _, err := svc.Release(admin, g2.ID, ReleaseInput{Force: true, Reason: "đơn đổi ý, gom lại sau"}); err != nil {
-		t.Fatalf("admin ép thả có lý do: %v", err)
+		t.Fatalf("admin ép xoá có lý do: %v", err)
 	}
 
-	// Đơn bị huỷ khi đang nằm giỏ → giỏ hiện ĐƠN HUỶ, thả được không cần ép.
+	// Đơn bị huỷ khi đang nằm giỏ → giỏ hiện ĐƠN HUỶ, xoá được không cần ép.
 	o3 := seedQCResultOrder(t, db, "100032", models.StatusQCPassed, models.StatusCut)
 	g3, _, _ := svc.Create(qcActor, o3.ID)
 	db.Model(&models.Order{}).Where("id = ?", o3.ID).Update("cancellation_status", models.CancellationApproved)
@@ -169,7 +169,7 @@ func TestBasket_FullAndReleaseRules(t *testing.T) {
 		t.Fatalf("đơn huỷ thì giỏ phải CANCELLED, got %q", st)
 	}
 	if _, err := svc.Release(qcActor, g3.ID, ReleaseInput{}); err != nil {
-		t.Fatalf("giỏ của đơn huỷ phải thả được: %v", err)
+		t.Fatalf("giỏ của đơn huỷ phải xoá được: %v", err)
 	}
 }
 
@@ -201,7 +201,7 @@ func TestBasket_LookupByAnyCode(t *testing.T) {
 }
 
 // Lúc sang đóng hàng là chắc chắn phải đủ: đơn đã QC đủ nhưng còn nằm giỏ (chưa
-// quét xác nhận bó) thì KHÔNG gửi được; thả giỏ xong mới gửi.
+// quét xác nhận bó) thì KHÔNG gửi được; xoá giỏ xong mới gửi.
 func TestBasket_BlocksShippingUntilReleased(t *testing.T) {
 	db := newHandoffDB(t)
 	// Giỏ đọc trạng thái QC của đơn (bảng qc_records + người kiểm).
@@ -232,11 +232,11 @@ func TestBasket_BlocksShippingUntilReleased(t *testing.T) {
 	wantHTTP(t, "quét gửi đơn còn nằm giỏ", err, 409)
 
 	if _, err := svc.Release(qcActor, g.ID, ReleaseInput{}); err != nil {
-		t.Fatalf("thả giỏ: %v", err)
+		t.Fatalf("xoá giỏ: %v", err)
 	}
 	res, err = ship.ShipOrdersToCarrier(opsActor(), []uint{o.ID})
 	if err != nil || len(res.Shipped) != 1 {
-		t.Fatalf("thả giỏ xong phải gửi được: %+v err=%v", res, err)
+		t.Fatalf("xoá giỏ xong phải gửi được: %+v err=%v", res, err)
 	}
 }
 
