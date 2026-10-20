@@ -200,9 +200,10 @@ func TestBasket_LookupByAnyCode(t *testing.T) {
 	_ = o2
 }
 
-// Lúc sang đóng hàng là chắc chắn phải đủ: đơn đã QC đủ nhưng còn nằm giỏ (chưa
-// quét xác nhận bó) thì KHÔNG gửi được; xoá giỏ xong mới gửi.
-func TestBasket_BlocksShippingUntilReleased(t *testing.T) {
+// Lúc sang đóng hàng là chắc chắn phải đủ: đơn CÒN thiếu sản phẩm thì không gửi
+// được (luật cũ chặn theo QC). Đơn đã đủ thì giỏ chờ không được cản đường — nếu giỏ
+// chưa kịp tự xoá thì bước gửi tự dọn, rồi gửi bình thường.
+func TestBasket_NeverHoldsACompleteOrder(t *testing.T) {
 	db := newHandoffDB(t)
 	// Giỏ đọc trạng thái QC của đơn (bảng qc_records + người kiểm).
 	if err := db.AutoMigrate(&models.QCRecord{}, &models.User{}); err != nil {
@@ -215,28 +216,22 @@ func TestBasket_BlocksShippingUntilReleased(t *testing.T) {
 	svc := &BasketService{repo: repo, audit: audit, qc: &QCService{repo: repo, audit: audit}}
 
 	o := seedOrderForShipping(t, db, "100050", models.StatusQCPassed, models.StatusCut)
-	g, _, err := svc.Create(qcActor, o.ID)
-	if err != nil {
+	if _, _, err := svc.Create(qcActor, o.ID); err != nil {
 		t.Fatalf("tạo giỏ: %v", err)
 	}
-	db.Model(&models.OrderItem{}).Where("order_id = ?", o.ID).Update("internal_status", models.StatusQCPassed)
-
+	// Còn thiếu 1 sản phẩm: không gửi được.
 	res, err := ship.ShipOrdersToCarrier(opsActor(), []uint{o.ID})
-	if err != nil {
-		t.Fatalf("ship: %v", err)
+	if err != nil || len(res.Shipped) != 0 || len(res.Skipped) != 1 {
+		t.Fatalf("đơn chưa đủ phải bị chặn: %+v err=%v", res, err)
 	}
-	if len(res.Shipped) != 0 || len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0].Reason, "giỏ chờ số 1") {
-		t.Fatalf("đơn còn nằm giỏ phải bị chặn kèm số giỏ: %+v", res)
-	}
-	_, err = ship.ShipScannedOrder(opsActor(), "100050")
-	wantHTTP(t, "quét gửi đơn còn nằm giỏ", err, 409)
-
-	if _, err := svc.Release(qcActor, g.ID, ReleaseInput{}); err != nil {
-		t.Fatalf("xoá giỏ: %v", err)
-	}
+	// Sản phẩm cuối đạt nhưng giỏ chưa kịp xoá → gửi được, giỏ được dọn.
+	db.Model(&models.OrderItem{}).Where("order_id = ?", o.ID).Update("internal_status", models.StatusQCPassed)
 	res, err = ship.ShipOrdersToCarrier(opsActor(), []uint{o.ID})
 	if err != nil || len(res.Shipped) != 1 {
-		t.Fatalf("xoá giỏ xong phải gửi được: %+v err=%v", res, err)
+		t.Fatalf("đơn đủ hàng phải gửi được dù giỏ chưa kịp xoá: %+v err=%v", res, err)
+	}
+	if b, _ := repo.Basket.LiveByOrder(o.ID); b != nil {
+		t.Fatalf("giỏ của đơn đã gửi phải được dọn")
 	}
 }
 
@@ -276,5 +271,123 @@ func TestParseBasketCode(t *testing.T) {
 		if n, ok := parseBasketCode(code); ok {
 			t.Errorf("%q không phải mã giỏ, got %d", code, n)
 		}
+	}
+}
+
+// Hợp đồng mới (20/10): sản phẩm CUỐI của đơn QC PASS xong thì giỏ TỰ XOÁ — không ai
+// phải bấm. Đi qua QCService.Pass thật (cùng đường trạm QC gọi).
+func TestBasket_AutoDeletedWhenLastProductPasses(t *testing.T) {
+	db, svc := newBasketEnv(t)
+	svc.qc.baskets = svc // QCService.Pass gọi svc.AutoRelease khi sản phẩm cuối đạt
+	repo := svc.repo
+
+	o := seedQCResultOrder(t, db, "100070", models.StatusQCPassed, models.StatusCut, models.StatusCut)
+	db.Model(&models.OrderItem{}).Where("order_id = ?", o.ID).Update("mockup_url", "https://example.com/m.png")
+	// QC chỉ cho PASS sản phẩm đã có phần sản xuất (batch) — dựng cho 2 sản phẩm chưa QC.
+	batch := &models.Batch{Code: "B-101900", MaterialID: 1, Status: models.StatusCut}
+	if err := db.Create(batch).Error; err != nil {
+		t.Fatalf("seed batch: %v", err)
+	}
+	var its []models.OrderItem
+	db.Where("order_id = ? AND internal_status = ?", o.ID, models.StatusCut).Find(&its)
+	for _, it := range its {
+		if err := db.Create(&models.BatchItem{BatchID: batch.ID, OrderItemID: it.ID, MaterialID: 1, Status: models.StatusCut}).Error; err != nil {
+			t.Fatalf("seed batch item: %v", err)
+		}
+	}
+	g, _, err := svc.Create(qcActor, o.ID)
+	if err != nil {
+		t.Fatalf("tạo giỏ: %v", err)
+	}
+	if g.Number != 1 {
+		t.Fatalf("giỏ đầu phải là số 1, got %d", g.Number)
+	}
+
+	pass := func(code string) {
+		t.Helper()
+		if _, err := svc.qc.Pass(qcActor, QCDecisionInput{ScanRef: ScanRef{Code: code}}); err != nil {
+			t.Fatalf("QC pass %s: %v", code, err)
+		}
+	}
+	// Sản phẩm thứ 2 đạt: còn thiếu 1 → giỏ vẫn còn.
+	pass("100070_2")
+	if b, _ := repo.Basket.LiveByOrder(o.ID); b == nil {
+		t.Fatalf("còn thiếu 1 sản phẩm thì giỏ phải còn")
+	}
+	// Sản phẩm cuối đạt → đủ → giỏ tự xoá, số 1 trống ngay.
+	pass("100070_3")
+	if b, _ := repo.Basket.LiveByOrder(o.ID); b != nil {
+		t.Fatalf("đơn đủ hàng thì giỏ phải tự xoá, vẫn còn giỏ #%d", b.Number)
+	}
+	var rel models.Basket
+	db.First(&rel, g.ID)
+	if rel.ReleasedAt == nil || rel.ReleaseNote != autoReleaseNote {
+		t.Fatalf("giỏ phải ghi nhận là tự xoá: %+v", rel)
+	}
+	if used, _ := repo.Basket.LiveNumbers(); len(used) != 0 {
+		t.Fatalf("không còn giỏ nào đang dùng, got %v", used)
+	}
+
+	// Đơn mới tạo giỏ: lấy lại ngay số 1.
+	o2 := seedQCResultOrder(t, db, "100071", models.StatusQCPassed, models.StatusCut)
+	g2, _, err := svc.Create(qcActor, o2.ID)
+	if err != nil || g2.Number != 1 {
+		t.Fatalf("số 1 vừa trống phải được cấp lại: %+v err=%v", g2, err)
+	}
+}
+
+// Cấp số: quét 1..100, chỗ nào đang vắng thì lấy chỗ đó (thấp nhất). Cả 99 số kia
+// đang có người dùng mà chỉ trống đúng một số → giỏ mới lấy đúng số đó.
+func TestBasket_FillsTheOnlyFreeNumber(t *testing.T) {
+	db, svc := newBasketEnv(t)
+	for n := 1; n <= models.MaxBaskets; n++ {
+		if n == 37 {
+			continue
+		}
+		if err := db.Create(&models.Basket{Number: n, OrderID: uint(100000 + n)}).Error; err != nil {
+			t.Fatalf("seed giỏ %d: %v", n, err)
+		}
+	}
+	o := seedQCResultOrder(t, db, "100080", models.StatusQCPassed, models.StatusCut)
+	g, _, err := svc.Create(qcActor, o.ID)
+	if err != nil || g.Number != 37 {
+		t.Fatalf("chỉ trống số 37 thì phải lấy 37, got %+v err=%v", g, err)
+	}
+	// Hết sạch số thì mới báo hết.
+	o2 := seedQCResultOrder(t, db, "100081", models.StatusQCPassed, models.StatusCut)
+	_, _, err = svc.Create(qcActor, o2.ID)
+	wantHTTP(t, "hết giỏ", err, 409)
+}
+
+// Lưới an toàn: đơn đủ hàng mà giỏ chưa kịp xoá (sản phẩm cuối bị HUỶ chứ không QC)
+// thì màn Giỏ chờ và bước gửi hàng tự dọn — không treo giỏ "đủ" chờ một cú bấm.
+func TestBasket_SweepsCompleteOrders(t *testing.T) {
+	db, svc := newBasketEnv(t)
+	o := seedQCResultOrder(t, db, "100090", models.StatusQCPassed, models.StatusCut)
+	if _, _, err := svc.Create(qcActor, o.ID); err != nil {
+		t.Fatalf("tạo giỏ: %v", err)
+	}
+	var items []models.OrderItem
+	db.Where("order_id = ?", o.ID).Order("line_no asc").Find(&items)
+	// Sản phẩm còn lại bị huỷ → đơn chỉ còn 1 sản phẩm, đã QC đạt → đủ.
+	db.Model(&models.OrderItem{}).Where("id = ?", items[1].ID).Update("cancellation_status", models.CancellationApproved)
+
+	if reason := basketBlockReason(svc.repo, o.ID); reason != "" {
+		t.Fatalf("đơn đủ hàng không bị giỏ chặn gửi: %q", reason)
+	}
+	if b, _ := svc.repo.Basket.LiveByOrder(o.ID); b != nil {
+		t.Fatalf("kiểm tra gửi hàng phải dọn giỏ của đơn đủ")
+	}
+
+	o2 := seedQCResultOrder(t, db, "100091", models.StatusQCPassed, models.StatusCut)
+	if _, _, err := svc.Create(qcActor, o2.ID); err != nil {
+		t.Fatalf("tạo giỏ 2: %v", err)
+	}
+	var items2 []models.OrderItem
+	db.Where("order_id = ?", o2.ID).Order("line_no asc").Find(&items2)
+	db.Model(&models.OrderItem{}).Where("id = ?", items2[1].ID).Update("cancellation_status", models.CancellationApproved)
+	list, err := svc.List()
+	if err != nil || len(list) != 0 {
+		t.Fatalf("List phải dọn giỏ đủ hàng, còn %d giỏ, err=%v", len(list), err)
 	}
 }

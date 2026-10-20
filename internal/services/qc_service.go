@@ -23,6 +23,9 @@ type QCService struct {
 	// a supported state: the scan payload then carries no thumbnail URL and the
 	// station falls back to loading the mockup from its origin.
 	thumb *ThumbService
+	// baskets deletes an order's waiting basket the moment its last product passes
+	// QC. Nil is a supported state (tests, tools that build a bare QCService).
+	baskets *BasketService
 }
 
 // ScanRef identifies an item by its tem code or internal id.
@@ -518,6 +521,11 @@ func (s *QCService) Pass(actor Actor, in QCDecisionInput) (*models.OrderItem, er
 	}
 
 	s.audit.Log(actor, "QC_PASS", "order_item", &item.ID, "QC pass for item "+item.InternalCode, nil)
+	// Last product of the order just passed: its waiting basket (giỏ chờ) is no
+	// longer needed — delete it so the number is free for the next order.
+	if s.baskets != nil {
+		s.baskets.AutoRelease(actor, item.OrderID)
+	}
 	// The item is answered from memory, already updated in place. Re-reading it here
 	// would re-run every association preload resolveItem just did — a dozen round
 	// trips to tell the station what it is about to be told anyway.

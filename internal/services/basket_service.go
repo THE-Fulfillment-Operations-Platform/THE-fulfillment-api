@@ -21,15 +21,20 @@ import (
 //     (1..100) and prints a basket label to put with the goods.
 //  2. Every later product of that order shows its basket number as soon as it is
 //     scanned, so the operator knows where its siblings are waiting.
-//  3. When the last product passes QC the basket is FULL: the picker takes that
-//     product to the basket, counts the order, bundles it, and confirms with one
-//     more scan. Only that confirmation frees the number — and only an order whose
-//     basket is released can be sent on, so whatever reaches packing is complete.
+//  3. When the last product passes QC the order is complete and the basket is
+//     deleted AUTOMATICALLY (AutoRelease, called right after the QC pass): nobody
+//     presses anything. The QC station tells the operator which basket the goods
+//     are in; they bring the last product there and bundle the order. The number
+//     is free again at once — the next new basket takes the lowest free number
+//     in 1..100, so a freed #1 is reused before #2.
 //
 // A basket's state is never stored — it is read from the order every time: OPEN
-// while some live product has not passed QC, FULL once all have, CANCELLED when
-// the order (or every product in it) was cancelled. A QC fail, an undo or a
-// cancellation therefore moves the basket by itself, with no hook to forget.
+// while some live product has not passed QC, FULL once all have (a moment only:
+// the QC pass deletes it), CANCELLED when the order (or every product in it) was
+// cancelled. A QC fail, an undo or a cancellation therefore moves the basket by
+// itself. Anything that completes an order without going through QC pass (the last
+// unfinished product cancelled) is caught by the sweep in List and in the
+// ship-queue check.
 type BasketService struct {
 	repo  *repositories.Repositories
 	audit *AuditService
@@ -146,7 +151,64 @@ func (s *BasketService) List() ([]BasketView, error) {
 	if err != nil {
 		return nil, apperr.Internal("Không tải được danh sách giỏ").Wrap(err)
 	}
-	return s.views(live)
+	vs, err := s.views(live)
+	if err != nil {
+		return nil, err
+	}
+	// Sweep: a basket whose order is complete but was missed by the QC-pass hook
+	// (the last unfinished product was cancelled instead) is deleted here, so the
+	// screen never shows a "full" basket waiting for a click that no longer exists.
+	out := vs[:0]
+	for _, v := range vs {
+		if v.Status == BasketFull && s.autoRelease(nil, v.ID) {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+// AutoRelease deletes the order's basket the moment the order is complete — every
+// live product QC-passed. Called right after a QC pass; best effort (the sweep in
+// List and basketBlockReason catches whatever it misses). Returns the basket that
+// was deleted, or nil when the order has none / is not complete yet.
+func (s *BasketService) AutoRelease(actor Actor, orderID uint) *BasketView {
+	b, err := s.repo.Basket.LiveByOrder(orderID)
+	if err != nil || b == nil {
+		return nil
+	}
+	v, err := s.view(b)
+	if err != nil || v.Status != BasketFull {
+		return nil
+	}
+	if !s.autoRelease(&actor, b.ID) {
+		return nil
+	}
+	now := time.Now()
+	v.ReleasedAt, v.ReleaseNote = &now, autoReleaseNote
+	return v
+}
+
+const autoReleaseNote = "Tự động xoá: đơn đủ hàng"
+
+func (s *BasketService) autoRelease(actor *Actor, id uint) bool {
+	var by *uint
+	if actor != nil {
+		by = actor.IDPtr()
+	}
+	n, err := s.repo.Basket.Release(id, by, autoReleaseNote, time.Now())
+	if err != nil || n == 0 {
+		return false
+	}
+	if b, _ := s.repo.Basket.FindByID(id); b != nil {
+		a := Actor{}
+		if actor != nil {
+			a = *actor
+		}
+		s.audit.Log(a, "BASKET_AUTO_RELEASE", "order", &b.OrderID,
+			fmt.Sprintf("Giỏ chờ số %d tự xoá: đơn đủ hàng", b.Number), nil)
+	}
+	return true
 }
 
 // BasketForOrder answers "is this order in a basket, and does it need one" — what
@@ -414,5 +476,21 @@ func basketBlockReason(repo *repositories.Repositories, orderID uint) string {
 	if b == nil {
 		return ""
 	}
-	return fmt.Sprintf("Đơn đang ở giỏ chờ số %d — ra giỏ bó đủ hàng rồi quét xác nhận xoá giỏ ở màn Giỏ chờ trước khi gửi", b.Number)
+	// A complete order never waits on its basket: delete it now if the QC-pass hook
+	// missed it, and let the order go.
+	if lines, err := repo.OrderItem.QCResultLines([]uint{orderID}); err == nil && len(lines) > 0 {
+		complete := true
+		for i := range lines {
+			if lines[i].InternalStatus != models.StatusQCPassed {
+				complete = false
+				break
+			}
+		}
+		if complete {
+			if n, err := repo.Basket.Release(b.ID, nil, autoReleaseNote, time.Now()); err == nil && n > 0 {
+				return ""
+			}
+		}
+	}
+	return fmt.Sprintf("Đơn đang ở giỏ chờ số %d — còn sản phẩm chưa QC đạt, chưa gửi được", b.Number)
 }

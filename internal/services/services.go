@@ -105,6 +105,8 @@ func New(repo *repositories.Repositories, jwt *auth.Manager, carrier shipping.Ca
 	access := NewAccessService(repo)
 	imports := &ImportService{repo: repo, audit: audit}
 	qc := &QCService{repo: repo, audit: audit, thumb: thumb}
+	basket := &BasketService{repo: repo, audit: audit, qc: qc}
+	qc.baskets = basket
 	return &Services{
 		Auth:         &AuthService{repo: repo, jwt: jwt, audit: audit},
 		User:         &UserService{repo: repo, audit: audit, access: access},
@@ -119,7 +121,7 @@ func New(repo *repositories.Repositories, jwt *auth.Manager, carrier shipping.Ca
 		Review:       &ReviewService{repo: repo, audit: audit},
 		Batch:        &BatchService{repo: repo, audit: audit, appBaseURL: appBaseURL},
 		QC:           qc,
-		Basket:       &BasketService{repo: repo, audit: audit, qc: qc},
+		Basket:       basket,
 		Packing:      &PackingService{repo: repo, audit: audit, carrier: carrier, tracking: trackingSync, the: theSvc},
 		Note:         &NoteService{repo: repo, audit: audit},
 		Audit:        audit,
