@@ -287,6 +287,13 @@ func (s *OrderService) DeleteOrder(actor Actor, id uint) error {
 	if reason := s.deleteBlockedByTHE(order.ID); reason != "" {
 		return apperr.Conflict(reason)
 	}
+	if actor.Role == models.RoleTechnician {
+		// Đơn test của kỹ thuật viên: xoá HẲN, không để lại bóng ma trong DB.
+		if err := s.purgeOrders(actor, []*models.Order{order}); err != nil {
+			return err
+		}
+		return nil
+	}
 	if err := s.repo.Order.SoftDelete(order.ID); err != nil {
 		return apperr.Internal("could not delete order").Wrap(err)
 	}
@@ -294,6 +301,26 @@ func (s *OrderService) DeleteOrder(actor Actor, id uint) error {
 	_ = s.repo.Basket.ReleaseForOrders([]uint{order.ID}, actor.IDPtr(), "Đơn đã xoá", time.Now())
 	s.audit.Log(actor, "ORDER_DELETE", "order", &order.ID, "Soft-deleted order "+order.InternalCode,
 		models.JSONMap{"review_status": string(order.ReviewStatus), "seller_status": string(order.SellerStatus)})
+	return nil
+}
+
+// purgeOrders hard-deletes test orders with everything attached (see
+// OrderRepository.PurgeOrders), refreshes the status of any batch that still holds
+// other orders' parts, and leaves ONE audit line per order — the only trace.
+func (s *OrderService) purgeOrders(actor Actor, orders []*models.Order) error {
+	ids := make([]uint, 0, len(orders))
+	for _, o := range orders {
+		ids = append(ids, o.ID)
+	}
+	remaining, err := s.repo.Order.PurgeOrders(ids)
+	if err != nil {
+		return apperr.Internal("could not purge orders").Wrap(err)
+	}
+	_ = recomputeBatchStatuses(s.repo, remaining, actor)
+	for _, o := range orders {
+		s.audit.Log(actor, "ORDER_PURGE", "order", nil, "Xoá hẳn đơn test "+o.InternalCode,
+			models.JSONMap{"order_id": o.ID, "store_order_id": o.StoreOrderID, "seller_status": string(o.SellerStatus)})
+	}
 	return nil
 }
 
@@ -384,6 +411,18 @@ func (s *OrderService) DeleteOrders(actor Actor, ids []uint) (*OrderDeleteResult
 		}
 	}
 
+	if len(deletable) > 0 && actor.Role == models.RoleTechnician {
+		// Đơn test: xoá HẲN cùng toàn bộ dữ liệu đi kèm.
+		orders := make([]*models.Order, 0, len(deletable))
+		for _, id := range deletable {
+			orders = append(orders, byID[id])
+		}
+		if err := s.purgeOrders(actor, orders); err != nil {
+			return nil, err
+		}
+		res.DeletedIDs = deletable
+		return res, nil
+	}
 	if len(deletable) > 0 {
 		if err := s.repo.Order.SoftDeleteMany(deletable); err != nil {
 			return nil, apperr.Internal("could not delete orders").Wrap(err)

@@ -1322,3 +1322,117 @@ func (r *OrderItemRepository) DesignReadyItemsForMaterial(materialID uint, p Pag
 		Where("id IN ?", pageIDs).Order(finalOrder).Find(&rows).Error
 	return rows, total, err
 }
+
+// PurgeOrders HARD-deletes orders and everything that hangs off them: items and
+// their assets, QC records, notes, status history, batch parts, packages,
+// handoffs, THE shipments, tracking events and waiting baskets. It is the test
+// cleanup (the technician's delete): an order that was only ever a test must not
+// stay in the database as a soft-deleted ghost. Batches left with no part at all
+// are removed too; the others are returned so the caller can recompute their
+// status. All in one transaction — either everything goes or nothing does.
+//
+// Never call this on a real order's behalf: it leaves no row to restore from.
+func (r *OrderRepository) PurgeOrders(ids []uint) (remainingBatchIDs []uint, err error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	err = r.db.Transaction(func(tx *gorm.DB) error {
+		var itemIDs, batchItemIDs, batchIDs []uint
+		if err := tx.Unscoped().Model(&models.OrderItem{}).Where("order_id IN ?", ids).Pluck("id", &itemIDs).Error; err != nil {
+			return err
+		}
+		if len(itemIDs) > 0 {
+			if err := tx.Unscoped().Model(&models.BatchItem{}).Where("order_item_id IN ?", itemIDs).Pluck("id", &batchItemIDs).Error; err != nil {
+				return err
+			}
+			if err := tx.Unscoped().Model(&models.BatchItem{}).Where("order_item_id IN ?", itemIDs).Distinct().Pluck("batch_id", &batchIDs).Error; err != nil {
+				return err
+			}
+		}
+
+		del := func(model any, cond string, args ...any) error {
+			return tx.Unscoped().Where(cond, args...).Delete(model).Error
+		}
+		if len(itemIDs) > 0 {
+			steps := []struct {
+				model any
+				cond  string
+				args  []any
+			}{
+				{&models.QCRecord{}, "order_item_id IN ?", []any{itemIDs}},
+				{&models.ItemAsset{}, "order_item_id IN ?", []any{itemIDs}},
+				{&models.PackageItem{}, "order_item_id IN ?", []any{itemIDs}},
+				{&models.Note{}, "entity_type = ? AND entity_id IN ?", []any{models.EntityOrderItem, itemIDs}},
+				{&models.StatusHistory{}, "entity_type = ? AND entity_id IN ?", []any{models.EntityOrderItem, itemIDs}},
+			}
+			for _, s := range steps {
+				if err := del(s.model, s.cond, s.args...); err != nil {
+					return err
+				}
+			}
+		}
+		if len(batchItemIDs) > 0 {
+			if err := del(&models.Note{}, "entity_type = ? AND entity_id IN ?", models.EntityBatchItem, batchItemIDs); err != nil {
+				return err
+			}
+			if err := del(&models.StatusHistory{}, "entity_type = ? AND entity_id IN ?", models.EntityBatchItem, batchItemIDs); err != nil {
+				return err
+			}
+			if err := del(&models.BatchItem{}, "id IN ?", batchItemIDs); err != nil {
+				return err
+			}
+		}
+		for _, s := range []struct {
+			model any
+			cond  string
+		}{
+			{&models.Package{}, "order_id IN ?"},
+			{&models.Handoff{}, "order_id IN ?"},
+			{&models.CarrierShipment{}, "order_id IN ?"},
+			{&models.OrderTrackingEvent{}, "order_id IN ?"},
+			{&models.Basket{}, "order_id IN ?"},
+		} {
+			if err := del(s.model, s.cond, ids); err != nil {
+				return err
+			}
+		}
+		if err := del(&models.Note{}, "entity_type = ? AND entity_id IN ?", models.EntityOrder, ids); err != nil {
+			return err
+		}
+		if err := del(&models.StatusHistory{}, "entity_type = ? AND entity_id IN ?", models.EntityOrder, ids); err != nil {
+			return err
+		}
+		if len(itemIDs) > 0 {
+			if err := del(&models.OrderItem{}, "id IN ?", itemIDs); err != nil {
+				return err
+			}
+		}
+		if err := del(&models.Order{}, "id IN ?", ids); err != nil {
+			return err
+		}
+
+		// Batches that lost every part have nothing left to make: remove them (and
+		// their print / cut links). Batches that still hold other orders' parts stay.
+		for _, bid := range batchIDs {
+			var left int64
+			if err := tx.Unscoped().Model(&models.BatchItem{}).Where("batch_id = ?", bid).Count(&left).Error; err != nil {
+				return err
+			}
+			if left > 0 {
+				remainingBatchIDs = append(remainingBatchIDs, bid)
+				continue
+			}
+			if err := del(&models.BatchLink{}, "batch_id = ?", bid); err != nil {
+				return err
+			}
+			if err := del(&models.StatusHistory{}, "entity_type = ? AND entity_id = ?", models.EntityBatch, bid); err != nil {
+				return err
+			}
+			if err := del(&models.Batch{}, "id = ?", bid); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return remainingBatchIDs, err
+}

@@ -12,9 +12,16 @@ import (
 // "đã vào sản xuất" không được chặn chính người đang dọn đơn test. Admin / OPS vẫn
 // bị chặn; OWNER xoá từng đơn được, xoá hàng loạt thì vẫn không.
 
+// Every table an order can leave rows in — what a purge has to reach.
+var purgeModels = []any{
+	&models.Batch{}, &models.BatchItem{}, &models.BatchLink{}, &models.CarrierShipment{}, &models.QCRecord{},
+	&models.ItemAsset{}, &models.Package{}, &models.PackageItem{}, &models.Handoff{}, &models.Note{},
+	&models.StatusHistory{}, &models.OrderTrackingEvent{}, &models.Basket{}, &models.User{},
+}
+
 func TestDeleteInProduction_TechnicianMayAdminMayNot(t *testing.T) {
 	db := newBulkReadyDB(t)
-	if err := db.AutoMigrate(&models.Batch{}, &models.BatchItem{}, &models.CarrierShipment{}); err != nil {
+	if err := db.AutoMigrate(purgeModels...); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	svc := newOrderService(db)
@@ -62,7 +69,7 @@ func TestDeleteInProduction_TechnicianMayAdminMayNot(t *testing.T) {
 // kiện vẫn sống trên THE và tiền đã mất. Phải huỷ đơn THE trước.
 func TestDeleteOrder_RefusesWhilePaidTHEShipmentIsLive(t *testing.T) {
 	db := newBulkReadyDB(t)
-	if err := db.AutoMigrate(&models.Batch{}, &models.BatchItem{}, &models.CarrierShipment{}); err != nil {
+	if err := db.AutoMigrate(purgeModels...); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	svc := newOrderService(db)
@@ -88,5 +95,88 @@ func TestDeleteOrder_RefusesWhilePaidTHEShipmentIsLive(t *testing.T) {
 	db.Model(sh).Update("status", models.ShipmentCancelled)
 	if err := svc.DeleteOrder(tech, it.OrderID); err != nil {
 		t.Fatalf("sau khi huỷ đơn THE phải xoá được: %v", err)
+	}
+}
+
+// Đơn test xoá là XOÁ HẲN: không còn dòng nào (kể cả dòng đã soft-delete) của đơn,
+// sản phẩm, batch part, QC, ghi chú, lịch sử, bàn giao, giỏ chờ. Batch chỉ chứa đơn
+// test bị xoá luôn; batch còn chứa đơn khác thì giữ và vẫn còn phần của đơn kia.
+func TestTechnicianDelete_PurgesEverything(t *testing.T) {
+	db := newBulkReadyDB(t)
+	if err := db.AutoMigrate(purgeModels...); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	svc := newOrderService(db)
+	tech := Actor{ID: 3, Role: models.RoleTechnician}
+
+	test := seedReadyCandidate(t, db, "TESTORD", models.DesignReady, "https://x/m.png", true)
+	real := seedReadyCandidate(t, db, "REALORD", models.DesignReady, "https://x/m.png", true)
+	db.Model(test).Update("internal_status", models.StatusQCPassed)
+
+	onlyTest := &models.Batch{Code: "B-ONLY", MaterialID: 1, Status: models.StatusQCPassed}
+	shared := &models.Batch{Code: "B-SHARED", MaterialID: 1, Status: models.StatusCut}
+	db.Create(onlyTest)
+	db.Create(shared)
+	db.Create(&models.BatchLink{BatchID: onlyTest.ID, Kind: "PRINT", URL: "https://x/p"})
+	bi1 := &models.BatchItem{BatchID: onlyTest.ID, OrderItemID: test.ID, MaterialID: 1, Status: models.StatusQCPassed}
+	bi2 := &models.BatchItem{BatchID: shared.ID, OrderItemID: test.ID, MaterialID: 2, Status: models.StatusQCPassed}
+	bi3 := &models.BatchItem{BatchID: shared.ID, OrderItemID: real.ID, MaterialID: 1, Status: models.StatusCut}
+	db.Create(bi1)
+	db.Create(bi2)
+	db.Create(bi3)
+	db.Create(&models.QCRecord{OrderItemID: test.ID, Result: models.QCPass})
+	db.Create(&models.StatusHistory{EntityType: models.EntityOrderItem, EntityID: test.ID, ToStatus: "QC_PASSED"})
+	db.Create(&models.StatusHistory{EntityType: models.EntityBatchItem, EntityID: bi1.ID, ToStatus: "QC_PASSED"})
+	eid := test.ID
+	db.Create(&models.Note{Title: "n", EntityType: models.EntityOrderItem, EntityID: &eid})
+	db.Create(&models.Handoff{Code: "H1", OrderID: &test.OrderID})
+	db.Create(&models.Basket{Number: 3, OrderID: test.OrderID})
+
+	if err := svc.DeleteOrder(tech, test.OrderID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	count := func(model any, cond string, args ...any) int64 {
+		var n int64
+		db.Unscoped().Model(model).Where(cond, args...).Count(&n)
+		return n
+	}
+	gone := map[string]int64{
+		"orders":         count(&models.Order{}, "id = ?", test.OrderID),
+		"order_items":    count(&models.OrderItem{}, "order_id = ?", test.OrderID),
+		"batch_items":    count(&models.BatchItem{}, "order_item_id = ?", test.ID),
+		"qc_records":     count(&models.QCRecord{}, "order_item_id = ?", test.ID),
+		"notes":          count(&models.Note{}, "entity_id = ?", test.ID),
+		"status_history": count(&models.StatusHistory{}, "entity_id IN ?", []uint{test.ID, bi1.ID}),
+		"handoffs":       count(&models.Handoff{}, "order_id = ?", test.OrderID),
+		"baskets":        count(&models.Basket{}, "order_id = ?", test.OrderID),
+		"batch B-ONLY":   count(&models.Batch{}, "id = ?", onlyTest.ID),
+		"its links":      count(&models.BatchLink{}, "batch_id = ?", onlyTest.ID),
+	}
+	for name, n := range gone {
+		if n != 0 {
+			t.Errorf("%s: còn %d dòng sau khi xoá hẳn đơn test", name, n)
+		}
+	}
+	if count(&models.Order{}, "id = ?", real.OrderID) != 1 || count(&models.BatchItem{}, "id = ?", bi3.ID) != 1 {
+		t.Fatalf("đơn thật và phần của nó trong batch chung phải còn nguyên")
+	}
+	if count(&models.Batch{}, "id = ?", shared.ID) != 1 {
+		t.Fatalf("batch còn phần của đơn khác phải được giữ")
+	}
+	var after models.Batch
+	db.First(&after, shared.ID)
+	if after.Status != models.StatusCut {
+		t.Fatalf("batch chung phải tính lại trạng thái theo phần còn lại (CUT), got %s", after.Status)
+	}
+
+	// Owner xoá vẫn là xoá mềm (có thể khôi phục).
+	owner := Actor{ID: 1, Role: models.RoleOwner}
+	other := seedReadyCandidate(t, db, "OWNERDEL", models.DesignPending, "", false)
+	if err := svc.DeleteOrder(owner, other.OrderID); err != nil {
+		t.Fatalf("owner delete: %v", err)
+	}
+	if n := count(&models.Order{}, "id = ?", other.OrderID); n != 1 {
+		t.Fatalf("owner xoá phải là xoá mềm (còn dòng đã đánh dấu xoá), got %d", n)
 	}
 }
