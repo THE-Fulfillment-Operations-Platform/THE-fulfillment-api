@@ -281,8 +281,11 @@ func (s *OrderService) DeleteOrder(actor Actor, id uint) error {
 	if err != nil {
 		return err
 	}
-	if orderInProduction(order) && actor.Role != models.RoleOwner {
-		return apperr.Conflict("Đơn đang sản xuất — chỉ OWNER được xoá")
+	if orderInProduction(order) && !canDeleteInProduction(actor) {
+		return apperr.Conflict("Đơn đang sản xuất — chỉ OWNER / Kỹ thuật viên được xoá")
+	}
+	if reason := s.deleteBlockedByTHE(order.ID); reason != "" {
+		return apperr.Conflict(reason)
 	}
 	if err := s.repo.Order.SoftDelete(order.ID); err != nil {
 		return apperr.Internal("could not delete order").Wrap(err)
@@ -292,6 +295,25 @@ func (s *OrderService) DeleteOrder(actor Actor, id uint) error {
 	s.audit.Log(actor, "ORDER_DELETE", "order", &order.ID, "Soft-deleted order "+order.InternalCode,
 		models.JSONMap{"review_status": string(order.ReviewStatus), "seller_status": string(order.SellerStatus)})
 	return nil
+}
+
+// canDeleteInProduction: who may delete an order that is already being made.
+// OWNER always could; the technician joins because its job is to test the live
+// system and clean up the orders it created (models.Role.HasAdminRights).
+func canDeleteInProduction(actor Actor) bool {
+	return actor.Role == models.RoleOwner || actor.Role == models.RoleTechnician
+}
+
+// deleteBlockedByTHE refuses to delete an order whose THE shipment is already
+// confirmed (label printed, wallet charged): the order would vanish from every list
+// while the money stays spent and the parcel stays live on THE. Cancel the THE
+// shipment first (order detail → Huỷ đơn THE); an unpaid pending package is harmless.
+func (s *OrderService) deleteBlockedByTHE(orderID uint) string {
+	sh, err := s.repo.Carrier.LiveShipment(orderID)
+	if err == nil && sh != nil && sh.Status == models.ShipmentLabeled {
+		return "đã tạo đơn THE (đã chốt, đã trừ tiền) — huỷ đơn THE ở chi tiết đơn trước rồi mới xoá"
+	}
+	return ""
 }
 
 // OrderDeleteSkip is one selected order a bulk delete left alone, and why.
@@ -345,11 +367,19 @@ func (s *OrderService) DeleteOrders(actor Actor, ids []uint) (*OrderDeleteResult
 		switch {
 		case o == nil:
 			res.Skipped = append(res.Skipped, OrderDeleteSkip{ID: id, Reason: "không còn tồn tại"})
-		case orderInProduction(o):
+		case orderInProduction(o) && actor.Role != models.RoleTechnician:
+			// Tick-and-delete never removes work that is already being made — not even
+			// for OWNER (who deletes those one at a time from the order detail). The
+			// technician is the exception: this is the test role clearing its own test
+			// orders, which have usually been pushed all the way through.
 			res.Skipped = append(res.Skipped, OrderDeleteSkip{
 				ID: id, InternalCode: o.InternalCode, Reason: "đã vào sản xuất",
 			})
 		default:
+			if reason := s.deleteBlockedByTHE(id); reason != "" {
+				res.Skipped = append(res.Skipped, OrderDeleteSkip{ID: id, InternalCode: o.InternalCode, Reason: reason})
+				continue
+			}
 			deletable = append(deletable, id)
 		}
 	}
