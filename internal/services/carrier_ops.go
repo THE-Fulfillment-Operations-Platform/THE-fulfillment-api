@@ -110,6 +110,35 @@ func (s *CarrierService) CancelShipment(ctx context.Context, actor Actor, orderI
 	if !canManageCarrier(actor) {
 		return nil, apperr.Forbidden("Chỉ Owner/Admin huỷ được đơn THE")
 	}
+	return s.cancelShipment(ctx, actor, orderID, reason, false)
+}
+
+// ReleaseForRemovedOrder cancels the order's THE shipment because FFM is
+// cancelling or deleting the ORDER itself — the parcel is not going anywhere,
+// so THE must not keep a pending package (or a paid label) for it. No live
+// shipment, or the integration never used for it: nothing to do. THE refusing
+// (the parcel is already scanned) is an error: the FFM action must not go ahead
+// and leave a live parcel on THE behind it.
+func (s *CarrierService) ReleaseForRemovedOrder(ctx context.Context, actor Actor, orderID uint, reason string) error {
+	if s == nil {
+		return nil
+	}
+	live, err := s.repo.Carrier.LiveShipment(orderID)
+	if err != nil {
+		return apperr.Internal("could not read shipment").Wrap(err)
+	}
+	if live == nil {
+		return nil
+	}
+	if _, err := s.cancelShipment(ctx, actor, orderID, reason, true); err != nil {
+		return err
+	}
+	return nil
+}
+
+// cancelShipment is the shared core. orderLeaving = the order itself is being
+// cancelled / deleted, so it must NOT be put back into the ship queue.
+func (s *CarrierService) cancelShipment(ctx context.Context, actor Actor, orderID uint, reason string, orderLeaving bool) (*ShipmentView, error) {
 	live, err := s.repo.Carrier.LiveShipment(orderID)
 	if err != nil {
 		return nil, apperr.Internal("could not read shipment").Wrap(err)
@@ -141,8 +170,18 @@ func (s *CarrierService) CancelShipment(ctx context.Context, actor Actor, orderI
 	}
 	cctx, cancel := context.WithTimeout(ctx, theReadTimeout)
 	defer cancel()
-	if err := cli.CancelPackages(cctx, []string{live.ExternalID}); err != nil {
-		return nil, apperr.BadRequest("THE không cho huỷ: " + theErrorMessage(err))
+	// Already archived / cancelled / deleted on THE's own site (someone did it by
+	// hand): nothing left to cancel there — just close FFM's record.
+	gone := false
+	if d, gerr := cli.GetPackage(cctx, live.ExternalID); gerr != nil {
+		gone = isNotFound(gerr)
+	} else if st := strings.ToLower(strings.TrimSpace(d.Status.String())); st == "archived" || st == "canceled" || st == "cancelled" {
+		gone = true
+	}
+	if !gone {
+		if err := cli.CancelPackages(cctx, []string{live.ExternalID}); err != nil {
+			return nil, apperr.BadRequest("THE không cho huỷ: " + theErrorMessage(err))
+		}
 	}
 	wasPaid := live.Status == models.ShipmentLabeled
 	now := time.Now()
@@ -157,7 +196,7 @@ func (s *CarrierService) CancelShipment(ctx context.Context, actor Actor, orderI
 		}); err != nil {
 			return err
 		}
-		if !wasPaid {
+		if !wasPaid || orderLeaving {
 			return nil
 		}
 		// The parcel is not leaving: back to "Chờ gửi hàng". Only from

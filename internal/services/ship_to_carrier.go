@@ -121,8 +121,20 @@ func (s *PackingService) ShipOrdersToCarrierWith(ctx context.Context, actor Acto
 			out.Skipped = append(out.Skipped, SkippedShipOrder{OrderID: id, Reason: "Không tìm thấy đơn"})
 			continue
 		}
-		reason := shipBlockReason(order)
-		if reason == "" {
+		// "Xuất kho" (XK): the goods leave the warehouse. Nothing is created on THE.
+		if opts.ExportOnly {
+			sc, err := s.exportScanned(actor, order)
+			if err != nil {
+				out.Skipped = append(out.Skipped, SkippedShipOrder{OrderID: id, InternalCode: order.InternalCode, Reason: skippedFor(order, err).Reason})
+				continue
+			}
+			out.Shipped = append(out.Shipped, ShippedOrder{OrderID: id, InternalCode: order.InternalCode, HandoffCode: sc.HandoffCode})
+			continue
+		}
+		// With THE on, "Gửi cho THE" only CREATES THE LABEL (an order may already be
+		// out of the warehouse and still need one); with THE off it is the plain handoff.
+		reason := shipBlockReasonFor(order, cli != nil)
+		if reason == "" && cli == nil {
 			reason = basketBlockReason(s.repo, order.ID)
 		}
 		if reason != "" {
@@ -139,6 +151,10 @@ func (s *PackingService) ShipOrdersToCarrierWith(ctx context.Context, actor Acto
 				out.Skipped = append(out.Skipped, skippedFor(order, err))
 				continue
 			}
+			// Label only: the order stays in "Chờ gửi hàng" until it is scanned out.
+			s.the.FollowUp(ctx, cli, order.ID, outcome)
+			out.Shipped = append(out.Shipped, ShippedOrder{OrderID: id, InternalCode: order.InternalCode, THE: outcome})
+			continue
 		}
 		handoff, err := s.shipOne(actor, order)
 		if err != nil {
@@ -189,6 +205,9 @@ type ScannedShip struct {
 	// THE is the shipment the scan created on THE (nil when the integration is
 	// off).
 	THE *ShipmentOutcome `json:"the,omitempty"`
+	// LabelOnly marks a scan that only created / found the THE label: the order
+	// has NOT left the warehouse yet (no handoff) — it still needs its "Xuất kho".
+	LabelOnly bool `json:"label_only,omitempty"`
 	// Exported marks an XK scan (ExportOnly). UnfinishedItems / TotalItems then say
 	// how many live products the system still showed as not QC-passed when the
 	// order went out (0 = nothing to warn about).
@@ -223,18 +242,18 @@ func (s *PackingService) ShipScannedOrderWith(ctx context.Context, actor Actor, 
 	if opts.ExportOnly {
 		return s.exportScanned(actor, order)
 	}
-	reason := shipBlockReason(order)
-	if reason == "" {
+	cfg, cli, err := s.theFor(opts)
+	if err != nil {
+		return nil, err
+	}
+	reason := shipBlockReasonFor(order, cli != nil)
+	if reason == "" && cli == nil {
 		reason = basketBlockReason(s.repo, order.ID)
 	}
 	if reason != "" {
 		// 409, not 400: the code was valid and named a real order — it is the
 		// order's state that refuses the scan.
 		return nil, apperr.Conflict(reason)
-	}
-	cfg, cli, err := s.theFor(opts)
-	if err != nil {
-		return nil, err
 	}
 	var outcome *ShipmentOutcome
 	if cli != nil {
@@ -245,6 +264,13 @@ func (s *PackingService) ShipScannedOrderWith(ctx context.Context, actor Actor, 
 			}
 			return nil, err
 		}
+		// "Gửi cho THE" = create the label, nothing more. The parcel leaves the
+		// warehouse with its own scan ("Xuất kho").
+		s.the.FollowUp(ctx, cli, order.ID, outcome)
+		return &ScannedShip{
+			OrderID: order.ID, InternalCode: order.InternalCode, StoreOrderID: order.StoreOrderID,
+			SellerName: order.Seller.Name, THE: outcome, LabelOnly: true,
+		}, nil
 	}
 
 	handoff, err := s.shipOne(actor, order)
@@ -325,7 +351,7 @@ func (s *PackingService) exportScanned(actor Actor, order *models.Order) (*Scann
 // theFor resolves the THE integration for one send: (nil, nil, nil) when it is
 // off or the operator chose a manual handoff.
 func (s *PackingService) theFor(opts ShipSendOptions) (*models.CarrierConfig, theAPI, error) {
-	if opts.ManualHandoff || s.the == nil {
+	if opts.ManualHandoff || opts.ExportOnly || s.the == nil {
 		return nil, nil, nil
 	}
 	return s.the.activeTHE()
@@ -365,14 +391,18 @@ func (s *PackingService) orderByScanCode(code string) (*models.Order, error) {
 
 // shipBlockReason explains, in the operator's language, why an order cannot go
 // to the carrier yet. Empty string means it can.
-func shipBlockReason(o *models.Order) string {
+func shipBlockReason(o *models.Order) string { return shipBlockReasonFor(o, false) }
+
+// shipBlockReasonFor is shipBlockReason; forLabel = the send only creates the THE
+// label, so an order that already left the warehouse (XK) is still fine.
+func shipBlockReasonFor(o *models.Order, forLabel bool) string {
 	if o.ReviewStatus != models.ReviewApproved {
 		return "Đơn chưa được duyệt"
 	}
 	if o.CancellationStatus == models.CancellationApproved || o.CancellationStatus == models.CancellationSeller {
 		return "Đơn đã huỷ"
 	}
-	if o.SellerStatus.HandedOver() {
+	if o.SellerStatus.HandedOver() && !forLabel {
 		return "Đơn đã gửi cho THE rồi"
 	}
 	live := activeOrderItems(o.Items)

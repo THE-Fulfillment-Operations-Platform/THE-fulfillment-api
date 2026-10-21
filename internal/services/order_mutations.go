@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -242,6 +243,10 @@ func (s *OrderService) CancelOrder(actor Actor, id uint, reason string) (*models
 	if orderPacked(order.SellerStatus) && !actor.Role.HasAdminRights() {
 		return nil, apperr.Conflict("Đơn đã đóng gói/gửi đi — chỉ Admin/Owner được huỷ")
 	}
+	// The order is going away: so must its parcel on THE.
+	if err := releaseTHEForOrder(s.the, actor, order, "FFM huỷ đơn "+order.InternalCode); err != nil {
+		return nil, err
+	}
 	now := time.Now()
 	from := order.ReviewStatus
 	stage := orderCancelStageFor(order)
@@ -284,8 +289,8 @@ func (s *OrderService) DeleteOrder(actor Actor, id uint) error {
 	if orderInProduction(order) && !canDeleteInProduction(actor) {
 		return apperr.Conflict("Đơn đang sản xuất — chỉ OWNER / Kỹ thuật viên được xoá")
 	}
-	if reason := s.deleteBlockedByTHE(order.ID); reason != "" {
-		return apperr.Conflict(reason)
+	if err := s.releaseTHE(actor, order); err != nil {
+		return err
 	}
 	if actor.Role == models.RoleTechnician {
 		// Đơn test của kỹ thuật viên: xoá HẲN, không để lại bóng ma trong DB.
@@ -329,6 +334,34 @@ func (s *OrderService) purgeOrders(actor Actor, orders []*models.Order) error {
 // system and clean up the orders it created (models.Role.HasAdminRights).
 func canDeleteInProduction(actor Actor) bool {
 	return actor.Role == models.RoleOwner || actor.Role == models.RoleTechnician
+}
+
+// releaseTHE cancels the order's THE shipment before FFM deletes the order, so
+// THE does not keep a pending package or a paid label for an order that no longer
+// exists. Without a THE service wired in (tests), a confirmed shipment still
+// blocks the delete, as before.
+func (s *OrderService) releaseTHE(actor Actor, order *models.Order) error {
+	if s.the == nil {
+		if reason := s.deleteBlockedByTHE(order.ID); reason != "" {
+			return apperr.Conflict(reason)
+		}
+		return nil
+	}
+	return releaseTHEForOrder(s.the, actor, order, "FFM xoá đơn "+order.InternalCode)
+}
+
+// releaseTHEForOrder runs CarrierService.ReleaseForRemovedOrder with its own
+// deadline (the caller has no request context at this layer).
+func releaseTHEForOrder(the *CarrierService, actor Actor, order *models.Order, reason string) error {
+	if the == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	if err := the.ReleaseForRemovedOrder(ctx, actor, order.ID, reason); err != nil {
+		return apperr.Conflict("Không huỷ được đơn trên THE nên chưa " + "xoá/huỷ đơn: " + err.Error())
+	}
+	return nil
 }
 
 // deleteBlockedByTHE refuses to delete an order whose THE shipment is already
@@ -403,8 +436,8 @@ func (s *OrderService) DeleteOrders(actor Actor, ids []uint) (*OrderDeleteResult
 				ID: id, InternalCode: o.InternalCode, Reason: "đã vào sản xuất",
 			})
 		default:
-			if reason := s.deleteBlockedByTHE(id); reason != "" {
-				res.Skipped = append(res.Skipped, OrderDeleteSkip{ID: id, InternalCode: o.InternalCode, Reason: reason})
+			if err := s.releaseTHE(actor, o); err != nil {
+				res.Skipped = append(res.Skipped, OrderDeleteSkip{ID: id, InternalCode: o.InternalCode, Reason: err.Error()})
 				continue
 			}
 			deletable = append(deletable, id)

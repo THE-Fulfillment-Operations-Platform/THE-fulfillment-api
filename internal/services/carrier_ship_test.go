@@ -312,8 +312,9 @@ func TestTHE_SendCreatesPaysAndHandsOff(t *testing.T) {
 	if sh.Status != models.ShipmentLabeled || string(sh.Label) != string(pngLabel) || sh.LabelType != "image/png" {
 		t.Fatalf("shipment not labeled with its label: %+v", sh.Status)
 	}
-	if e.sellerStatus(t, o.ID) != models.SellerStatusHandedOff {
-		t.Fatal("order must be handed off after the THE shipment")
+	// "Gửi cho THE" only creates the label: the goods have NOT left the warehouse.
+	if e.sellerStatus(t, o.ID) == models.SellerStatusHandedOff {
+		t.Fatal("creating the THE label must not hand the order off — that is the separate Xuất kho step")
 	}
 	var fresh models.Order
 	e.db.First(&fresh, o.ID)
@@ -326,6 +327,63 @@ func TestTHE_SendCreatesPaysAndHandsOff(t *testing.T) {
 		if r.OrderNumber != "100001" || r.Weight != 150 || r.HSCode != "44209000" || r.StateCode != "CA" ||
 			r.CountryCode != "US" || r.ServiceCode != "EXPRESS" || !r.IgnoreAddressCheck {
 			t.Fatalf("request sent to THE: %+v", r)
+		}
+	}
+}
+
+// The two steps are independent: label first then Xuất kho, or Xuất kho first
+// and the label afterwards.
+func TestTHE_LabelAndExportAreSeparateSteps(t *testing.T) {
+	e := newTHEEnv(t)
+	a := e.order(t, "100031")
+	if res := e.send(t, a); len(res.Shipped) != 1 || e.sellerStatus(t, a.ID) == models.SellerStatusHandedOff {
+		t.Fatalf("label step: %+v", res)
+	}
+	res := e.send(t, a, ShipSendOptions{ExportOnly: true})
+	if len(res.Shipped) != 1 || e.sellerStatus(t, a.ID) != models.SellerStatusHandedOff {
+		t.Fatalf("Xuất kho after the label: %+v", res)
+	}
+	if e.fake.chargedCount() != 1 || e.fake.creates != 1 {
+		t.Fatalf("Xuất kho must not touch THE: creates=%d charged=%d", e.fake.creates, e.fake.chargedCount())
+	}
+
+	b := e.order(t, "100032")
+	if res := e.send(t, b, ShipSendOptions{ExportOnly: true}); len(res.Shipped) != 1 {
+		t.Fatalf("Xuất kho first: %+v", res)
+	}
+	if res := e.send(t, b); len(res.Shipped) != 1 || res.Shipped[0].THE == nil || !res.Shipped[0].THE.HasLabel {
+		t.Fatalf("the label can still be made after Xuất kho: %+v", res)
+	}
+}
+
+// Deleting or cancelling the order in FFM takes the parcel off THE too: a
+// pending package is archived, a paid label is cancelled and refunded.
+func TestTHE_DeleteAndCancelOrderCancelOnTHE(t *testing.T) {
+	e := newTHEEnv(t)
+	orders := &OrderService{repo: e.carrier.repo, audit: e.carrier.audit, the: e.carrier}
+	owner := Actor{ID: 1, Role: models.RoleOwner}
+
+	paid := e.order(t, "100033")
+	e.send(t, paid)
+	if e.fake.chargedCount() != 1 {
+		t.Fatal("precondition: paid package")
+	}
+	if err := orders.DeleteOrder(owner, paid.ID); err != nil {
+		t.Fatalf("delete must cancel the THE shipment, not refuse: %v", err)
+	}
+	if e.fake.chargedCount() != 0 {
+		t.Fatal("deleting the order must refund / cancel the THE package")
+	}
+
+	pending := e.order(t, "100034")
+	e.fake.deliverErr = &theapi.Error{Status: 409, Messages: []string{"Failed to create labels"}}
+	e.send(t, pending) // THE keeps an unpaid pending package
+	if _, err := orders.CancelOrder(owner, pending.ID, "khách huỷ"); err != nil {
+		t.Fatalf("cancel order: %v", err)
+	}
+	for _, p := range e.fake.pkgs {
+		if p.orderNumber == "100034" && p.status != "archived" {
+			t.Fatalf("a pending package must be archived when the order is cancelled, is %q", p.status)
 		}
 	}
 }
@@ -617,6 +675,7 @@ func TestTHE_CancelPaidShipmentReturnsOrderToQueue(t *testing.T) {
 	e := newTHEEnv(t)
 	o := e.order(t, "100014")
 	e.send(t, o)
+	e.send(t, o, ShipSendOptions{ExportOnly: true}) // goods out of the warehouse
 	if _, err := e.carrier.CancelShipment(context.Background(), Actor{ID: 1, Role: models.RoleOps}, o.ID, "x"); err == nil {
 		t.Fatal("OPS must not cancel a paid THE shipment")
 	}

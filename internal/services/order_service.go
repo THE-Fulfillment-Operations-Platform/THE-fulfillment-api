@@ -21,6 +21,9 @@ type OrderService struct {
 	// so the parcel starts being watched and is tagged with its store order id.
 	// Nil-safe: the service itself reports Enabled()=false when unconfigured.
 	tracking *TrackingSyncService
+	// the cancels the order's THE shipment when FFM cancels / deletes the order.
+	// Nil only in tests that never touch THE.
+	the *CarrierService
 }
 
 // ---------- Orders ----------

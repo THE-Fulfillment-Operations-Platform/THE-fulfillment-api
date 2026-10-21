@@ -49,7 +49,7 @@ type QCResultOrder struct {
 	DailySeq     int       `json:"daily_seq"`
 	CreatedAt    time.Time `json:"created_at"`
 
-	Status       string `json:"status"` // DONE | PARTIAL | NONE
+	Status string `json:"status"` // DONE | PARTIAL | NONE
 	// Shipping side of the same order. The ship queue and the journey screen are
 	// both built on this endpoint, so they need to see whether an order has
 	// already gone to THE and what its parcel is doing.
@@ -60,6 +60,12 @@ type QCResultOrder struct {
 	// BasketNumber is the waiting basket (giỏ chờ) the order's finished products
 	// sit in, until a picker bundles them and confirms. nil = not in a basket.
 	BasketNumber *int `json:"basket_number,omitempty"`
+	// THETracking / THELastMile: the label already created on THE for this order
+	// (empty = none yet). Creating the label and taking the goods out of the
+	// warehouse are two separate steps, so the ship queue shows which orders
+	// already have their label and only wait for "Xuất kho".
+	THETracking  string `json:"the_tracking,omitempty"`
+	THELastMile  string `json:"the_last_mile,omitempty"`
 	TotalItems   int    `json:"total_items"`
 	PassedItems  int    `json:"passed_items"`
 	ReworkItems  int    `json:"rework_items"`
@@ -202,8 +208,13 @@ func (s *QCService) buildResultOrders(ids []uint) ([]QCResultOrder, error) {
 	if err != nil {
 		return nil, apperr.Internal("could not load waiting baskets").Wrap(err)
 	}
+	// Display-only enrichment: a failure here must not hide the QC results.
+	shipments, _ := s.repo.Carrier.LiveShipmentsByOrder(ids)
 	for i := range out {
 		o := &out[i]
+		if sh, ok := shipments[o.OrderID]; ok && sh.Status == models.ShipmentLabeled {
+			o.THETracking, o.THELastMile = sh.TrackingCode, sh.LastMileTracking
+		}
 		if b, ok := baskets[o.OrderID]; ok {
 			n := b.Number
 			o.BasketNumber = &n

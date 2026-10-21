@@ -21,6 +21,8 @@ import (
 type ReviewService struct {
 	repo  *repositories.Repositories
 	audit *AuditService
+	// the cancels the order's THE shipment when its cancellation is approved.
+	the *CarrierService
 }
 
 // ---------- Cancellation rule engine (pure, unit-testable) ----------
@@ -978,6 +980,11 @@ func (s *ReviewService) ApproveCancellation(actor Actor, orderID uint, note stri
 		return nil, apperr.Conflict("Đơn này không có yêu cầu huỷ nào đang chờ")
 	}
 	if err := s.guardResolveStage(actor, order.CancelStage); err != nil {
+		return nil, err
+	}
+	// The order is going away: so must its parcel on THE (pending package archived,
+	// paid label cancelled + refunded). THE refusing stops the approval.
+	if err := releaseTHEForOrder(s.the, actor, order, "FFM huỷ đơn "+order.InternalCode); err != nil {
 		return nil, err
 	}
 	now := time.Now()
