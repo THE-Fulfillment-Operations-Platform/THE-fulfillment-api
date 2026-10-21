@@ -130,11 +130,11 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	// Audit logs.
 	authd.GET("/audit-logs", perm(view(models.FeatAudit)), h.ListAuditLogs)
 
-	// Admin / danger zone (OWNER only). POST /api/admin/reset wipes
+	// Admin / danger zone (OWNER + TECHNICIAN). POST /api/admin/reset wipes
 	// order/production data so the catalog can be re-imported from scratch;
 	// master data and users are preserved. The OWNER role is the whole gate:
 	// anyone holding it may run the reset, in any environment.
-	admin := authd.Group("/admin", middleware.RequireRoles(models.RoleOwner))
+	admin := authd.Group("/admin", middleware.RequireRoles(models.RoleOwner, models.RoleTechnician))
 	{
 		admin.POST("/reset", h.ResetData)
 	}

@@ -66,8 +66,8 @@ func TestTechnician_OnlyOwnerOrTechnicianManagesTheAccount(t *testing.T) {
 	if err := svc.Delete(techActor, tech2.ID); err != nil {
 		t.Errorf("kỹ thuật viên xoá kỹ thuật viên khác: %v", err)
 	}
-	// …nhưng vẫn không đụng được OWNER.
-	if _, err := svc.Update(techActor, owner.ID, UpdateUserInput{FullName: &name}); err == nil {
-		t.Error("kỹ thuật viên không được sửa tài khoản OWNER")
+	// …và sửa được cả tài khoản OWNER (kỹ thuật viên toàn quyền).
+	if _, err := svc.Update(techActor, owner.ID, UpdateUserInput{FullName: &name}); err != nil {
+		t.Errorf("kỹ thuật viên sửa tài khoản OWNER: %v", err)
 	}
 }

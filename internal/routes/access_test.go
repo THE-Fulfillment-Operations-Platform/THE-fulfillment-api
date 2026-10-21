@@ -242,6 +242,9 @@ func TestRoleDefaultsKeepPreviousAccess(t *testing.T) {
 			like := role
 			if role == models.RoleTechnician {
 				like = models.RoleAdmin
+				if rc.path == "/api/admin/reset" {
+					like = models.RoleOwner // TECHNICIAN is fully open, reset included
+				}
 			}
 			want := has(rc.old, like) || has(rc.widened, like)
 			code := h.status(rc.method, rc.path, h.tokens[role])

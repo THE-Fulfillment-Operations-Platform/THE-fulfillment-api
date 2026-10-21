@@ -106,10 +106,7 @@ func resolvePerms(role models.Role, list []string) (models.PermList, error) {
 //     carries the test tools, which an ADMIN must not hand themselves;
 //   - an ADMIN can only grant ticks they hold themselves.
 func guardGrant(actor Actor, targetRole models.Role, perms models.PermList) error {
-	if actor.Role == models.RoleOwner {
-		return nil
-	}
-	if actor.Role == models.RoleTechnician && targetRole != models.RoleOwner {
+	if actor.Role.IsSuper() {
 		return nil
 	}
 	if targetRole == models.RoleOwner {
@@ -304,7 +301,7 @@ func (s *UserService) Update(actor Actor, id uint, in UpdateUserInput) (*models.
 	prevRole, prevPerms := u.Role, u.Permissions
 	// Same line as Delete: an ADMIN must not be able to lock, re-password or
 	// re-role the supervision above them.
-	if prevRole == models.RoleOwner && actor.Role != models.RoleOwner {
+	if prevRole == models.RoleOwner && !actor.Role.IsSuper() {
 		return nil, apperr.Forbidden("Chỉ chủ sở hữu (OWNER) mới tạo hoặc sửa được tài khoản OWNER.")
 	}
 	if err := guardTechnicianAccount(actor, prevRole); err != nil {
@@ -407,8 +404,8 @@ func (s *UserService) Delete(actor Actor, id uint) error {
 		return err
 	}
 	if victim.Role == models.RoleOwner {
-		if actor.Role != models.RoleOwner {
-			return apperr.Forbidden("Chỉ chủ sở hữu (OWNER) mới xoá được một tài khoản OWNER.")
+		if !actor.Role.IsSuper() {
+			return apperr.Forbidden("Chỉ chủ sở hữu (OWNER) hoặc kỹ thuật viên mới xoá được một tài khoản OWNER.")
 		}
 		owners, err := s.repo.User.CountByRole(models.RoleOwner)
 		if err != nil {
