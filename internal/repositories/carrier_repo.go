@@ -3,6 +3,7 @@ package repositories
 import (
 	"errors"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -112,13 +113,16 @@ func (r *CarrierRepository) ShipmentByID(id uint) (*models.CarrierShipment, erro
 }
 
 // AwaitingLastMile lists labeled shipments that still lack the last-mile
-// tracking (USPS…), oldest first, created after `since` — the poll that fills
-// the order's tracking number once the carrier has assigned it.
-func (r *CarrierRepository) AwaitingLastMile(limit int) ([]models.CarrierShipment, error) {
+// tracking (USPS…), NEWEST first and only those labeled after `since` — the
+// poll that fills the order's tracking number once the carrier has assigned it.
+// Newest first matters: old parcels that will never get a number (cancelled on
+// THE's site, test orders) would otherwise fill every batch and starve the
+// fresh ones the warehouse is waiting on.
+func (r *CarrierRepository) AwaitingLastMile(limit int, since time.Time) ([]models.CarrierShipment, error) {
 	var rows []models.CarrierShipment
 	err := r.db.Omit("label").
-		Where("status = ? AND last_mile_tracking = ''", models.ShipmentLabeled).
-		Order("labeled_at ASC").Limit(limit).Find(&rows).Error
+		Where("status = ? AND last_mile_tracking = '' AND labeled_at > ?", models.ShipmentLabeled, since).
+		Order("labeled_at DESC").Limit(limit).Find(&rows).Error
 	return rows, err
 }
 

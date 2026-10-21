@@ -910,20 +910,19 @@ func (s *CarrierService) SyncLastMile(ctx context.Context, limit int) (int, erro
 	if err != nil || cli == nil {
 		return 0, err
 	}
-	rows, err := s.repo.Carrier.AwaitingLastMile(limit)
+	rows, err := s.repo.Carrier.AwaitingLastMile(limit, time.Now().Add(-14*24*time.Hour))
 	if err != nil {
 		return 0, err
 	}
 	got := 0
 	for i := range rows {
 		sh := &rows[i]
-		// Two weeks without one: the parcel is not going to get one from here.
-		if sh.LabeledAt != nil && time.Since(*sh.LabeledAt) > 14*24*time.Hour {
-			continue
-		}
 		o, err := s.repo.Order.FindByID(sh.OrderID)
 		if err != nil {
 			continue
+		}
+		if ctx.Err() != nil {
+			break
 		}
 		s.pullLastMile(ctx, cli, sh, o)
 		if sh.LastMileTracking != "" {

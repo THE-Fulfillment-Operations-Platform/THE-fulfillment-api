@@ -101,3 +101,18 @@ func (h *Handlers) RunTrackingSync(c *gin.Context) {
 	}
 	response.OK(c, stats)
 }
+
+// RunLastMileSync asks THE now for the last-mile number of every labelled
+// shipment still waiting for one — the "Làm mới" of the journeys screen, so CS
+// does not wait for the minute poll.
+// POST /api/tracking/last-mile/sync
+func (h *Handlers) RunLastMileSync(c *gin.Context) {
+	ctx, cancel := trackingCtx(c, 90*time.Second)
+	defer cancel()
+	got, err := h.svc.Carrier.SyncLastMile(ctx, 30)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, gin.H{"synced": got})
+}

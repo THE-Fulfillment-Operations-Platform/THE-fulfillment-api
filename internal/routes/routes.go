@@ -265,6 +265,8 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 
 	// Run one provider pass by hand instead of waiting for the scheduler.
 	authd.POST("/tracking/sync", trackingManage, h.RunTrackingSync)
+	// Pull the last-mile numbers (USPS…) THE has assigned since the label.
+	authd.POST("/tracking/last-mile/sync", trackingManage, h.RunLastMileSync)
 	authd.GET("/import-jobs", perm(view(models.FeatImport)), h.ListImportJobs)
 	authd.GET("/import-jobs/:id", perm(view(models.FeatImport)), h.GetImportJob)
 

@@ -652,6 +652,38 @@ func TestTHE_LastMileDoesNotOverwriteCS(t *testing.T) {
 	}
 }
 
+// The poll must serve the NEWEST parcels first: old shipments that never get a
+// last-mile number (cancelled on THE's site, test orders) would otherwise fill
+// every batch and the fresh parcel the warehouse is waiting on never gets its
+// number.
+func TestTHE_LastMilePollServesNewestFirst(t *testing.T) {
+	e := newTHEEnv(t)
+	e.fake.lastMile = "" // THE has no number yet at send time
+	var oldIDs []uint
+	for i, code := range []string{"100021", "100022", "100023"} {
+		o := e.order(t, code)
+		e.send(t, o)
+		oldIDs = append(oldIDs, o.ID)
+		e.db.Model(&models.CarrierShipment{}).Where("order_id = ?", o.ID).
+			Update("labeled_at", time.Now().Add(-time.Duration(48+i)*time.Hour))
+	}
+	fresh := e.order(t, "100024")
+	e.send(t, fresh)
+
+	e.fake.lastMile = "9400111899223344556677" // THE assigns it now
+	// Room for ONE parcel per pass, and only the old ones should NOT win it.
+	got, err := e.carrier.SyncLastMile(context.Background(), 1)
+	if err != nil || got != 1 {
+		t.Fatalf("poll pass: got=%d err=%v", got, err)
+	}
+	var o models.Order
+	e.db.First(&o, fresh.ID)
+	if o.TrackingNumber != "9400111899223344556677" {
+		t.Fatalf("the freshest parcel must be served first, order has %q", o.TrackingNumber)
+	}
+	_ = oldIDs
+}
+
 // Parcel maths: units stack in height, weights add up with the packaging,
 // the HS code of the most valuable line speaks for the parcel, a child SKU
 // inherits from its parent, and Excel-mangled zips / state names are fixed.

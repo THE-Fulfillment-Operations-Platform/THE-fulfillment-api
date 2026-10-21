@@ -127,9 +127,9 @@ func main() {
 	// there is no second flag to keep in step with the client above.
 	maintenance.NewTrackingScheduler(svc.TrackingSync, cfg.Track24hSyncInterval, cfg.Track24hBatchSize).Start(purgeCtx)
 
-	// THE last-mile numbers (USPS…) arrive after the label: ask THE every 10
-	// minutes and put them on the orders. Idle while the integration is off.
-	svc.Carrier.StartLastMilePoll(purgeCtx, 10*time.Minute)
+	// THE last-mile numbers (USPS…) arrive after the label: ask THE every
+	// minute and put them on the orders. Idle while the integration is off.
+	svc.Carrier.StartLastMilePoll(purgeCtx, time.Minute)
 
 	// Evict mockup thumbnails nobody has looked at in a month, so the cache
 	// tracks what is actually in production rather than growing forever.
