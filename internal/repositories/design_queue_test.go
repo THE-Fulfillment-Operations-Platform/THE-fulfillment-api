@@ -354,3 +354,38 @@ func TestSetProductionFileForBatch_StampsEveryLiveItem(t *testing.T) {
 	check(cancelled.ID, "") // cancelled line is never produced
 	check(outside.ID, "")   // another batch must not be touched
 }
+
+// The design queue's one search box finds a line by anything a designer has in
+// hand: the product tem, the SKU, the order's internal code or the shop's order id.
+func TestDesignQueue_SearchBoxFindsByItemOrderAndShopCodes(t *testing.T) {
+	db := newQueueTestDB(t)
+	repo := New(db)
+	a := seedQueueItem(t, db, "102853_2/4", models.DesignPending)
+	seedQueueItem(t, db, "102900_1/1", models.DesignPending)
+
+	find := func(term string) map[string]bool {
+		t.Helper()
+		rows, _, err := repo.OrderItem.List(ItemFilter{
+			Page: Page{Page: 1, PageSize: 50}, NeedsDesign: true, ReviewApproved: true, Search: term,
+		})
+		if err != nil {
+			t.Fatalf("search %q: %v", term, err)
+		}
+		got := map[string]bool{}
+		for _, r := range rows {
+			got[r.InternalCode] = true
+		}
+		return got
+	}
+	for _, term := range []string{"102853_2/4", "ORD-102853_2/4", "so-102853_2/4", "SKU-1"} {
+		if got := find(term); !got[a.InternalCode] {
+			t.Errorf("search %q must find %s, got %v", term, a.InternalCode, got)
+		}
+	}
+	if got := find("ORD-102853"); len(got) != 1 || !got[a.InternalCode] {
+		t.Errorf("order code must narrow to its own line, got %v", got)
+	}
+	if got := find("khong-co-ma-nay"); len(got) != 0 {
+		t.Errorf("unknown code must find nothing, got %v", got)
+	}
+}

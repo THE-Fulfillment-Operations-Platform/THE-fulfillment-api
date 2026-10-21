@@ -688,7 +688,7 @@ type ItemFilter struct {
 	StoreOrderID   string // partial, case-insensitive match on the parent order's store order id
 	SKUCode        string
 	InternalCode   string // partial, case-insensitive match on the item's internal (QR) code
-	Search         string // partial, case-insensitive match on EITHER internal_code OR sku_code (one search box)
+	Search         string // partial, case-insensitive match on the item's code, SKU, the order's internal code or store order id (one search box)
 	HasDesignFile  bool   // only items that already have a front or back design file (design-download pick-list)
 	InternalStatus string
 	// HandedOver keeps only items whose order has left the workshop: handed to
@@ -1021,13 +1021,17 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 		q = q.Where("order_items.internal_code ILIKE ?", "%"+f.InternalCode+"%")
 	}
 	if f.Search != "" {
-		// One search box over two columns. LOWER(col) LIKE LOWER(pattern) rather than
-		// ILIKE so the same clause is case-insensitive on both Postgres and the SQLite
-		// used in tests. Grouped so the OR can't leak into the surrounding AND chain
-		// (which would widen every other filter).
+		// One search box over everything a person has in hand: the product tem
+		// (102853_2/4), the SKU, the order's internal code (102853) and the shop's
+		// order id. LOWER(col) LIKE LOWER(pattern) rather than ILIKE so the same
+		// clause is case-insensitive on both Postgres and the SQLite used in tests.
+		// Grouped so the OR can't leak into the surrounding AND chain (which would
+		// widen every other filter).
 		like := "%" + strings.ToLower(f.Search) + "%"
 		q = q.Where(r.db.Where("LOWER(order_items.internal_code) LIKE ?", like).
-			Or("LOWER(order_items.sku_code) LIKE ?", like))
+			Or("LOWER(order_items.sku_code) LIKE ?", like).
+			Or("LOWER(orders.internal_code) LIKE ?", like).
+			Or("LOWER(orders.store_order_id) LIKE ?", like))
 	}
 	if f.HasDesignFile {
 		// COALESCE guards against NULL (the columns have no NOT NULL constraint), so
