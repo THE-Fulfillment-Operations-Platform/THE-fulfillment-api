@@ -90,7 +90,7 @@ func (s *OrderService) updateOrderCore(actor Actor, order *models.Order, in Upda
 	// Validate item edits up front (before opening the transaction).
 	if len(in.Items) > 0 {
 		if !editItems {
-			return nil, apperr.Conflict("Đơn đã vào sản xuất/batch — không thể sửa sản phẩm (chỉ OWNER được sửa).")
+			return nil, apperr.Conflict("Đơn đã vào sản xuất/batch — không thể sửa sản phẩm (chỉ OWNER / Kỹ thuật viên được sửa).")
 		}
 		byID := map[uint]*models.OrderItem{}
 		for i := range order.Items {
@@ -199,7 +199,7 @@ func (s *OrderService) UpdateOrder(actor Actor, id uint, in UpdateOrderInput) (*
 	if orderPacked(order.SellerStatus) {
 		return nil, apperr.Conflict("Đơn đã đóng gói/bàn giao/gửi đi, không thể sửa")
 	}
-	editItems := !orderInProduction(order) || actor.Role == models.RoleOwner
+	editItems := !orderInProduction(order) || actor.Role.IsSuper()
 	return s.updateOrderCore(actor, order, in, editItems, "ORDER_EDIT")
 }
 

@@ -89,7 +89,7 @@ type UpdateUserInput struct {
 // OWNER has everything, SELLER none of it. An unknown key is an error rather
 // than silently dropped, so a typo in a client never passes as "saved".
 func resolvePerms(role models.Role, list []string) (models.PermList, error) {
-	if list == nil || role == models.RoleOwner || role == models.RoleSeller {
+	if list == nil || role.IsSuper() || role == models.RoleSeller {
 		return nil, nil
 	}
 	for _, p := range list {
@@ -107,6 +107,9 @@ func resolvePerms(role models.Role, list []string) (models.PermList, error) {
 //   - an ADMIN can only grant ticks they hold themselves.
 func guardGrant(actor Actor, targetRole models.Role, perms models.PermList) error {
 	if actor.Role == models.RoleOwner {
+		return nil
+	}
+	if actor.Role == models.RoleTechnician && targetRole != models.RoleOwner {
 		return nil
 	}
 	if targetRole == models.RoleOwner {
@@ -330,7 +333,7 @@ func (s *UserService) Update(actor Actor, id uint, in UpdateUserInput) (*models.
 	if accessChanged {
 		// Nobody but an OWNER widens their own access: an ADMIN ticking extra
 		// boxes on themselves would make the ticks meaningless.
-		if actor.ID == u.ID && actor.Role != models.RoleOwner {
+		if actor.ID == u.ID && !actor.Role.IsSuper() {
 			return nil, apperr.Forbidden("Không thể tự đổi vai trò hoặc quyền của chính mình — nhờ chủ sở hữu sửa giúp.")
 		}
 		if err := guardGrant(actor, u.Role, u.Permissions); err != nil {

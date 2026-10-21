@@ -96,16 +96,13 @@ func TestRolePermissions_Guards(t *testing.T) {
 	if _, err := svc.SetRolePermissions(narrowed, models.RoleQC, PermsInput{Set: true, List: []string{"qc.manage"}}); err == nil {
 		t.Error("không được cấp cho vai trò quyền mà chính mình không có")
 	}
-	for _, r := range []models.Role{models.RoleOwner, models.RoleSeller} {
+	for _, r := range []models.Role{models.RoleOwner, models.RoleTechnician, models.RoleSeller} {
 		if _, err := svc.SetRolePermissions(ownerActor(owner), r, some); err == nil {
 			t.Errorf("%s không phải bộ tick, không được lưu", r)
 		}
 	}
 	if _, err := svc.SetRolePermissions(ownerActor(owner), models.RoleOps, PermsInput{Set: true, List: []string{"qc.mange"}}); err == nil {
 		t.Error("quyền gõ sai phải bị từ chối, không được lặng lẽ bỏ qua")
-	}
-	if _, err := svc.SetRolePermissions(ownerActor(owner), models.RoleTechnician, some); err != nil {
-		t.Errorf("OWNER đổi quyền Kỹ thuật viên: %v", err)
 	}
 	if v := roleView(t, svc, adminActor(admin), models.RoleAdmin); v.Editable || v.ReadOnlyReason == "" {
 		t.Errorf("ADMIN xem vai trò ADMIN phải thấy khoá kèm lý do: %+v", v)

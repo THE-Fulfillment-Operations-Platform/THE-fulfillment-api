@@ -410,8 +410,8 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 	// protects the QC gate (regressing a CUT batch would un-finish its items). The
 	// one exception is OWNER, who may step a batch back to fix a mistaken advance.
 	// Rework is remake + a note, not a status rollback.
-	if newStatus.Rank() < batch.Status.Rank() && actor.Role != models.RoleOwner {
-		return nil, apperr.Unprocessable("Sản xuất chỉ tiến, không lùi: batch đang ở '" + string(batch.Status) + "', không thể hạ về '" + string(newStatus) + "'. (Chỉ OWNER được sửa khi bấm nhầm.)")
+	if newStatus.Rank() < batch.Status.Rank() && !actor.Role.IsSuper() {
+		return nil, apperr.Unprocessable("Sản xuất chỉ tiến, không lùi: batch đang ở '" + string(batch.Status) + "', không thể hạ về '" + string(newStatus) + "'. (Chỉ OWNER / Kỹ thuật viên được sửa khi bấm nhầm.)")
 	}
 	if err := cutNeedsPrint(batch.Code, batch.Status, newStatus); err != nil {
 		return nil, err
@@ -468,8 +468,8 @@ func (s *BatchService) UpdateStatus(actor Actor, batchID uint, in UpdateStatusIn
 		if fresh.Status == models.StatusQCPassed {
 			return apperr.Unprocessable("Batch đã QC — không cập nhật trạng thái ở bảng sản xuất nữa.")
 		}
-		if newStatus.Rank() < fresh.Status.Rank() && actor.Role != models.RoleOwner {
-			return apperr.Unprocessable("Sản xuất chỉ tiến, không lùi: batch đang ở '" + string(fresh.Status) + "', không thể hạ về '" + string(newStatus) + "'. (Chỉ OWNER được sửa khi bấm nhầm.)")
+		if newStatus.Rank() < fresh.Status.Rank() && !actor.Role.IsSuper() {
+			return apperr.Unprocessable("Sản xuất chỉ tiến, không lùi: batch đang ở '" + string(fresh.Status) + "', không thể hạ về '" + string(newStatus) + "'. (Chỉ OWNER / Kỹ thuật viên được sửa khi bấm nhầm.)")
 		}
 		// Same gate on the locked row: a concurrent change may have moved it.
 		if err := cutNeedsPrint(fresh.Code, fresh.Status, newStatus); err != nil {

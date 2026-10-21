@@ -165,7 +165,7 @@ func allPerms() []string {
 // RoleTickable reports whether a role's ticks can be configured at all. OWNER
 // always has everything and SELLER none of it — neither is a tick set.
 func RoleTickable(role Role) bool {
-	return role != RoleOwner && role != RoleSeller
+	return !role.IsSuper() && role != RoleSeller
 }
 
 // BuiltinRolePerms is the tick set a role has out of the box, before anyone
@@ -245,7 +245,7 @@ func NormalizePerms(in []string) []string {
 // EffectivePerms is what a user can actually do: everything for OWNER, the
 // stored list when customised, otherwise the role defaults.
 func EffectivePerms(role Role, stored PermList) []string {
-	if role == RoleOwner {
+	if role.IsSuper() {
 		return allPerms()
 	}
 	if role == RoleSeller {
@@ -326,5 +326,5 @@ func (a *Access) Can(perm string) bool {
 	if a == nil {
 		return false
 	}
-	return a.Role == RoleOwner || a.Perms[perm]
+	return a.Role.IsSuper() || a.Perms[perm]
 }

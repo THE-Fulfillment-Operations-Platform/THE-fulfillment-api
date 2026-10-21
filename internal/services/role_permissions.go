@@ -33,7 +33,7 @@ func roleEditBlock(actor Actor, role models.Role) string {
 		return "Vai trò này không phân quyền theo tick."
 	case !actor.Role.HasAdminRights():
 		return "Chỉ Quản trị viên / Chủ sở hữu được đổi quyền của vai trò."
-	case actor.Role == models.RoleOwner:
+	case actor.Role.IsSuper():
 		return ""
 	case role == actor.Role:
 		return "Không tự đổi quyền vai trò của chính mình — nhờ chủ sở hữu sửa giúp."

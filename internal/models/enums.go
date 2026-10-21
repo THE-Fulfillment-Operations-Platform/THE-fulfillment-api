@@ -37,6 +37,12 @@ var AllRoles = []Role{
 // HasAdminRights reports whether the role passes the checks that used to read
 // "OWNER or ADMIN" (delete an order or a master record, undo a QC pass, the THE
 // settings, user admin). OWNER-only levers stay OWNER-only — this is not them.
+// IsSuper is OWNER or TECHNICIAN: everything the system can do, ticks or not.
+// TECHNICIAN is the developer who tests the live system, so it is never held
+// back by a tick or by "only OWNER" rules — the single exception is the OWNER
+// accounts themselves and the data reset, which stay with OWNER.
+func (r Role) IsSuper() bool { return r == RoleOwner || r == RoleTechnician }
+
 func (r Role) HasAdminRights() bool {
 	return r == RoleOwner || r == RoleAdmin || r == RoleTechnician
 }

@@ -27,7 +27,7 @@ type Actor struct {
 // Can reports whether the actor holds perm (e.g. models.Manage(models.FeatOrders)).
 // OWNER holds everything.
 func (a Actor) Can(perm string) bool {
-	if a.Role == models.RoleOwner {
+	if a.Role.IsSuper() {
 		return true
 	}
 	if a.Perms != nil {
