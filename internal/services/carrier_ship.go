@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"regexp"
 	"sort"
 	"strings"
@@ -662,6 +663,12 @@ func (s *CarrierService) abandonPending(ctx context.Context, cli theAPI, sh *mod
 	}
 	if err != nil && !isNotFound(err) {
 		return shipErr(ShipErrUnclear, "Chưa kiểm tra được đơn THE cũ: "+theErrorMessage(err)+" — thử lại sau")
+	}
+	// Already archived or cancelled on THE (someone did it by hand on THE's
+	// site): nothing to cancel, and it can no longer be paid — THE would refuse
+	// the cancel with "Package status is invalid" and wedge the order forever.
+	if err == nil && !strings.EqualFold(d.Status.String(), "pending") {
+		err = &theapi.Error{Status: http.StatusNotFound, Message: "package no longer pending"}
 	}
 	if err == nil {
 		if cerr := cli.CancelPackages(cctx, []string{sh.ExternalID}); cerr != nil {

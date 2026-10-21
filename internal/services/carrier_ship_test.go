@@ -453,6 +453,32 @@ func TestTHE_ChangedDataReplacesUnpaidPackage(t *testing.T) {
 	}
 }
 
+// Someone archives the pending package by hand on THE's site, then the order's
+// data changes and it is sent again: THE refuses to cancel what is already
+// archived ("Package status is invalid"), which must not wedge the order — the
+// old package is simply gone, a fresh one is made and paid.
+func TestTHE_PackageArchivedByHandDoesNotWedgeResend(t *testing.T) {
+	e := newTHEEnv(t)
+	o := e.order(t, "100007")
+	e.fake.deliverErr = &theapi.Error{Status: 409, Messages: []string{"Failed to create labels"}}
+	res := e.send(t, o)
+	if len(res.Skipped) != 1 {
+		t.Fatalf("first send must fail: %+v", res)
+	}
+	for _, p := range e.fake.pkgs {
+		p.status = "archived" // cancelled by hand on THE
+	}
+	e.db.Model(&models.SKU{}).Where("id = ?", e.sku.ID).Update("ship_weight_g", 210)
+
+	res = e.send(t, o)
+	if len(res.Shipped) != 1 {
+		t.Fatalf("resend after a hand-archived package must succeed: %+v", res)
+	}
+	if e.fake.chargedCount() != 1 {
+		t.Fatalf("want exactly one paid package, got %d", e.fake.chargedCount())
+	}
+}
+
 // THE's de-dupe hands back a leftover pending package with other data (e.g. a
 // hidden one from THE's HS-code bug): it is archived, a fresh one is made.
 func TestTHE_StaleDedupeAnswerIsReplaced(t *testing.T) {
