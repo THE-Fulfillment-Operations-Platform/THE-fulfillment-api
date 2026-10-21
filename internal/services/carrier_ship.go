@@ -461,6 +461,13 @@ func (s *CarrierService) ShipOrderOnTHE(ctx context.Context, actor Actor, c *mod
 	if err != nil {
 		return nil, apperr.Internal("could not read shipments").Wrap(err)
 	}
+	// FFM's record can outlive the package: someone archived or cancelled it by
+	// hand on THE. A dead package is not "already on THE" — forget it and make a
+	// new one.
+	if live != nil && s.goneOnTHE(ctx, cli, live) {
+		live = nil
+	}
+
 	if live != nil && live.Status == models.ShipmentLabeled {
 		return outcomeOf(live, true), nil
 	}
@@ -648,6 +655,39 @@ func staleEcho(pkg *theapi.Package, r theapi.CreatePackageRequest) string {
 		return "mã HS"
 	}
 	return ""
+}
+
+// goneOnTHE reports (and records) that the live shipment's package no longer
+// exists on THE as a usable package: deleted, archived or cancelled there, so
+// it can neither be paid nor delivered. Any doubt (THE unreachable, a status it
+// does not know) answers false — the normal path then decides.
+func (s *CarrierService) goneOnTHE(ctx context.Context, cli theAPI, live *models.CarrierShipment) bool {
+	if live.ExternalID == "" || strings.HasPrefix(live.Error, unclearDeliveryPrefix) {
+		return false
+	}
+	// Only an unpaid (pending) package: a paid one belongs to an order already
+	// handed off, which has its own cancel flow (carrier_ops).
+	if live.Status != models.ShipmentCreated {
+		return false
+	}
+	cctx, cancel := context.WithTimeout(ctx, theReadTimeout)
+	defer cancel()
+	d, err := cli.GetPackage(cctx, live.ExternalID)
+	switch {
+	case err != nil && !isNotFound(err):
+		return false
+	case err == nil:
+		st := strings.ToLower(strings.TrimSpace(d.Status.String()))
+		if st != "archived" && st != "canceled" && st != "cancelled" {
+			return false
+		}
+	}
+	_ = s.repo.Carrier.UpdateShipment(live.ID, map[string]any{
+		"status": models.ShipmentCancelled, "cancelled_at": time.Now(),
+		"error": "Đơn THE đã bị huỷ / lưu trữ bên THE — tạo đơn mới",
+	})
+	live.Status = models.ShipmentCancelled
+	return true
 }
 
 // abandonPending archives a pending (unpaid) THE package and frees the order's

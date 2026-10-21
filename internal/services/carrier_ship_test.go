@@ -479,6 +479,21 @@ func TestTHE_PackageArchivedByHandDoesNotWedgeResend(t *testing.T) {
 	}
 }
 
+// Same-data resend after the pending package was archived by hand: no error
+// round-trip, the very same send makes the new package.
+func TestTHE_PendingArchivedByHandSameDataRecreatesInOneSend(t *testing.T) {
+	e := newTHEEnv(t)
+	o := e.order(t, "100009")
+	e.fake.deliverErr = &theapi.Error{Status: 409, Messages: []string{"Failed to create labels"}}
+	e.send(t, o)
+	for _, p := range e.fake.pkgs {
+		p.status = "archived"
+	}
+	if res := e.send(t, o); len(res.Shipped) != 1 {
+		t.Fatalf("resend must succeed in one go: %+v", res)
+	}
+}
+
 // THE's de-dupe hands back a leftover pending package with other data (e.g. a
 // hidden one from THE's HS-code bug): it is archived, a fresh one is made.
 func TestTHE_StaleDedupeAnswerIsReplaced(t *testing.T) {
