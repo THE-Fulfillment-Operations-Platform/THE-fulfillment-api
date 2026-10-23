@@ -1203,7 +1203,10 @@ type MaterialBucket struct {
 }
 
 // designReadyUnbatchedSubquery returns (order_item_id, material_id) pairs for
-// design-ready items whose (item, material) is not yet scheduled into any batch.
+// items of APPROVED orders whose (item, material) is not yet scheduled into any
+// batch. There is no "set ready" step any more (khách bỏ màn Chờ thiết kế
+// 23/10/2026): an approved, live item goes straight into the create-batch pool,
+// whatever its design_status — the production files are attached per batch.
 func (r *OrderItemRepository) designReadyUnbatchedSubquery() *gorm.DB {
 	return r.db.Table("order_items oi").
 		Select("oi.id AS order_item_id, oi.sku_code AS sku_code, sm.material_id AS material_id, m.code AS material_code, m.name AS material_name").
@@ -1213,7 +1216,6 @@ func (r *OrderItemRepository) designReadyUnbatchedSubquery() *gorm.DB {
 		Where("oi.deleted_at IS NULL").
 		Where("o.review_status = ?", models.ReviewApproved).
 		Where("oi.cancellation_status NOT IN ?", []models.CancellationStatus{models.CancellationSeller, models.CancellationApproved}).
-		Where("oi.design_status = ?", models.DesignReady).
 		Where("NOT EXISTS (?)",
 			r.db.Table("batch_items bi").
 				Select("1").

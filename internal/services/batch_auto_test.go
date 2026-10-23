@@ -282,15 +282,21 @@ func TestAutoCreateBatches_SkipsIneligiblePool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("auto create: %v", err)
 	}
-	if len(res.Created) != 1 || res.Created[0].ItemCount != 1 {
-		t.Fatalf("want one batch holding only the eligible item, got %+v", res.Created)
+	// No "set ready" step any more: the item still at design PENDING is batched
+	// too. Only the unapproved order and the cancelled line stay out.
+	if len(res.Created) != 1 || res.Created[0].ItemCount != 2 {
+		t.Fatalf("want one batch holding the 2 eligible items, got %+v", res.Created)
+	}
+	var notReadyPart models.BatchItem
+	if err := db.First(&notReadyPart, "order_item_id = ?", notReady.ID).Error; err != nil {
+		t.Fatalf("an approved item must be batched whatever its design status: %v", err)
 	}
 	var part models.BatchItem
 	if err := db.First(&part, "order_item_id = ?", ids[0]).Error; err != nil {
 		t.Fatalf("eligible item was not batched: %v", err)
 	}
 	var wrong int64
-	db.Model(&models.BatchItem{}).Where("order_item_id <> ?", ids[0]).Count(&wrong)
+	db.Model(&models.BatchItem{}).Where("order_item_id NOT IN ?", []uint{ids[0], notReady.ID}).Count(&wrong)
 	if wrong != 0 {
 		t.Fatalf("ineligible items must not be batched, found %d parts", wrong)
 	}
