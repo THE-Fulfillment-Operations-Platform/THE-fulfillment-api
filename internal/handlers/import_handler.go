@@ -238,3 +238,17 @@ func (h *Handlers) GetImportJob(c *gin.Context) {
 	}
 	response.OK(c, job)
 }
+
+// ExportItemsAsImportTemplate downloads the items matching the orders screen's
+// filters (same query params as GET /api/items) in the order-import template
+// layout, ready to edit and import back. Technician only.
+// GET /api/orders/export/import-template.xlsx
+func (h *Handlers) ExportItemsAsImportTemplate(c *gin.Context) {
+	data, filename, err := h.svc.Order.ExportItemsAsImportXLSX(actor(c), itemFilterFrom(c))
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
+	c.Data(http.StatusOK, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", data)
+}

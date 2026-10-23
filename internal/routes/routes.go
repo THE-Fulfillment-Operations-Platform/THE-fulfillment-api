@@ -219,6 +219,9 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		orders.GET("/:id", orderRead, h.GetOrder)
 		orders.POST("", perm(manage(models.FeatImport), manage(models.FeatOrders)), h.CreateOrderDirect)
 		orders.GET("/import/template.xlsx", importManage, h.DownloadOrderImportTemplate)
+		// Items in the import-template layout (re-importable). Technician only —
+		// re-checked in the service.
+		orders.GET("/export/import-template.xlsx", orderRead, h.ExportItemsAsImportTemplate)
 		orders.POST("/import", importManage, h.ImportOrders)
 		orders.POST("/import/commit", importManage, h.CommitImport)
 		// Edit / cancel / delete — authorization is also re-checked in the service.
