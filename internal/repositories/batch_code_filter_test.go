@@ -107,3 +107,52 @@ func TestBatchDetailPreloadsSeller(t *testing.T) {
 		t.Errorf("seller name not preloaded: got %q, want %q", got, "Shop ABC")
 	}
 }
+
+// TestBatchListSellerAndStoreOrderFilter: find the batch an order of one shop sits
+// in — by seller, by (part of) the shop order id, or both.
+func TestBatchListSellerAndStoreOrderFilter(t *testing.T) {
+	db := newQueueTestDB(t)
+	repo := &BatchRepository{db: db}
+
+	first := seedBatchWithOrder(t, db, "100011")  // store order "SO-100011", seller 1
+	second := seedBatchWithOrder(t, db, "100012") // store order "SO-100012", seller 1
+	db.Model(&models.Order{}).Where("internal_code = ?", "100012").Update("seller_id", 2)
+	page := Page{Page: 1, PageSize: 20}
+
+	ids := func(f BatchFilter) []uint {
+		t.Helper()
+		f.Page = page
+		rows, _, err := repo.List(f)
+		if err != nil {
+			t.Fatalf("List(%+v): %v", f, err)
+		}
+		out := []uint{}
+		for _, b := range rows {
+			out = append(out, b.ID)
+		}
+		return out
+	}
+	one, two := uint(1), uint(2)
+	if got := ids(BatchFilter{SellerID: &one}); len(got) != 1 || got[0] != first {
+		t.Errorf("seller 1: %v, want [%d]", got, first)
+	}
+	if got := ids(BatchFilter{SellerID: &two}); len(got) != 1 || got[0] != second {
+		t.Errorf("seller 2: %v, want [%d]", got, second)
+	}
+	for _, q := range []string{"so-100012", "100012", " SO-1000"} {
+		got := ids(BatchFilter{StoreOrder: q})
+		want := 1
+		if q == " SO-1000" {
+			want = 2
+		}
+		if len(got) != want {
+			t.Errorf("StoreOrder=%q: %v, want %d batch(es)", q, got, want)
+		}
+	}
+	if got := ids(BatchFilter{SellerID: &one, StoreOrder: "100012"}); len(got) != 0 {
+		t.Errorf("seller 1 + order of seller 2 must be empty, got %v", got)
+	}
+	if got := ids(BatchFilter{StoreOrder: "nope"}); len(got) != 0 {
+		t.Errorf("unknown store order: %v, want none", got)
+	}
+}
