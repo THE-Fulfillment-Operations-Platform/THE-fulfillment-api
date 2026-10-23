@@ -38,13 +38,16 @@ func TestExpandQuantityRows_SameAsRepeatedRows(t *testing.T) {
 	}
 }
 
-// A mistyped quantity must not create thousands of items.
-func TestValidateRow_QuantityCap(t *testing.T) {
+// No upper limit (anh Kiên, 24/10/2026): a large quantity is not a row error, and
+// the row expands into exactly that many items.
+func TestValidateRow_NoQuantityCap(t *testing.T) {
 	s := &ImportService{}
-	row := ImportRow{StoreOrderID: "A", SKU: "S1", Quantity: MaxImportQuantity + 1, ShippingName: "x", ShippingAddress1: "y", ShippingCountry: "US"}
-	e := s.validateRow(1, row, nil, repositories.SellerIdentity{ID: 1, Code: "S", Name: "S"})
-	if e == nil || e.ErrorCode != "QTY_TOO_LARGE" {
-		t.Fatalf("quantity above the cap must be refused with QTY_TOO_LARGE, got %+v", e)
+	row := ImportRow{StoreOrderID: "A", SKU: "S1", Quantity: 250, ShippingName: "x", ShippingAddress1: "y", ShippingCountry: "US"}
+	if e := s.validateRow(1, row, nil, repositories.SellerIdentity{ID: 1, Code: "S", Name: "S"}); e != nil && e.Field == "Quantity" {
+		t.Fatalf("a large quantity must not be refused, got %+v", e)
+	}
+	if got := len(expandQuantityRows([]ImportRow{row})); got != 250 {
+		t.Fatalf("quantity 250 must give 250 items, got %d", got)
 	}
 }
 

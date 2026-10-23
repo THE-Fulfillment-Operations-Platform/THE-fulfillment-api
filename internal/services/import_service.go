@@ -643,11 +643,6 @@ func (s *ImportService) validateRow(rowNumber int, row ImportRow, skus map[strin
 	if int(row.Quantity) < 1 {
 		return mkErr("Quantity", "QTY_INVALID", "Quantity must be a positive integer", "Set quantity >= 1")
 	}
-	if int(row.Quantity) > MaxImportQuantity {
-		return mkErr("Quantity", "QTY_TOO_LARGE",
-			fmt.Sprintf("Quantity %d is above %d — each unit becomes its own item", int(row.Quantity), MaxImportQuantity),
-			fmt.Sprintf("Check the number, or split the order (max %d per row)", MaxImportQuantity))
-	}
 	if strings.TrimSpace(row.SKU) == "" {
 		return mkErr("SKU", "SKU_MISSING", "SKU is required", "Provide a SKU")
 	}
@@ -1185,23 +1180,16 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 	return job, nil
 }
 
-// MaxImportQuantity is the largest Quantity one import row may carry. A row with
-// Quantity N becomes N separate items (see expandQuantityRows), so the cap is what
-// keeps a mistyped "5000" from creating five thousand items and labels.
-const MaxImportQuantity = 100
-
 // expandQuantityRows makes "Quantity 20" and "20 rows of Quantity 1" the SAME order:
 // every row of Quantity N becomes N rows of Quantity 1, in place. Each one is then
 // its own item with its own internal code (103062_1/4 … 103062_4/4), so the workshop
 // counts, labels and QC-checks pieces one by one whichever way the seller wrote the
-// file. Rows are copied; the caller's slice is not touched.
+// file. Rows are copied; the caller's slice is not touched. No upper limit on N:
+// anh Kiên chốt 24/10/2026 bỏ giới hạn số lượng mỗi dòng (ghi bao nhiêu tạo bấy nhiêu).
 func expandQuantityRows(rows []ImportRow) []ImportRow {
 	out := make([]ImportRow, 0, len(rows))
 	for _, row := range rows {
 		n := maxInt(int(row.Quantity), 1)
-		if n > MaxImportQuantity {
-			n = MaxImportQuantity // validateRow refuses these; never expand past the cap anyway
-		}
 		row.Quantity = 1
 		for i := 0; i < n; i++ {
 			out = append(out, row)
