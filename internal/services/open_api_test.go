@@ -210,8 +210,9 @@ func TestOpenCreate_CreatesAReviewableOrder(t *testing.T) {
 	if o.Tracking != nil {
 		t.Errorf("a new order has no tracking, got %+v", o.Tracking)
 	}
-	if len(o.Items) != 2 || o.Items[0].Quantity != 2 || o.Items[1].Quantity != 1 ||
-		o.Items[1].SKU != "TESTSKU" || o.Items[0].ProductName != "Test SKU" || o.Items[1].Line != 2 {
+	// Quantity 2 on the first line = two items; the second input line is the third item.
+	if len(o.Items) != 3 || o.Items[0].Quantity != 1 || o.Items[1].Quantity != 1 || o.Items[2].Quantity != 1 ||
+		o.Items[2].SKU != "TESTSKU" || o.Items[0].ProductName != "Test SKU" || o.Items[2].Line != 3 {
 		t.Errorf("items = %+v", o.Items)
 	}
 
@@ -226,17 +227,17 @@ func TestOpenCreate_CreatesAReviewableOrder(t *testing.T) {
 	if strings.HasPrefix(order.InternalCode, "TMP") {
 		t.Errorf("placeholder code survived: %s", order.InternalCode)
 	}
-	if order.Items[0].InternalCode != order.InternalCode+"_1/2" || order.Items[0].SKUID == nil {
+	if order.Items[0].InternalCode != order.InternalCode+"_1/3" || order.Items[0].SKUID == nil {
 		t.Errorf("item code/sku = %q / %v", order.Items[0].InternalCode, order.Items[0].SKUID)
 	}
-	if order.Items[0].DesignStatus != models.DesignPending || order.Items[1].DesignStatus != models.DesignMissing {
-		t.Errorf("design statuses = %s, %s", order.Items[0].DesignStatus, order.Items[1].DesignStatus)
+	if order.Items[0].DesignStatus != models.DesignPending || order.Items[1].DesignStatus != models.DesignPending || order.Items[2].DesignStatus != models.DesignMissing {
+		t.Errorf("design statuses = %s, %s, %s", order.Items[0].DesignStatus, order.Items[1].DesignStatus, order.Items[2].DesignStatus)
 	}
 	var assets, notes int64
 	db.Model(&models.ItemAsset{}).Count(&assets)
 	db.Model(&models.Note{}).Where("reason_code = ?", "ART_MISSING").Count(&notes)
-	if assets != 2 || notes != 1 {
-		t.Errorf("assets=%d notes=%d, want 2 and 1", assets, notes)
+	if assets != 4 || notes != 1 {
+		t.Errorf("assets=%d notes=%d, want 4 and 1", assets, notes)
 	}
 	var audit models.AuditLog
 	if err := db.Where("action = ?", "ORDER_CREATE_API").First(&audit).Error; err != nil {

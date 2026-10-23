@@ -150,8 +150,11 @@ type PreviewResult struct {
 	TotalRows   int                    `json:"total_rows"`
 	OrderCount  int                    `json:"order_count"`
 	ValidRows   int                    `json:"valid_rows"`
-	ErrorRows   int                    `json:"error_rows"`
-	Errors      []models.ImportError   `json:"errors"`
+	// ItemCount is how many items the valid rows will create: a row of Quantity N
+	// becomes N items (each its own internal code), so it is the sum of quantities.
+	ItemCount int                  `json:"item_count"`
+	ErrorRows int                  `json:"error_rows"`
+	Errors    []models.ImportError `json:"errors"`
 	// Warnings are non-blocking heads-up rows (e.g. a StoreOrderID that already
 	// exists for the seller). They are still imported — the client highlights them
 	// so staff can eyeball a possible duplicate — and never gate the commit.
@@ -640,6 +643,11 @@ func (s *ImportService) validateRow(rowNumber int, row ImportRow, skus map[strin
 	if int(row.Quantity) < 1 {
 		return mkErr("Quantity", "QTY_INVALID", "Quantity must be a positive integer", "Set quantity >= 1")
 	}
+	if int(row.Quantity) > MaxImportQuantity {
+		return mkErr("Quantity", "QTY_TOO_LARGE",
+			fmt.Sprintf("Quantity %d is above %d — each unit becomes its own item", int(row.Quantity), MaxImportQuantity),
+			fmt.Sprintf("Check the number, or split the order (max %d per row)", MaxImportQuantity))
+	}
 	if strings.TrimSpace(row.SKU) == "" {
 		return mkErr("SKU", "SKU_MISSING", "SKU is required", "Provide a SKU")
 	}
@@ -953,7 +961,7 @@ func (s *ImportService) previewSellerRows(actor Actor, seller repositories.Selle
 
 	return &PreviewResult{
 		ImportJobID: job.ID, Status: job.Status, TotalRows: len(rows),
-		OrderCount: len(orderSet), ValidRows: len(validRows), ErrorRows: len(importErrors),
+		OrderCount: len(orderSet), ValidRows: len(validRows), ItemCount: len(expandQuantityRows(validRows)), ErrorRows: len(importErrors),
 		Errors: importErrors, Warnings: warnings,
 	}, nil
 }
@@ -1177,10 +1185,37 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 	return job, nil
 }
 
+// MaxImportQuantity is the largest Quantity one import row may carry. A row with
+// Quantity N becomes N separate items (see expandQuantityRows), so the cap is what
+// keeps a mistyped "5000" from creating five thousand items and labels.
+const MaxImportQuantity = 100
+
+// expandQuantityRows makes "Quantity 20" and "20 rows of Quantity 1" the SAME order:
+// every row of Quantity N becomes N rows of Quantity 1, in place. Each one is then
+// its own item with its own internal code (103062_1/4 … 103062_4/4), so the workshop
+// counts, labels and QC-checks pieces one by one whichever way the seller wrote the
+// file. Rows are copied; the caller's slice is not touched.
+func expandQuantityRows(rows []ImportRow) []ImportRow {
+	out := make([]ImportRow, 0, len(rows))
+	for _, row := range rows {
+		n := maxInt(int(row.Quantity), 1)
+		if n > MaxImportQuantity {
+			n = MaxImportQuantity // validateRow refuses these; never expand past the cap anyway
+		}
+		row.Quantity = 1
+		for i := 0; i < n; i++ {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
 // orderItemsFromRows turns one order's rows into its line items, in row order.
 // Shared by the file import and the open API so both produce identical items:
-// the same tem codes, the same "no mockup = design missing" rule.
+// the same tem codes, the same "no mockup = design missing" rule. A row with
+// Quantity N yields N items of quantity 1 (expandQuantityRows).
 func orderItemsFromRows(orderID uint, rows []ImportRow, skus map[string]repositories.SKUInfo) []models.OrderItem {
+	rows = expandQuantityRows(rows)
 	total := len(rows)
 	items := make([]models.OrderItem, 0, total)
 	for lineNo, row := range rows {

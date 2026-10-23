@@ -773,8 +773,9 @@ func TestTemplateRoundTrip_DownloadFillUploadCommits(t *testing.T) {
 		t.Fatalf("job status = %s, want COMMITTED", job.Status)
 	}
 	orders := loadOrders(t, db, 1)
-	if len(orders) != 1 || len(orders[0].Items) != 2 {
-		t.Fatalf("want 1 order with 2 items, got %+v", orders)
+	// 2 template rows, the second with SỐ LƯỢNG 2 → 3 items of quantity 1.
+	if len(orders) != 1 || len(orders[0].Items) != 3 {
+		t.Fatalf("want 1 order with 3 items, got %+v", orders)
 	}
 	if orders[0].OrderDate != "2026-08-20" {
 		t.Fatalf("order_date = %s, want the template's DATE 2026-08-20", orders[0].OrderDate)
@@ -953,15 +954,14 @@ func TestCustomerFileAsSent_ImportsWithNoBlockingErrors(t *testing.T) {
 	if o.ShippingProvince != "TX" || o.ShippingZip != "73301" {
 		t.Errorf("Mã vùng/Zipcode landed wrong: province=%q zip=%q", o.ShippingProvince, o.ShippingZip)
 	}
-	if len(o.Items) != 2 {
-		t.Fatalf("want 2 items, got %d", len(o.Items))
+	// Rows of quantity 1 and 2 → 3 items, every one of quantity 1.
+	if len(o.Items) != 3 {
+		t.Fatalf("want 3 items, got %d", len(o.Items))
 	}
-	var qtys []int
 	for _, it := range o.Items {
-		qtys = append(qtys, it.Quantity)
-	}
-	if qtys[0] != 1 || qtys[1] != 2 {
-		t.Errorf("quantities = %v, want [1 2]", qtys)
+		if it.Quantity != 1 {
+			t.Errorf("item %s quantity = %d, want 1", it.InternalCode, it.Quantity)
+		}
 	}
 	if o.Items[1].BackDesignURL != "https://d.example.com/2-back.png" {
 		t.Errorf("designBack lost: %q", o.Items[1].BackDesignURL)

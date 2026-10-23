@@ -204,7 +204,7 @@ func TestOpenAPI_EndToEnd(t *testing.T) {
 	}
 	_ = json.Unmarshal(res.body.Data, &first)
 	if !first.Created || first.Order.Status != "PENDING_REVIEW" || first.Order.Code == "" ||
-		len(first.Order.Items) != 1 || first.Order.Items[0].ProductName != "Test SKU" || first.Order.Items[0].Quantity != 2 {
+		len(first.Order.Items) != 2 || first.Order.Items[0].ProductName != "Test SKU" || first.Order.Items[0].Quantity != 1 || first.Order.Items[1].Quantity != 1 { // quantity 2 = two items
 		t.Fatalf("create data: %s", res.raw)
 	}
 	res = h.do("POST", "/api/open/v1/orders", bearer, openOrderBody)
