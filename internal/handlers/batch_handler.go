@@ -45,6 +45,9 @@ func (h *Handlers) ListBatches(c *gin.Context) {
 		// có mã đơn shop khớp (chứa chuỗi, không phân biệt hoa thường).
 		SellerID:   uintQueryPtr(c, "seller_id"),
 		StoreOrder: c.Query("store_order"),
+		// ?batch= mã batch chứa chuỗi; ?q= ô tìm chung (batch / mã đơn / mã đơn shop / seller).
+		BatchCode: c.Query("batch"),
+		Q:         c.Query("q"),
 		// ?open=1 — chỉ batch còn việc (bảng sản xuất dùng), bỏ batch đã đóng vì
 		// toàn bộ hàng bị huỷ ở QC.
 		ExcludeClosed: c.Query("open") == "1" || c.Query("open") == "true",

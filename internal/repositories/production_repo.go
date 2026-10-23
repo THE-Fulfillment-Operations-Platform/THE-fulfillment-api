@@ -32,6 +32,12 @@ type BatchFilter struct {
 	// insensitive) — "which batch is the order of this shop in?".
 	SellerID   *uint
 	StoreOrder string
+	// BatchCode keeps batches whose code contains it ("101602" finds "#101602").
+	BatchCode string
+	// Q is the one search box of the production board: a batch code, an order's
+	// internal code or item tem code, a shop order id, or a seller name — any of
+	// them finds the batches that hold it.
+	Q string
 	// Files splits "Chờ xử lý" the way the batch list labels it: "ready" = still
 	// PENDING, not closed, and both production links (print + cut) are attached —
 	// the "Đã có file SX" badge; "missing" = every other PENDING batch. Combined
@@ -277,6 +283,20 @@ func (r *BatchRepository) baseQuery(f BatchFilter) *gorm.DB {
 			Joins("JOIN order_items ON order_items.id = batch_items.order_item_id").
 			Joins("JOIN orders ON orders.id = order_items.order_id").
 			Where("orders.internal_code = ? OR order_items.internal_code = ?", code, code))
+	}
+	if bc := strings.TrimSpace(f.BatchCode); bc != "" {
+		q = q.Where("LOWER(batches.code) LIKE ?", "%"+strings.ToLower(strings.TrimPrefix(bc, "#"))+"%")
+	}
+	if term := strings.TrimSpace(f.Q); term != "" {
+		like := "%" + strings.ToLower(strings.TrimPrefix(term, "#")) + "%"
+		q = q.Where("LOWER(batches.code) LIKE ? OR batches.id IN (?)", like,
+			r.db.Model(&models.BatchItem{}).
+				Select("batch_items.batch_id").
+				Joins("JOIN order_items ON order_items.id = batch_items.order_item_id").
+				Joins("JOIN orders ON orders.id = order_items.order_id").
+				Joins("LEFT JOIN sellers ON sellers.id = orders.seller_id").
+				Where("orders.internal_code = ? OR order_items.internal_code = ? OR LOWER(orders.store_order_id) LIKE ? OR LOWER(sellers.name) LIKE ?",
+					term, term, like, like))
 	}
 	if f.SellerID != nil || strings.TrimSpace(f.StoreOrder) != "" {
 		sub := r.db.Model(&models.BatchItem{}).

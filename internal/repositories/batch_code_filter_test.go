@@ -156,3 +156,46 @@ func TestBatchListSellerAndStoreOrderFilter(t *testing.T) {
 		t.Errorf("unknown store order: %v, want none", got)
 	}
 }
+
+// TestBatchListBatchCodeAndQ: the production board's one search box finds a batch
+// by its code, an order code, a shop order id or the seller's name.
+func TestBatchListBatchCodeAndQ(t *testing.T) {
+	db := newQueueTestDB(t)
+	repo := &BatchRepository{db: db}
+	first := seedBatchWithOrder(t, db, "100021")
+	second := seedBatchWithOrder(t, db, "100022")
+	db.Create(&models.Seller{Code: "SEL-Q", Name: "Shop Hoa Hồng", Status: "active"})
+	var s models.Seller
+	db.Where("code = ?", "SEL-Q").First(&s)
+	db.Model(&models.Order{}).Where("internal_code = ?", "100021").Update("seller_id", s.ID+50) // another seller
+	db.Model(&models.Order{}).Where("internal_code = ?", "100022").Update("seller_id", s.ID)
+	page := Page{Page: 1, PageSize: 20}
+
+	ids := func(f BatchFilter) []uint {
+		t.Helper()
+		f.Page = page
+		rows, _, err := repo.List(f)
+		if err != nil {
+			t.Fatalf("List(%+v): %v", f, err)
+		}
+		out := []uint{}
+		for _, b := range rows {
+			out = append(out, b.ID)
+		}
+		return out
+	}
+	one := func(got []uint, want uint, what string) {
+		t.Helper()
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("%s: got %v, want [%d]", what, got, want)
+		}
+	}
+	one(ids(BatchFilter{BatchCode: "#B-100021"}), first, "BatchCode with #? code is #B-…")
+	one(ids(BatchFilter{BatchCode: "b-100022"}), second, "BatchCode contains, case-insensitive")
+	for _, q := range []string{"#B-100022", "100022", "100022_1/1", "so-100022", "hồng", "HOA HỒNG"} {
+		one(ids(BatchFilter{Q: q}), second, "Q="+q)
+	}
+	if got := ids(BatchFilter{Q: "khong-co"}); len(got) != 0 {
+		t.Errorf("unknown Q: %v, want none", got)
+	}
+}
