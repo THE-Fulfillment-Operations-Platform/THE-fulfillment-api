@@ -1332,7 +1332,13 @@ func internalBaseCode(orderID uint) string {
 // itemInternalCode formats a workshop-style item code — "100035_1/5" — as
 // base_position/total: the item's position within its order out of the order's
 // total item count. This is the QR/tem code the workshop and scan stations read.
+// An order of ONE product carries the bare order code ("103216", not
+// "103216_1/1" — khách chốt 23/10/2026): there is nothing to tell apart, and
+// every scan station resolves the order code to that single item anyway.
 func itemInternalCode(orderID uint, pos, total int) string {
+	if total == 1 {
+		return internalBaseCode(orderID)
+	}
 	return fmt.Sprintf("%s_%d/%d", internalBaseCode(orderID), pos, total)
 }
 

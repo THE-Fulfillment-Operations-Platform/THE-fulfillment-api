@@ -47,3 +47,18 @@ func TestValidateRow_QuantityCap(t *testing.T) {
 		t.Fatalf("quantity above the cap must be refused with QTY_TOO_LARGE, got %+v", e)
 	}
 }
+
+// One product → bare order code; two or more → base_pos/total.
+func TestItemInternalCode_SingleProductHasNoSuffix(t *testing.T) {
+	if got := itemInternalCode(3216, 1, 1); got != "103216" {
+		t.Errorf("single product = %q, want 103216", got)
+	}
+	if got := itemInternalCode(3216, 2, 3); got != "103216_2/3" {
+		t.Errorf("multi product = %q, want 103216_2/3", got)
+	}
+	// Quantity 2 on a single line = two products → suffixes are back.
+	items := orderItemsFromRows(3216, []ImportRow{{SKU: "A", Quantity: 2}}, nil)
+	if items[0].InternalCode != "103216_1/2" || items[1].InternalCode != "103216_2/2" {
+		t.Errorf("qty 2 line: %s, %s", items[0].InternalCode, items[1].InternalCode)
+	}
+}

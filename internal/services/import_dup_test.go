@@ -134,8 +134,9 @@ func TestImport_DuplicateStoreOrderID_StillGeneratesCodes(t *testing.T) {
 
 	single := orderByStoreID(t, orders, "US-SINGLE-2")
 	singleBase := strconv.Itoa(100000 + int(single.ID))
-	if single.Items[0].InternalCode != singleBase+"_1/1" {
-		t.Fatalf("single item code = %q, want %s_1/1", single.Items[0].InternalCode, singleBase)
+	// A one-product order: the item carries the bare order code, no "_1/1".
+	if single.Items[0].InternalCode != singleBase || single.InternalCode != singleBase {
+		t.Fatalf("single item code = %q (order %q), want %s", single.Items[0].InternalCode, single.InternalCode, singleBase)
 	}
 
 	// --- Re-import the SAME StoreOrderID: must NOT block, warns, new order. ---
