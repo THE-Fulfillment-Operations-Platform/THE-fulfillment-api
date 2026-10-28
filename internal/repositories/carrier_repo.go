@@ -126,6 +126,16 @@ func (r *CarrierRepository) AwaitingLastMile(limit int, since time.Time) ([]mode
 	return rows, err
 }
 
+// HeldOnTHE lists shipments THE keeps pending for its staff (CREATED, error
+// starting with the held marker), touched after `since`, newest first.
+func (r *CarrierRepository) HeldOnTHE(limit int, marker string, since time.Time) ([]models.CarrierShipment, error) {
+	var rows []models.CarrierShipment
+	err := r.db.Omit("label").
+		Where("status = ? AND error LIKE ? AND updated_at > ?", models.ShipmentCreated, marker+"%", since).
+		Order("updated_at DESC").Limit(limit).Find(&rows).Error
+	return rows, err
+}
+
 // LockShipment re-reads a shipment row FOR UPDATE inside tx (Postgres; a no-op
 // clause on SQLite) so two workers never advance the same row at once.
 func LockShipment(tx *gorm.DB, id uint) (*models.CarrierShipment, error) {

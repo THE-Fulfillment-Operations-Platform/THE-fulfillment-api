@@ -49,6 +49,9 @@ type fakeTHE struct {
 	addrExists                 string
 	addrZip                    string
 	lastMile                   string
+	// onlyHS: the account's line takes only goods whose HS code starts with it
+	// (THE's api-allowed-hs-codes); other deliveries answer "Route unavailable".
+	onlyHS string
 }
 
 func newFakeTHE() *fakeTHE {
@@ -118,6 +121,9 @@ func (f *fakeTHE) DeliverPackage(_ context.Context, id string) (*theapi.DeliverR
 	}
 	if p.status != "pending" {
 		return nil, &theapi.Error{Status: 400, Messages: []string{"Can't update order when status different pending"}}
+	}
+	if f.onlyHS != "" && !strings.HasPrefix(p.req.HSCode, f.onlyHS) {
+		return nil, &theapi.Error{Status: 400, Message: "Route unavailable", Messages: []string{routeSentence}}
 	}
 	p.status, p.charged, p.code = "pre-transit", true, "THE00001"+id
 	if f.deliverTransportAfterApply {

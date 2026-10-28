@@ -334,6 +334,10 @@ func theErrorMessage(err error) string {
 		if te.Unauthorized() {
 			return "THE từ chối token (401) — token sai hoặc đã bị đổi trên THE"
 		}
+		if te.RouteUnavailable() {
+			// THE's own sentence, word for word: it tells the operator what to do.
+			return te.Detail()
+		}
 		return "THE từ chối: " + te.Detail()
 	}
 	if theapi.IsTransport(err) {

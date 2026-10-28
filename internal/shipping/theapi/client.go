@@ -86,6 +86,14 @@ func (e *Error) Detail() string {
 // Unauthorized reports a rejected token.
 func (e *Error) Unauthorized() bool { return e.Status == http.StatusUnauthorized }
 
+// RouteUnavailable reports THE keeping the package for its staff: the line
+// does not take these goods for this account (THE's error "Route unavailable",
+// with the sentence for the operator in messages). Nothing was charged; the
+// package stays pending on THE until THE's staff handle it.
+func (e *Error) RouteUnavailable() bool {
+	return strings.EqualFold(strings.TrimSpace(e.Message), "Route unavailable")
+}
+
 // ErrTransport wraps failures where THE's answer is UNKNOWN: timeout,
 // connection reset, unreadable body. For a create or a delivery this means
 // "maybe it happened" — the caller must reconcile, never blindly resend.

@@ -131,3 +131,22 @@ func TestGetPackage_LastMile(t *testing.T) {
 		t.Fatalf("last mile %q %q code %q", n, carrier, d.Code)
 	}
 }
+
+// THE keeping a package for its staff, exactly as its deliver handler answers.
+func TestDeliver_RouteUnavailable(t *testing.T) {
+	c := server(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, `{"error":"Route unavailable","messages":["Gặp sự cố đường bay, báo nhân viên THE xử lý"]}`)
+	})
+	_, err := c.DeliverPackage(context.Background(), "1569762")
+	var te *Error
+	if !errors.As(err, &te) || IsTransport(err) || !te.RouteUnavailable() || te.Detail() != "Gặp sự cố đường bay, báo nhân viên THE xử lý" {
+		t.Fatalf("got %#v", err)
+	}
+	// any other refusal is not one
+	other := &Error{Status: 400, Message: "Bad request", Messages: []string{"Failed to create labels"}}
+	if other.RouteUnavailable() {
+		t.Fatal("Bad request is not a route refusal")
+	}
+}

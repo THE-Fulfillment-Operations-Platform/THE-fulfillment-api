@@ -55,6 +55,19 @@ const (
 // unclearDeliveryPrefix marks a CREATED row whose delivery got no clear answer.
 const unclearDeliveryPrefix = "Chưa rõ THE đã chốt đơn chưa: "
 
+// heldOnTHEPrefix marks a CREATED row whose package THE keeps pending for its
+// own staff: THE refused the delivery as "Route unavailable" (the account's
+// line does not take these goods), or took a delivered package back to
+// pending because the carrier refused it afterwards. Nothing is charged while
+// held. Once THE's staff have handled it (created its tracking on THE), the
+// next send or the poll (SyncHeld) takes the code and label from THE.
+const heldOnTHEPrefix = "Chờ nhân viên THE xử lý: "
+
+// IsHeldOnTHE reports a shipment THE keeps for its staff.
+func IsHeldOnTHE(sh *models.CarrierShipment) bool {
+	return sh != nil && sh.Status == models.ShipmentCreated && strings.HasPrefix(sh.Error, heldOnTHEPrefix)
+}
+
 // ShipOptions are per-send choices of the operator.
 type ShipOptions struct {
 	// SkipAddressCheck sends without FFM's USPS address check — for addresses
@@ -102,6 +115,7 @@ const (
 	ShipErrTHE     = "THE"     // THE refused (wallet, service, …)
 	ShipErrWait    = "WAIT"    // an earlier attempt is unresolved — retry later
 	ShipErrUnclear = "UNCLEAR" // no clear answer from THE — retry later, safe
+	ShipErrHeld    = "HELD"    // THE keeps the package for its staff — call them
 )
 
 func shipErr(code, msg string) error { return &ShipError{Code: code, Message: msg} }
@@ -756,6 +770,24 @@ func (s *CarrierService) deliverOnTHE(ctx context.Context, cli theAPI, sh *model
 		}
 		// Still pending: the earlier attempt did not charge. Deliver now.
 	}
+	if IsHeldOnTHE(sh) {
+		// THE's staff may have handled it since — created its tracking on THE
+		// themselves: take that. Otherwise FFM does not ask THE again: a package
+		// the carrier refused would be bought and refused once more. The order's
+		// data changing in FFM (a new fingerprint) is what starts a new package.
+		rctx, cancel := context.WithTimeout(ctx, theReadTimeout)
+		d, err := cli.GetPackage(rctx, sh.ExternalID)
+		cancel()
+		switch {
+		case err != nil && !isNotFound(err):
+			return shipErr(ShipErrUnclear, "Chưa kiểm tra được với THE: "+theErrorMessage(err)+" — thử lại sau")
+		case err == nil && strings.TrimSpace(d.Code.String()) != "":
+			lctx, cancel := context.WithTimeout(ctx, theReadTimeout)
+			defer cancel()
+			return s.markLabeled(lctx, cli, sh, d.Code.String(), d.BillCode.String(), "", nil, "")
+		}
+		return shipErr(ShipErrHeld, strings.TrimPrefix(sh.Error, heldOnTHEPrefix))
+	}
 
 	cctx, cancel := context.WithTimeout(ctx, theDeliverTimeout)
 	defer cancel()
@@ -768,6 +800,14 @@ func (s *CarrierService) deliverOnTHE(ctx context.Context, cli theAPI, sh *model
 			_ = s.repo.Carrier.UpdateShipment(sh.ID, map[string]any{"error": unclearDeliveryPrefix + err.Error()})
 			sh.Error = unclearDeliveryPrefix
 			return shipErr(ShipErrUnclear, "Không nhận được trả lời rõ ràng từ THE khi chốt đơn — gửi lại sau 10 phút, hệ thống sẽ kiểm tra với THE trước (không trừ tiền 2 lần)")
+		}
+		if errors.As(err, &te) && te.RouteUnavailable() {
+			// THE keeps the package for its staff, uncharged: show THE's sentence
+			// as it is, and keep asking THE until they have handled it.
+			msg := te.Detail()
+			_ = s.repo.Carrier.UpdateShipment(sh.ID, map[string]any{"error": heldOnTHEPrefix + msg})
+			sh.Error = heldOnTHEPrefix + msg
+			return shipErr(ShipErrHeld, msg)
 		}
 		msg := theErrorMessage(err)
 		// Still pending on THE (unpaid): the next send reuses it (or replaces it
@@ -842,6 +882,10 @@ func (s *CarrierService) pullLastMile(ctx context.Context, cli theAPI, sh *model
 	if err != nil {
 		return
 	}
+	if returnedToPending(d) {
+		s.holdReturned(sh)
+		return
+	}
 	number, carrier := d.LastMile()
 	if number == "" {
 		return
@@ -855,6 +899,33 @@ func (s *CarrierService) pullLastMile(ctx context.Context, cli theAPI, sh *model
 	}
 	sh.LastMileTracking = number
 	s.setOrderTracking(o, number)
+}
+
+// returnedToPending: THE shows a delivered package as pending again, without
+// its THE code — the carrier refused it after the label was bought (JD checks
+// the address minutes later) and THE refunded it and took it back.
+func returnedToPending(d *theapi.PackageDetail) bool {
+	return d != nil && strings.EqualFold(strings.TrimSpace(d.Status.String()), "pending") && strings.TrimSpace(d.Code.String()) == ""
+}
+
+// holdReturned turns a labeled shipment THE took back into a held one: its THE
+// code and label are void (never print them), the package waits on THE for
+// THE's staff, and SyncHeld takes the new code once they have handled it.
+func (s *CarrierService) holdReturned(sh *models.CarrierShipment) {
+	old := sh.TrackingCode
+	msg := heldOnTHEPrefix + "THE đã đưa đơn về chờ xử lý, chưa có tracking/label"
+	if old != "" {
+		msg += " (mã " + old + " không còn dùng được)"
+	}
+	if err := s.repo.Carrier.UpdateShipment(sh.ID, map[string]any{
+		"status": models.ShipmentCreated, "error": msg, "tracking_code": "", "bill_code": "",
+		"label": nil, "label_type": "", "labeled_at": nil,
+	}); err != nil {
+		return
+	}
+	sh.Status, sh.Error, sh.TrackingCode, sh.BillCode, sh.Label, sh.LabelType, sh.LabeledAt = models.ShipmentCreated, msg, "", "", nil, "", nil
+	s.audit.Log(Actor{}, "THE_SHIPMENT_RETURNED", "order", &sh.OrderID,
+		"THE đưa đơn "+sh.OrderNumber+" về chờ xử lý, chờ nhân viên THE", models.JSONMap{"shipment_id": sh.ID, "the_id": sh.ExternalID, "old_code": old})
 }
 
 // setOrderTracking puts the carrier's number on the order unless CS already
@@ -898,6 +969,7 @@ func (s *CarrierService) StartLastMilePoll(ctx context.Context, interval time.Du
 				return
 			case <-t.C:
 				_, _ = s.SyncLastMile(ctx, 50)
+				_, _ = s.SyncHeld(ctx, 50)
 			}
 		}
 	}()
@@ -928,6 +1000,50 @@ func (s *CarrierService) SyncLastMile(ctx context.Context, limit int) (int, erro
 		if sh.LastMileTracking != "" {
 			got++
 		}
+	}
+	return got, nil
+}
+
+// SyncHeld is the poll for packages THE keeps for its staff: once they have
+// handled one (created its tracking on THE), FFM takes the THE code and the
+// label, and the shipment goes on like any delivered one. Returns how many.
+func (s *CarrierService) SyncHeld(ctx context.Context, limit int) (int, error) {
+	_, cli, err := s.activeTHE()
+	if err != nil || cli == nil {
+		return 0, err
+	}
+	rows, err := s.repo.Carrier.HeldOnTHE(limit, heldOnTHEPrefix, time.Now().Add(-14*24*time.Hour))
+	if err != nil {
+		return 0, err
+	}
+	got := 0
+	for i := range rows {
+		sh := &rows[i]
+		if ctx.Err() != nil {
+			break
+		}
+		if sh.ExternalID == "" {
+			continue
+		}
+		cctx, cancel := context.WithTimeout(ctx, theReadTimeout)
+		d, err := cli.GetPackage(cctx, sh.ExternalID)
+		cancel()
+		if err != nil || strings.TrimSpace(d.Code.String()) == "" {
+			continue
+		}
+		lctx, cancel := context.WithTimeout(ctx, theReadTimeout)
+		err = s.markLabeled(lctx, cli, sh, d.Code.String(), d.BillCode.String(), "", nil, "")
+		cancel()
+		if err != nil {
+			continue
+		}
+		s.audit.Log(Actor{}, "THE_SHIPMENT_LABELED", "order", &sh.OrderID,
+			fmt.Sprintf("Nhân viên THE đã xử lý đơn %s: %s", sh.OrderNumber, sh.TrackingCode),
+			models.JSONMap{"shipment_id": sh.ID, "the_id": sh.ExternalID})
+		if o, err := s.repo.Order.FindByID(sh.OrderID); err == nil {
+			s.pullLastMile(ctx, cli, sh, o)
+		}
+		got++
 	}
 	return got, nil
 }
