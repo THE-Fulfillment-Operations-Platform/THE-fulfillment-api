@@ -257,7 +257,7 @@ func TestScrapBatch_BlockedOnceOrderStartedPacking(t *testing.T) {
 
 // TestScrapBatch_DesignRouteSendsItemsBackToDesign: cả tấm sai vì file sai thì
 // in lại y hệt sẽ hỏng y hệt.
-func TestScrapBatch_DesignRouteSendsItemsBackToDesign(t *testing.T) {
+func TestScrapBatch_DesignRouteNowGoesBackToBatching(t *testing.T) {
 	db := newScrapDB(t)
 	svc := newBatchService(db)
 	_, ids := seedSplit(t, db, 0, 2)
@@ -270,20 +270,22 @@ func TestScrapBatch_DesignRouteSendsItemsBackToDesign(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scrap: %v", err)
 	}
-	if res.Route != ReworkToDesign {
-		t.Fatalf("route = %s, want DESIGN", res.Route)
+	// Không còn hàng chờ thiết kế (23/10/2026): route DESIGN cũ cũng về chờ gom batch,
+	// sản phẩm không bị đổi trạng thái design.
+	if res.Route != ReworkToProduction {
+		t.Fatalf("route = %s, want PRODUCTION", res.Route)
 	}
 	var items []models.OrderItem
 	db.Find(&items, ids)
 	for _, it := range items {
-		if it.DesignStatus != models.DesignMissing {
-			t.Fatalf("sản phẩm %d phải về hàng chờ thiết kế, got %s", it.ID, it.DesignStatus)
+		if it.DesignStatus == models.DesignMissing {
+			t.Fatalf("sản phẩm %d không được về 'thiếu design', got %s", it.ID, it.DesignStatus)
 		}
 	}
 	var note models.Note
 	db.First(&note)
-	if note.OwnerRole != models.RoleDesigner {
-		t.Fatalf("ghi chú phải giao cho designer, got %s", note.OwnerRole)
+	if note.OwnerRole != models.RoleProduction {
+		t.Fatalf("ghi chú giao cho sản xuất, got %s", note.OwnerRole)
 	}
 }
 

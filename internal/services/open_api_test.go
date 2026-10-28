@@ -230,7 +230,8 @@ func TestOpenCreate_CreatesAReviewableOrder(t *testing.T) {
 	if order.Items[0].InternalCode != order.InternalCode+"_1/3" || order.Items[0].SKUID == nil {
 		t.Errorf("item code/sku = %q / %v", order.Items[0].InternalCode, order.Items[0].SKUID)
 	}
-	if order.Items[0].DesignStatus != models.DesignPending || order.Items[1].DesignStatus != models.DesignPending || order.Items[2].DesignStatus != models.DesignMissing {
+	// Không còn bước thiết kế: mọi sản phẩm sinh ra READY (thiếu mockup vẫn có ghi chú ART_MISSING).
+	if order.Items[0].DesignStatus != models.DesignReady || order.Items[1].DesignStatus != models.DesignReady || order.Items[2].DesignStatus != models.DesignReady {
 		t.Errorf("design statuses = %s, %s, %s", order.Items[0].DesignStatus, order.Items[1].DesignStatus, order.Items[2].DesignStatus)
 	}
 	var assets, notes int64

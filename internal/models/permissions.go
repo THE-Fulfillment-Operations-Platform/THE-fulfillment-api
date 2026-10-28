@@ -88,7 +88,7 @@ var Features = []Feature{
 	{Key: FeatReview, Label: "Chờ duyệt", Levels: both, ManageHint: "duyệt, từ chối, yêu cầu sửa đơn"},
 	{Key: FeatOrders, Label: "Đơn hàng / Sản phẩm", Levels: both, ManageHint: "sửa, huỷ đơn"},
 	{Key: FeatCancellations, Label: "Yêu cầu huỷ", Levels: both, ManageHint: "duyệt / từ chối yêu cầu huỷ"},
-	{Key: FeatDesign, Label: "Chờ thiết kế", Levels: both, ManageHint: "cập nhật design, set sẵn sàng"},
+	{Key: FeatDesign, Label: "Thiết kế", Levels: both, ManageHint: "công cụ Thiết kế, sửa link design của sản phẩm"},
 	{Key: FeatBatches, Label: "Batch sản xuất", Levels: both, ManageHint: "gom, xoá batch, gắn link in/cắt"},
 	{Key: FeatBatchScrap, Label: "Huỷ batch in/cắt hỏng", Levels: manageOnly, ManageHint: "ghi nhận tấm hỏng, trả sản phẩm về làm lại"},
 	{Key: FeatProduction, Label: "Bảng sản xuất", Levels: both, ManageHint: "chuyển chặng in / cắt"},

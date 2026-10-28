@@ -213,7 +213,7 @@ func writeZipErrorNote(zw *zip.Writer, folder string, failed []assetFailure) err
 		lines[i] = f.noteLine()
 	}
 	body := fmt.Sprintf("KHÔNG TẢI ĐƯỢC %d FILE DESIGN\n\n%s\n\n"+
-		"Cách xử lý: mở đúng sản phẩm trong màn \"Chờ thiết kế\" và sửa lại link design.\n"+
+		"Cách xử lý: mở đúng sản phẩm ở màn Đơn hàng (chi tiết đơn) và sửa lại link design.\n"+
 		"Link phải trỏ tới ĐÚNG MỘT FILE (không phải thư mục) và được chia sẻ ở chế độ\n"+
 		"\"Bất kỳ ai có đường liên kết\" thì máy chủ mới tải được.\n",
 		len(failed), strings.Join(lines, "\n"))

@@ -1213,10 +1213,9 @@ func orderItemsFromRows(orderID uint, rows []ImportRow, skus map[string]reposito
 			id := info.ID
 			skuID = &id
 		}
-		designStatus := models.DesignPending
-		if strings.TrimSpace(row.Mockup) == "" {
-			designStatus = models.DesignMissing
-		}
+		// Không còn bước thiết kế / set ready (23/10/2026): sản phẩm sinh ra là
+		// READY — thiếu mockup vẫn được nhắc bằng ghi chú ART_MISSING bên dưới.
+		designStatus := models.DesignReady
 		items = append(items, models.OrderItem{
 			OrderID:        orderID,
 			LineNo:         lineNo + 1,

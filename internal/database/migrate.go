@@ -82,6 +82,39 @@ func AutoMigrate(db *gorm.DB) error {
 	if err := carryExportTicks(db); err != nil {
 		return err
 	}
+	if err := retireDesignStatus(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+// retireDesignStatus: on 2026-10-23 the "Chờ thiết kế" screen and its set-ready
+// step were retired — an approved item goes straight to batching. Items created
+// before that still carried PENDING / IN_PROGRESS / MISSING, which every screen
+// kept showing as "Chờ design" with no way left to clear it. Mark them all READY,
+// once (recorded in data_migrations); new items are created READY.
+func retireDesignStatus(db *gorm.DB) error {
+	const name = "2026-10-28-retire-design-status"
+	var done int64
+	if err := db.Model(&models.DataMigration{}).Where("name = ?", name).Count(&done).Error; err != nil {
+		return fmt.Errorf("database: retire design status: %w", err)
+	}
+	if done > 0 {
+		return nil
+	}
+	err := db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Unscoped().Model(&models.OrderItem{}).
+			Where("design_status <> ?", models.DesignReady).
+			Update("design_status", models.DesignReady)
+		if res.Error != nil {
+			return res.Error
+		}
+		log.Printf("database: retired design status — %d item(s) set READY", res.RowsAffected)
+		return tx.Create(&models.DataMigration{Name: name, AppliedAt: time.Now()}).Error
+	})
+	if err != nil {
+		return fmt.Errorf("database: retire design status: %w", err)
+	}
 	return nil
 }
 

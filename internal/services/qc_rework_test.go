@@ -131,28 +131,29 @@ func TestQCFail_ScrapsPartAndReturnsItemForRework(t *testing.T) {
 
 // TestQCFail_DesignDefectGoesBackToDesign: lỗi từ file thì in lại y hệt sẽ hỏng
 // y hệt — item phải quay về hàng chờ thiết kế trước khi được gom batch lại.
-func TestQCFail_DesignDefectGoesBackToDesign(t *testing.T) {
+// No design queue any more (retired 23/10/2026): even a file defect — and even an
+// old client still sending route DESIGN — goes back to the create-batch pool, and
+// the item never drops out of READY into a "Chờ design" nobody can clear.
+func TestQCFail_DesignDefectGoesBackToBatching(t *testing.T) {
 	db := newQCDB(t)
 	repo := repositories.New(db)
 	qc := &QCService{repo: repo, audit: &AuditService{repo: repo}}
 
 	item, _ := seedQCItem(t, db, 1)
+	db.Model(&models.OrderItem{}).Where("id = ?", item.ID).Update("design_status", models.DesignReady)
 	res, err := qc.Fail(Actor{ID: 1}, QCDecisionInput{
-		ScanRef: ScanRef{Code: item.InternalCode}, DefectCode: "ENGRAVE_WRONG",
+		ScanRef: ScanRef{Code: item.InternalCode}, DefectCode: "ENGRAVE_WRONG", ReworkRoute: ReworkToDesign,
 	})
 	if err != nil {
 		t.Fatalf("QC fail: %v", err)
 	}
-	if res.Route != ReworkToDesign {
-		t.Fatalf("khắc sai nội dung là lỗi file → route = %s, want DESIGN", res.Route)
-	}
-	if res.Note.OwnerRole != models.RoleDesigner {
-		t.Fatalf("note phải giao cho designer, got %s", res.Note.OwnerRole)
+	if res.Route != ReworkToProduction {
+		t.Fatalf("route = %s, want PRODUCTION (không còn hàng chờ thiết kế)", res.Route)
 	}
 	var reloaded models.OrderItem
 	db.First(&reloaded, item.ID)
-	if reloaded.DesignStatus == models.DesignReady {
-		t.Fatalf("item phải rời trạng thái design ready để designer sửa file")
+	if reloaded.DesignStatus != models.DesignReady {
+		t.Fatalf("item không được rơi về %s — không còn màn nào để gỡ", reloaded.DesignStatus)
 	}
 }
 

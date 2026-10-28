@@ -306,13 +306,9 @@ func (s *OrderService) UpdateItemDesign(actor Actor, itemID uint, in UpdateDesig
 		item.ProductionFileName = strings.TrimSpace(*in.ProductionFileName)
 	}
 
-	// Re-evaluate design status only when a design asset actually changed.
-	if designTouched && item.DesignStatus != models.DesignReady {
-		item.DesignStatus = models.DesignInProgress
-		if item.MockupURL == "" {
-			item.DesignStatus = models.DesignMissing
-		}
-	}
+	// No design step any more (23/10/2026): editing links never pulls an item
+	// back to "Chờ design" — that status would hang there with no screen to clear it.
+	_ = designTouched
 
 	if in.SetReady != nil && *in.SetReady {
 		// No print-file check: print/cut files are produced per production batch —
@@ -514,10 +510,7 @@ func (s *OrderService) CreateOrderDirect(actor Actor, in DirectOrderInput) (*mod
 			if sku != nil {
 				skuID = &sku.ID
 			}
-			ds := models.DesignPending
-			if it.MockupURL == "" {
-				ds = models.DesignMissing
-			}
+			ds := models.DesignReady // không còn bước thiết kế / set ready
 			item := &models.OrderItem{
 				OrderID: order.ID, LineNo: i + 1, InternalCode: itemInternalCode(order.ID, i+1, len(in.Items)),
 				SKUID: skuID, SKUCode: skuCode,

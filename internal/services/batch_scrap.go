@@ -193,9 +193,6 @@ func (s *BatchService) Scrap(actor Actor, batchID uint, in ScrapBatchInput) (*Sc
 		result.UnQCedParts = len(unQCedBatches)
 
 		fields := map[string]any{"rework_count": gorm.Expr("rework_count + 1")}
-		if route == ReworkToDesign {
-			fields["design_status"] = models.DesignMissing
-		}
 		if err := tx.Model(&models.OrderItem{}).Where("id IN ?", itemIDs).Updates(fields).Error; err != nil {
 			return err
 		}
@@ -249,7 +246,7 @@ func (s *BatchService) Scrap(actor Actor, batchID uint, in ScrapBatchInput) (*Sc
 // ghi chú theo từng sản phẩm vì nó fail từng sản phẩm một; huỷ batch mà cũng làm
 // vậy thì một tấm 40 sản phẩm đẻ ra 40 ghi chú "cần xử lý" giống hệt nhau và màn
 // Ghi chú thôi còn nghĩa "cần xử lý". Sản phẩm phải làm lại vẫn tự hiện ở hàng
-// chờ gom batch / hàng chờ thiết kế — đó mới là danh sách việc của xưởng.
+// chờ gom batch — đó mới là danh sách việc của xưởng.
 func (s *BatchService) scrapNote(
 	txRepo *repositories.Repositories, actor Actor, batch *models.Batch,
 	codes []string, parts []models.BatchItem, reason, route string,
@@ -258,11 +255,7 @@ func (s *BatchService) scrapNote(
 	b.WriteString("Lý do: " + reason)
 	b.WriteString("\n— Batch huỷ: " + strings.Join(codes, ", "))
 	b.WriteString("\n— Số phần sản xuất bị huỷ: " + itoa(len(parts)))
-	if route == ReworkToDesign {
-		b.WriteString("\n— Hướng xử lý: lỗi từ file design → sản phẩm đã về hàng chờ thiết kế, sửa file rồi set ready lại.")
-	} else {
-		b.WriteString("\n— Hướng xử lý: làm lại sản xuất → sản phẩm đã quay lại hàng chờ gom batch của NVL này.")
-	}
+	b.WriteString("\n— Hướng xử lý: làm lại sản xuất → sản phẩm đã quay lại hàng chờ gom batch của NVL này (file sai thì nộp file mới ở batch làm lại).")
 	// Liệt kê mã tem để xưởng đối chiếu với tem đã in; cắt ở 20 để ghi chú còn
 	// đọc được, phần còn lại tra ở màn batch.
 	const maxListed = 20
@@ -283,9 +276,6 @@ func (s *BatchService) scrapNote(
 	}
 
 	owner := models.RoleProduction
-	if route == ReworkToDesign {
-		owner = models.RoleDesigner
-	}
 	note := &models.Note{
 		Title:               "Huỷ batch: " + strings.Join(codes, ", "),
 		Body:                b.String(),

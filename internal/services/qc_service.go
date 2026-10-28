@@ -249,26 +249,16 @@ const (
 	ReworkToDesign     = "DESIGN"
 )
 
-// designDefects are the defect codes whose cause is the design file, not the
-// making of it. Re-printing the same file would reproduce the same defect, so
-// these send the item back to the design queue instead of straight to a batch.
-var designDefects = map[string]bool{
-	"ENGRAVE_WRONG": true, // khắc sai nội dung — nội dung đến từ file
-	"WRONG_MOCKUP":  true, // thành phẩm không khớp mockup seller duyệt
-}
-
 // reworkRoute picks where a failed item goes back to, honouring an explicit
 // choice from the QC operator and falling back to the defect code.
+//
+// Since 23/10/2026 there is no design queue ("Chờ thiết kế" was retired with the
+// set-ready step), so every failed product goes back to the create-batch pool:
+// a wrong file is replaced with the new batch's own production file. An old
+// client sending "DESIGN" is treated the same way rather than parking the item
+// in a queue nobody can see any more.
 func reworkRoute(explicit, defectCode string) string {
-	switch strings.ToUpper(strings.TrimSpace(explicit)) {
-	case ReworkToDesign:
-		return ReworkToDesign
-	case ReworkToProduction:
-		return ReworkToProduction
-	}
-	if designDefects[strings.ToUpper(strings.TrimSpace(defectCode))] {
-		return ReworkToDesign
-	}
+	_, _ = explicit, defectCode
 	return ReworkToProduction
 }
 
@@ -686,9 +676,6 @@ func (s *QCService) Fail(actor Actor, in QCDecisionInput) (*QCFailResult, error)
 		// rework_count cộng bằng biểu thức SQL, không phải đọc-rồi-ghi: hai lần fail
 		// gần nhau trên hai phần khác nhau đều phải được đếm.
 		fields := map[string]any{"rework_count": gorm.Expr("rework_count + 1")}
-		if route == ReworkToDesign {
-			fields["design_status"] = models.DesignMissing
-		}
 		if err := tx.Model(&models.OrderItem{}).Where("id = ?", item.ID).Updates(fields).Error; err != nil {
 			return err
 		}
@@ -707,11 +694,7 @@ func (s *QCService) Fail(actor Actor, in QCDecisionInput) (*QCFailResult, error)
 		if len(unQCedBatches) > 0 {
 			body += "\n— Các phần NVL khác của sản phẩm đã được hạ khỏi 'đã QC', QC lại cả sản phẩm sau khi làm lại."
 		}
-		if route == ReworkToDesign {
-			body += "\n— Hướng xử lý: lỗi từ file design → item đã được trả về hàng chờ thiết kế, sửa file rồi set ready lại."
-		} else {
-			body += "\n— Hướng xử lý: làm lại sản xuất → item đã quay lại danh sách chờ gom batch của NVL này."
-		}
+		body += "\n— Hướng xử lý: làm lại sản xuất → item đã quay lại danh sách chờ gom batch của NVL này (file sai thì nộp file mới ở batch làm lại)."
 		owner := models.RoleProduction
 		if route == ReworkToDesign {
 			owner = models.RoleDesigner
