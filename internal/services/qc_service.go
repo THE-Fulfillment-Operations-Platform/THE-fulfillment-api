@@ -114,6 +114,16 @@ type QCScanBatch struct {
 	BatchCode    string                `json:"batch_code"`
 	MaterialCode string                `json:"material_code"`
 	Status       models.InternalStatus `json:"status"`
+	// Attempt là lần sản xuất của phần này (1 = lần đầu, 2 = làm lại lần 1…).
+	Attempt int `json:"attempt"`
+	// Scrapped đánh dấu phần đã bị huỷ (QC fail / huỷ batch). Phần đã huỷ VẪN
+	// được trả về — trạm cần thấy lịch sử tấm đã vứt đi — nhưng nó không phải
+	// thứ đang nằm trên bàn QC. Trước khi có cờ này, danh sách trộn lẫn phần
+	// huỷ với phần sống và màn QC chỉ khoá PASS theo status, nên một tấm đã huỷ
+	// còn ghi "đã cắt" làm PASS mở, thợ bấm rồi mới văng lỗi "phần sản xuất đã
+	// bị huỷ". Giờ trạm biết ngay lúc quét.
+	Scrapped    bool   `json:"scrapped"`
+	ScrapReason string `json:"scrap_reason,omitempty"`
 }
 
 // Scan returns item/order/sku/batch info plus the seller mockup to compare against.
@@ -146,7 +156,10 @@ func (s *QCService) Scan(actor Actor, ref ScanRef) (*QCScanResult, error) {
 	res.MaterialName = itemMaterialNames(item)
 	res.MaterialDescription = itemMaterialDescriptions(item)
 	for _, bi := range item.BatchItems {
-		b := QCScanBatch{BatchItemID: bi.ID, Status: bi.Status}
+		b := QCScanBatch{
+			BatchItemID: bi.ID, Status: bi.Status, Attempt: bi.Attempt,
+			Scrapped: bi.Scrapped(), ScrapReason: bi.ScrapReason,
+		}
 		if bi.Batch != nil {
 			b.BatchCode = bi.Batch.Code
 		}
