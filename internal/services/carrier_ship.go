@@ -597,10 +597,16 @@ func (s *CarrierService) createOnTHE(ctx context.Context, cli theAPI, sh *models
 				_ = s.repo.Carrier.UpdateShipment(sh.ID, map[string]any{"error": "Chưa rõ THE đã tạo đơn chưa: " + err.Error()})
 				return shipErr(ShipErrUnclear, "Không nhận được trả lời rõ ràng từ THE khi tạo đơn — gửi lại sau 2 phút (không tạo trùng, chưa mất tiền)")
 			}
-			msg := theErrorMessage(err)
+			msg, code := theErrorMessage(err), ShipErrTHE
+			if strings.Contains(strings.ToLower(msg), "hs code does not exist") {
+				code = ShipErrData
+				// THE looks the code up by its OWN system code (HS code + its 3-digit id,
+				// e.g. bưu thiếp = 4909002000347), never by the plain 10-digit HS code.
+				msg = fmt.Sprintf("Mã HS %q không có trên THE — THE cần MÃ HỆ THỐNG THE (mã HS + 3 số đuôi, vd bưu thiếp 4909002000347, xem Sheet2 file mẫu THE), không phải mã HS 10 số. Sửa ở Cài đặt → Kết nối THE → Mã HS mặc định, hoặc mã HS của SKU", p.Request.HSCode)
+			}
 			_ = s.repo.Carrier.UpdateShipment(sh.ID, map[string]any{"status": models.ShipmentFailed, "error": msg})
 			sh.Status = models.ShipmentFailed
-			return shipErr(ShipErrTHE, msg)
+			return shipErr(code, msg)
 		}
 		// THE answers a create for an order number that still has a PENDING
 		// package with THAT package's stored data. If it is not what we sent

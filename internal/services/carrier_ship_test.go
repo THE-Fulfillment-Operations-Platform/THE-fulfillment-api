@@ -46,6 +46,7 @@ type fakeTHE struct {
 	deliverTransportAfterApply bool  // delivery charges, the answer is lost
 	deliverTransport           bool  // delivery never reaches THE
 	deliverErr                 error // THE refuses the delivery (e.g. wallet)
+	createErr                  error // THE refuses the create (e.g. unknown HS code)
 	addrExists                 string
 	addrZip                    string
 	lastMile                   string
@@ -87,6 +88,11 @@ func (f *fakeTHE) CreatePackage(_ context.Context, in theapi.CreatePackageReques
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.creates++
+	if f.createErr != nil {
+		err := f.createErr
+		f.createErr = nil
+		return nil, err
+	}
 	for _, p := range f.pkgs {
 		if p.orderNumber == in.OrderNumber && p.status == "pending" {
 			return f.echo(p), nil // THE's de-dupe: the OLD package's data
@@ -555,6 +561,22 @@ func TestTHE_PendingArchivedByHandSameDataRecreatesInOneSend(t *testing.T) {
 	}
 	if res := e.send(t, o); len(res.Shipped) != 1 {
 		t.Fatalf("resend must succeed in one go: %+v", res)
+	}
+}
+
+// THE looks HS codes up by its own system code; a plain 10-digit HS code comes
+// back as "Hs Code does not exist". The operator must be told exactly what to fix.
+func TestTHE_UnknownHSCodeExplainsSystemCode(t *testing.T) {
+	e := newTHEEnv(t)
+	o := e.order(t, "100041")
+	e.fake.createErr = &theapi.Error{Status: 400, Messages: []string{"Hs Code does not exist"}}
+	res := e.send(t, o)
+	if len(res.Skipped) != 1 {
+		t.Fatalf("want skipped, got %+v", res)
+	}
+	r := res.Skipped[0]
+	if r.Code != ShipErrData || !strings.Contains(r.Reason, "MÃ HỆ THỐNG THE") || !strings.Contains(r.Reason, "4909002000347") {
+		t.Fatalf("the reason must point at THE's system code: %+v", r)
 	}
 }
 
