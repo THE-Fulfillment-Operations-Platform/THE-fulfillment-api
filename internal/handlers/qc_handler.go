@@ -95,6 +95,23 @@ func (h *Handlers) QCResults(c *gin.Context) {
 	response.List(c, gin.H{"orders": rows, "summary": summary}, metaFor(p, total))
 }
 
+// QCReworkInPlace ghi nhận hàng QC fail đã được in/cắt LẺ bằng tay: tạo phần sản
+// xuất lần kế tiếp (đã cắt) ngay trong batch cũ, mở lại batch nếu đã đóng, rồi
+// trả về kết quả quét mới để trạm vẽ lại và PASS được ngay. Đường thứ hai song
+// song với gom batch mới, không thay nó. POST /api/qc/rework-inplace
+func (h *Handlers) QCReworkInPlace(c *gin.Context) {
+	var in services.ReworkInPlaceInput
+	if !bindJSON(c, &in) {
+		return
+	}
+	res, err := h.svc.QC.ReworkInPlace(actor(c), in)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, res)
+}
+
 // QCUndoPass hạ kết luận "đã QC" của một sản phẩm về "đã cắt" — dành cho ca bấm
 // nhầm, không phải ca hàng hỏng (hàng hỏng đi lối QC fail / huỷ batch).
 // POST /api/qc/undo

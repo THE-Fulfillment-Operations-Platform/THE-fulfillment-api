@@ -144,6 +144,8 @@ var routeCases = []routeCase{
 	{"POST", "/api/qc/pass", oQCOps, nil},
 	{"POST", "/api/qc/fail", oQCOps, nil},
 	{"POST", "/api/qc/undo", oAdminOwner, nil},
+	// Làm lại tại chỗ: cùng bar với hạ QC (OWNER/ADMIN + kỹ thuật viên như ADMIN).
+	{"POST", "/api/qc/rework-inplace", oAdminOwner, nil},
 	{"GET", "/api/qc/results", oInternal, nil},
 
 	// The off-menu packing station now sits with the ship queue, which the

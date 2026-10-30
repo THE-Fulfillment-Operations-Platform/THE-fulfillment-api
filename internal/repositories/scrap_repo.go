@@ -188,6 +188,22 @@ func (r *BatchRepository) CloseBatches(ids []uint, reason string, at time.Time) 
 	return res.RowsAffected, res.Error
 }
 
+// ReopenBatches mở lại các batch đã đóng (closed_at = NULL, xoá lý do đóng).
+// Dùng khi "làm lại tại chỗ" thêm một phần sống vào batch đã đóng vì hết phần
+// sống: batch lại có việc để roll-up trạng thái tính tới, và nếu phần mới lại
+// hỏng thì CloseIfNothingLeft đóng nó lần nữa như cũ. Chỉ đụng dòng đang đóng,
+// trả số dòng đã mở để caller biết có gì thay đổi thật không.
+func (r *BatchRepository) ReopenBatches(ids []uint) (int64, error) {
+	ids = dedupeIDs(ids)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	res := r.db.Model(&models.Batch{}).
+		Where("id IN ? AND closed_at IS NOT NULL", ids).
+		Updates(map[string]any{"closed_at": nil, "close_reason": ""})
+	return res.RowsAffected, res.Error
+}
+
 // FindLiteManyForUpdate là FindLiteMany có khoá dòng: các guard "batch đã đóng
 // chưa / đang ở trạng thái nào" phải đọc trong transaction và giữ được kết quả
 // đó tới lúc ghi, nếu không hai lần huỷ song song đều thấy "chưa đóng".

@@ -397,6 +397,10 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		// cửa đã đóng, và ranh giới giữa "bấm nhầm" với "hàng hỏng nhưng ngại làm
 		// thủ tục huỷ" là thứ phải có người chịu trách nhiệm.
 		qc.POST("/undo", adminOwner, perm(manage(models.FeatQC)), h.QCUndoPass)
+		// Làm lại tại chỗ (hàng QC fail đã in LẺ xong, không gom batch mới): cùng
+		// bar với hạ QC — nó cũng mở lại một cửa đã đóng, và "tấm này đã in lẻ
+		// thật" phải có người chịu trách nhiệm xác nhận. Service kiểm lại lần nữa.
+		qc.POST("/rework-inplace", adminOwner, perm(manage(models.FeatQC)), h.QCReworkInPlace)
 		// Kết quả QC: đọc-only; màn Chờ gửi hàng cũng dựa vào nó để biết đơn nào
 		// đã QC đủ để lấy hàng.
 		qc.GET("/results", perm(view(models.FeatQCResults), view(models.FeatShipQueue)), h.QCResults)

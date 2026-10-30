@@ -906,6 +906,34 @@ paths:
       responses:
         '200': { description: OK }
         '422': { description: Chưa QC pass / đơn đã bắt đầu đóng gói }
+  /api/qc/rework-inplace:
+    post:
+      tags: [QC]
+      summary: Làm lại tại chỗ (OWNER/ADMIN) — hàng QC fail đã in LẺ xong, không gom batch mới
+      description: >-
+        Đường thứ hai song song với gom batch mới. Với mỗi NVL của sản phẩm mà
+        phần mới nhất đã huỷ và chưa có phần sống thay thế: tạo phần sản xuất lần
+        kế tiếp (attempt+1) ở trạng thái "Đã cắt" NGAY TRONG batch của phần đã
+        huỷ; batch đó nếu đã đóng thì mở lại (closed_at = NULL). Không tăng
+        rework_count (QC fail đã đếm), không mở ghi chú mới, sản phẩm rời hàng chờ
+        gom batch. Ghi nhật ký QC_REWORK_INPLACE kèm lý do huỷ cũ. Trả về đúng
+        kết quả /api/qc/scan mới để trạm vẽ lại và PASS ngay.
+        Từ chối: 403 sai vai trò / thiếu qc.manage; 422 không có phần đã huỷ, đã
+        có phần sống thay thế, đơn chưa duyệt, đơn đã bắt đầu đóng gói; 409 sản
+        phẩm hoặc đơn đã huỷ.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code: { type: string }
+                item_id: { type: integer }
+      responses:
+        '200': { description: Kết quả quét mới (như /api/qc/scan) }
+        '403': { description: Không phải OWNER/ADMIN/kỹ thuật viên hoặc thiếu qc.manage }
+        '409': { description: Sản phẩm / đơn đã huỷ }
+        '422': { description: Không có phần đã huỷ, đã có phần sống, đơn chưa duyệt, đơn đã đóng gói }
   /api/packing/scan:
     post:
       tags: [Packing]

@@ -132,6 +132,16 @@ func (s *QCService) Scan(actor Actor, ref ScanRef) (*QCScanResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	res := s.scanResult(item)
+	s.audit.Log(actor, "QC_SCAN", "order_item", &item.ID, "Scanned item "+item.InternalCode+" for QC", nil)
+	s.warmTrayThumbnails(item)
+	return res, nil
+}
+
+// scanResult dựng câu trả lời cho trạm QC từ một item đã preload đủ association
+// (resolveItem / findItemByID). Tách khỏi Scan để "Làm lại tại chỗ" trả về đúng
+// màn quét mới cho web vẽ lại mà không ghi thêm một dòng QC_SCAN vào nhật ký.
+func (s *QCService) scanResult(item *models.OrderItem) *QCScanResult {
 	res := &QCScanResult{
 		ItemID: item.ID, ItemCode: item.InternalCode, SKUCode: item.SKUCode, OrderID: item.OrderID,
 		Quantity:      item.Quantity,
@@ -168,9 +178,7 @@ func (s *QCService) Scan(actor Actor, ref ScanRef) (*QCScanResult, error) {
 		}
 		res.Batches = append(res.Batches, b)
 	}
-	s.audit.Log(actor, "QC_SCAN", "order_item", &item.ID, "Scanned item "+item.InternalCode+" for QC", nil)
-	s.warmTrayThumbnails(item)
-	return res, nil
+	return res
 }
 
 // warmTrayThumbnails pre-builds the mockup thumbnails for the rest of the tray
