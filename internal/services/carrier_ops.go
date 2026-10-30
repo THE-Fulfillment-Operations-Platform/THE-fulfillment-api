@@ -98,7 +98,7 @@ func (s *CarrierService) Label(ctx context.Context, actor Actor, orderID uint) (
 	}
 	return &LabelFile{
 		Data: full.Label, ContentType: full.LabelType,
-		Filename: fmt.Sprintf("label-%s-%s.%s", full.OrderNumber, full.TrackingCode, ext),
+		Filename: fmt.Sprintf("label-%s-%s.%s", fileSafe(full.OrderNumber), fileSafe(full.TrackingCode), ext),
 	}, nil
 }
 
@@ -315,4 +315,20 @@ func (s *CarrierService) PreflightTHE(ctx context.Context, actor Actor, orderIDs
 		}
 	}
 	return out, nil
+}
+
+// fileSafe keeps a file name to letters, digits, dot, dash and underscore: a
+// THE order number is now the shop's order id, which may hold spaces, "#" or
+// "/" ("#BW149485-1-C1", "AM-435-US-NG 4213041887").
+func fileSafe(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
 }

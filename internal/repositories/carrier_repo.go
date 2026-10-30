@@ -126,6 +126,35 @@ func (r *CarrierRepository) AwaitingLastMile(limit int, since time.Time) ([]mode
 	return rows, err
 }
 
+// PendingOrderNumberTaken reports another order having a package pending on
+// THE (CREATING or CREATED) under this order number.
+func (r *CarrierRepository) PendingOrderNumberTaken(number string, exceptOrderID uint) (bool, error) {
+	var n int64
+	err := r.db.Model(&models.CarrierShipment{}).
+		Where("order_number = ? AND order_id <> ? AND status IN ?", number, exceptOrderID,
+			[]string{models.ShipmentCreating, models.ShipmentCreated}).
+		Count(&n).Error
+	return n > 0, err
+}
+
+// PackageHeldByOtherOrder reports a THE package id that a shipment of another
+// order already holds, in any state.
+func (r *CarrierRepository) PackageHeldByOtherOrder(externalID string, orderID uint) (bool, error) {
+	var n int64
+	err := r.db.Model(&models.CarrierShipment{}).
+		Where("external_id = ? AND order_id <> ?", externalID, orderID).Count(&n).Error
+	return n > 0, err
+}
+
+// OrderHadPackage reports a THE package id that a shipment of this order,
+// in any state, was given.
+func (r *CarrierRepository) OrderHadPackage(orderID uint, externalID string) (bool, error) {
+	var n int64
+	err := r.db.Model(&models.CarrierShipment{}).
+		Where("order_id = ? AND external_id = ?", orderID, externalID).Count(&n).Error
+	return n > 0, err
+}
+
 // HeldOnTHE lists shipments THE keeps pending for its staff (CREATED, error
 // starting with the held marker), touched after `since`, newest first.
 func (r *CarrierRepository) HeldOnTHE(limit int, marker string, since time.Time) ([]models.CarrierShipment, error) {

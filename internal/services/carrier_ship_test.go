@@ -336,7 +336,7 @@ func TestTHE_SendCreatesPaysAndHandsOff(t *testing.T) {
 	// The request THE got: internal code as order number, the SKU's data.
 	for _, p := range e.fake.pkgs {
 		r := p.req
-		if r.OrderNumber != "100001" || r.Weight != 150 || r.HSCode != "44209000" || r.StateCode != "CA" ||
+		if r.OrderNumber != "SO-100001" || r.Weight != 150 || r.HSCode != "44209000" || r.StateCode != "CA" ||
 			r.CountryCode != "US" || r.ServiceCode != "EXPRESS" || !r.IgnoreAddressCheck {
 			t.Fatalf("request sent to THE: %+v", r)
 		}
@@ -394,7 +394,7 @@ func TestTHE_DeleteAndCancelOrderCancelOnTHE(t *testing.T) {
 		t.Fatalf("cancel order: %v", err)
 	}
 	for _, p := range e.fake.pkgs {
-		if p.orderNumber == "100034" && p.status != "archived" {
+		if p.orderNumber == "SO-100034" && p.status != "archived" {
 			t.Fatalf("a pending package must be archived when the order is cancelled, is %q", p.status)
 		}
 	}
@@ -585,6 +585,9 @@ func TestTHE_UnknownHSCodeExplainsSystemCode(t *testing.T) {
 func TestTHE_StaleDedupeAnswerIsReplaced(t *testing.T) {
 	e := newTHEEnv(t)
 	o := e.order(t, "100007")
+	// no shop order id: filed under the internal code, which only this order
+	// can have filed, so the leftover can only be its own
+	e.db.Model(&models.Order{}).Where("id = ?", o.ID).Update("store_order_id", "")
 	e.fake.pkgs["999"] = &fakePkg{id: "999", orderNumber: "100007", status: "pending",
 		req: theapi.CreatePackageRequest{OrderNumber: "100007", Weight: 5, Length: 1, Width: 1, Height: 1, Value: 1, Zipcode: "94612", Address1: "1425 Harrison Street", HSCode: "44209000"}}
 	res := e.send(t, o)
@@ -831,7 +834,7 @@ func TestTHE_CustomsDefaultsFromConnection(t *testing.T) {
 		t.Fatalf("with defaults the order must ship: %+v", res)
 	}
 	for _, p := range e.fake.pkgs {
-		if p.orderNumber == "100201" && (p.req.HSCode != "39264000" || p.req.Value != 7) {
+		if p.orderNumber == "SO-100201" && (p.req.HSCode != "39264000" || p.req.Value != 7) {
 			t.Fatalf("defaults not applied: hs=%s value=%v", p.req.HSCode, p.req.Value)
 		}
 	}
@@ -840,7 +843,7 @@ func TestTHE_CustomsDefaultsFromConnection(t *testing.T) {
 	o2 := e.order(t, "100202")
 	e.send(t, o2)
 	for _, p := range e.fake.pkgs {
-		if p.orderNumber == "100202" && (p.req.HSCode != "44209000" || p.req.Value != 6) {
+		if p.orderNumber == "SO-100202" && (p.req.HSCode != "44209000" || p.req.Value != 6) {
 			t.Fatalf("SKU's own customs data must win: hs=%s value=%v", p.req.HSCode, p.req.Value)
 		}
 	}
@@ -853,6 +856,9 @@ func TestTHE_CustomsDefaultsFromConnection(t *testing.T) {
 func TestTHE_HiddenPackageWithoutHSIsNeverPaid(t *testing.T) {
 	e := newTHEEnv(t)
 	o := e.order(t, "100301")
+	// filed under the internal code (no shop order id): the hidden package can
+	// only be this order's own leftover
+	e.db.Model(&models.Order{}).Where("id = ?", o.ID).Update("store_order_id", "")
 	parcel, _ := e.carrier.BuildParcel(func() *models.CarrierConfig { c, _, _ := e.carrier.activeTHE(); return c }(),
 		func() *models.Order { full, _ := e.carrier.repo.Order.FindByID(o.ID); return full }())
 	hidden := parcel.Request

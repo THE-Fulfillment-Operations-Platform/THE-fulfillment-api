@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"the-fulfillment/backend/internal/apperr"
 	"the-fulfillment/backend/internal/models"
@@ -52,6 +53,10 @@ const (
 	theReadTimeout    = 20 * time.Second
 )
 
+// unclearCreatePrefix marks a CREATING row whose create got no clear answer:
+// the package may exist on THE without FFM knowing its id.
+const unclearCreatePrefix = "Chưa rõ THE đã tạo đơn chưa: "
+
 // unclearDeliveryPrefix marks a CREATED row whose delivery got no clear answer.
 const unclearDeliveryPrefix = "Chưa rõ THE đã chốt đơn chưa: "
 
@@ -77,15 +82,18 @@ type ShipOptions struct {
 
 // Parcel is what FFM declares to THE for one order.
 type Parcel struct {
-	Request  theapi.CreatePackageRequest `json:"-"`
-	WeightG  float64                     `json:"weight_g"`
-	LengthCM float64                     `json:"length_cm"`
-	WidthCM  float64                     `json:"width_cm"`
-	HeightCM float64                     `json:"height_cm"`
-	Value    float64                     `json:"value"`
-	HSCode   string                      `json:"hs_code"`
-	Units    int                         `json:"units"`
-	Country  string                      `json:"country"`
+	Request theapi.CreatePackageRequest `json:"-"`
+	// InternalCode is the order's FFM code, unique: the order number of last
+	// resort on THE, see theOrderNumber.
+	InternalCode string  `json:"-"`
+	WeightG      float64 `json:"weight_g"`
+	LengthCM     float64 `json:"length_cm"`
+	WidthCM      float64 `json:"width_cm"`
+	HeightCM     float64 `json:"height_cm"`
+	Value        float64 `json:"value"`
+	HSCode       string  `json:"hs_code"`
+	Units        int     `json:"units"`
+	Country      string  `json:"country"`
 }
 
 // ShipmentOutcome is what one order got on THE.
@@ -225,7 +233,7 @@ func (s *CarrierService) BuildParcel(c *models.CarrierConfig, o *models.Order) (
 	}
 	problems = append(problems, missing...)
 
-	p := &Parcel{Country: country}
+	p := &Parcel{Country: country, InternalCode: o.InternalCode}
 	type line struct {
 		value float64
 		hs    string
@@ -494,6 +502,10 @@ func (s *CarrierService) ShipOrderOnTHE(ctx context.Context, actor Actor, c *mod
 	if len(problems) > 0 {
 		return nil, shipErr(ShipErrData, strings.Join(problems, " · "))
 	}
+	// A package already on THE keeps the order number it was filed under.
+	if live != nil && live.OrderNumber != "" {
+		parcel.Request.OrderNumber = live.OrderNumber
+	}
 	hash := requestHash(parcel.Request)
 
 	// A pending package created from older data (address or weights fixed
@@ -517,9 +529,15 @@ func (s *CarrierService) ShipOrderOnTHE(ctx context.Context, actor Actor, c *mod
 				return nil, err
 			}
 		}
+		number, err := s.theOrderNumber(o)
+		if err != nil {
+			return nil, apperr.Internal("could not pick the THE order number").Wrap(err)
+		}
+		parcel.Request.OrderNumber = number
+		hash = requestHash(parcel.Request)
 		live = &models.CarrierShipment{
 			OrderID: o.ID, Provider: models.CarrierProviderTHE, Status: models.ShipmentCreating,
-			OrderNumber: o.InternalCode, ServiceCode: c.ServiceCode, RequestHash: hash,
+			OrderNumber: number, ServiceCode: c.ServiceCode, RequestHash: hash,
 			WeightG: parcel.WeightG, LengthCM: parcel.LengthCM, WidthCM: parcel.WidthCM, HeightCM: parcel.HeightCM,
 			DeclaredValue: parcel.Value, HSCode: parcel.HSCode, CreatedByID: actor.IDPtr(),
 		}
@@ -586,15 +604,46 @@ func outcomeOf(sh *models.CarrierShipment, reused bool) *ShipmentOutcome {
 	}
 }
 
+// maxTHEOrderNumber is what carrier_shipments.order_number holds.
+const maxTHEOrderNumber = 60
+
+// theOrderNumber is the order number a new THE package of the order is filed
+// under: the shop's order id - what THE shows and CS search by. THE merges a
+// create into any PENDING package with the same order number, and a shop's
+// order id is not unique in FFM (re-imports repeat it), so while another FFM
+// order has a package pending under it, the internal code is appended. No
+// shop id, or one too long to store with room for the suffix: the internal
+// code alone, unique by itself.
+func (s *CarrierService) theOrderNumber(o *models.Order) (string, error) {
+	shop := strings.TrimSpace(o.StoreOrderID)
+	if shop == "" || utf8.RuneCountInString(shop+"-"+o.InternalCode) > maxTHEOrderNumber {
+		return o.InternalCode, nil
+	}
+	taken, err := s.repo.Carrier.PendingOrderNumberTaken(shop, o.ID)
+	if err != nil {
+		return "", err
+	}
+	if taken {
+		return shop + "-" + o.InternalCode, nil
+	}
+	return shop, nil
+}
+
+// uniqueOrderNumber reports an order number only this order can have filed:
+// the internal code, alone or as the suffix theOrderNumber appends.
+func uniqueOrderNumber(number, internalCode string) bool {
+	return number == internalCode || strings.HasSuffix(number, "-"+internalCode)
+}
+
 // createOnTHE runs POST /packages for a CREATING row.
 func (s *CarrierService) createOnTHE(ctx context.Context, cli theAPI, sh *models.CarrierShipment, p *Parcel) error {
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := 0; attempt < 3; attempt++ {
 		cctx, cancel := context.WithTimeout(ctx, theCreateTimeout)
 		pkg, err := cli.CreatePackage(cctx, p.Request)
 		cancel()
 		if err != nil {
 			if theapi.IsTransport(err) {
-				_ = s.repo.Carrier.UpdateShipment(sh.ID, map[string]any{"error": "Chưa rõ THE đã tạo đơn chưa: " + err.Error()})
+				_ = s.repo.Carrier.UpdateShipment(sh.ID, map[string]any{"error": unclearCreatePrefix + err.Error()})
 				return shipErr(ShipErrUnclear, "Không nhận được trả lời rõ ràng từ THE khi tạo đơn — gửi lại sau 2 phút (không tạo trùng, chưa mất tiền)")
 			}
 			msg, code := theErrorMessage(err), ShipErrTHE
@@ -609,10 +658,37 @@ func (s *CarrierService) createOnTHE(ctx context.Context, cli theAPI, sh *models
 			return shipErr(code, msg)
 		}
 		// THE answers a create for an order number that still has a PENDING
-		// package with THAT package's stored data. If it is not what we sent
-		// (left over from an earlier attempt with other data), archive it and
-		// create again.
-		if stale := staleEcho(pkg, p.Request); stale != "" && attempt == 0 {
+		// package with THAT package's stored data. Under a shop's order id that
+		// package may not be this order's at all - another FFM order's, or one
+		// CS filed on THE: never pay for it nor archive it, file again under a
+		// number only this order has.
+		stale := staleEcho(pkg, p.Request)
+		ours, foreign, oerr := s.packageOwnership(sh, p, pkg.ID.String())
+		if oerr != nil {
+			return apperr.Internal("could not check the THE package").Wrap(oerr)
+		}
+		if foreign || (stale != "" && !ours) {
+			if uniqueOrderNumber(p.Request.OrderNumber, p.InternalCode) || attempt == 2 {
+				msg := "THE trả về một đơn THE không phải của đơn này (mã đơn " + p.Request.OrderNumber + ") — liên hệ quản trị"
+				_ = s.repo.Carrier.UpdateShipment(sh.ID, map[string]any{"status": models.ShipmentFailed, "error": msg})
+				sh.Status = models.ShipmentFailed
+				return shipErr(ShipErrTHE, msg)
+			}
+			number := strings.TrimSpace(p.Request.OrderNumber) + "-" + p.InternalCode
+			if utf8.RuneCountInString(number) > maxTHEOrderNumber {
+				number = p.InternalCode
+			}
+			p.Request.OrderNumber = number
+			fields := map[string]any{"order_number": number, "request_hash": requestHash(p.Request)}
+			if err := s.repo.Carrier.UpdateShipment(sh.ID, fields); err != nil {
+				return apperr.Internal("could not note the THE order number").Wrap(err)
+			}
+			sh.OrderNumber, sh.RequestHash = number, fields["request_hash"].(string)
+			continue
+		}
+		// This order's own leftover with other data (an earlier attempt): archive
+		// it and create again.
+		if stale != "" && attempt < 2 {
 			cctx, cancel := context.WithTimeout(ctx, theReadTimeout)
 			cerr := cli.CancelPackages(cctx, []string{pkg.ID.String()})
 			cancel()
@@ -644,6 +720,26 @@ func (s *CarrierService) createOnTHE(ctx context.Context, cli theAPI, sh *models
 		return nil
 	}
 	return shipErr(ShipErrTHE, "Không tạo được đơn THE")
+}
+
+// packageOwnership says whose pending package THE answered a create with.
+// foreign: another FFM order already holds it. ours: it can only be this
+// order's - this row's own package, one an earlier row of the order made, an
+// answer to a number only this order files under, or the package of a create
+// of this row whose answer was lost.
+func (s *CarrierService) packageOwnership(sh *models.CarrierShipment, p *Parcel, packageID string) (ours, foreign bool, err error) {
+	if packageID == "" {
+		return false, false, nil
+	}
+	if foreign, err = s.repo.Carrier.PackageHeldByOtherOrder(packageID, sh.OrderID); err != nil || foreign {
+		return false, foreign, err
+	}
+	if packageID == sh.ExternalID || uniqueOrderNumber(p.Request.OrderNumber, p.InternalCode) ||
+		strings.HasPrefix(sh.Error, unclearCreatePrefix) {
+		return true, false, nil
+	}
+	ours, err = s.repo.Carrier.OrderHadPackage(sh.OrderID, packageID)
+	return ours, false, err
 }
 
 // staleEcho compares what THE says the package holds with what was sent. ""

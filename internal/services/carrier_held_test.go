@@ -91,7 +91,7 @@ func TestTHE_OtherGoodsAreHeldForTHEStaff(t *testing.T) {
 
 	// THE's staff create the tracking on THE: the poll takes code, label and the
 	// last-mile number, with no new package and no payment from FFM
-	e.fake.staffDeliver("100201")
+	e.fake.staffDeliver("SO-100201")
 	if got, err := e.carrier.SyncHeld(context.Background(), 50); err != nil || got != 1 {
 		t.Fatalf("poll after staff: %d %v", got, err)
 	}
@@ -120,7 +120,7 @@ func TestTHE_SendTakesWhatTHEStaffDid(t *testing.T) {
 	e.fake.onlyHS = "4909002000"
 	o := e.order(t, "100202")
 	e.send(t, o)
-	e.fake.staffDeliver("100202")
+	e.fake.staffDeliver("SO-100202")
 	res := e.send(t, o)
 	if len(res.Shipped) != 1 || !strings.HasPrefix(res.Shipped[0].THE.TrackingCode, "THE00009") || res.Shipped[0].THE.Reused {
 		t.Fatalf("send after staff: %+v", res)
@@ -159,7 +159,7 @@ func TestTHE_ReturnedPostcardIsHeldUntilTHEStaffAct(t *testing.T) {
 	}
 	oldCode := e.shipment(t, o.ID).TrackingCode
 
-	e.fake.carrierReturns("100204")
+	e.fake.carrierReturns("SO-100204")
 	if _, err := e.carrier.SyncLastMile(context.Background(), 50); err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestTHE_ReturnedPostcardIsHeldUntilTHEStaffAct(t *testing.T) {
 
 	// THE's staff fix it and create the tracking again
 	e.fake.lastMile = "9400111899223344550000"
-	e.fake.staffDeliver("100204")
+	e.fake.staffDeliver("SO-100204")
 	if got, err := e.carrier.SyncHeld(context.Background(), 50); err != nil || got != 1 {
 		t.Fatalf("poll after staff: %d %v", got, err)
 	}
@@ -202,7 +202,7 @@ func TestTHE_HeldPackageReplacedWhenOrderChanges(t *testing.T) {
 	e.fake.lastMile = ""
 	o := e.order(t, "100205")
 	e.send(t, o)
-	e.fake.carrierReturns("100205")
+	e.fake.carrierReturns("SO-100205")
 	e.carrier.SyncLastMile(context.Background(), 50)
 
 	e.db.Model(&models.Order{}).Where("id = ?", o.ID).Update("shipping_address1", "1427 Harrison Street")
