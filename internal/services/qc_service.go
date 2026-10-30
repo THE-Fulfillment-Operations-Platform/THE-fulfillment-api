@@ -313,7 +313,7 @@ func (s *QCService) targetBatchItems(item *models.OrderItem, batchItemID *uint) 
 	}
 	if len(live) == 0 {
 		if len(item.BatchItems) > 0 {
-			return nil, apperr.Unprocessable("Phần sản xuất của sản phẩm này đã bị huỷ — đang chờ làm lại ở batch mới, chưa QC được.")
+			return nil, apperr.Unprocessable("Phần sản xuất của sản phẩm này đã bị huỷ — đang chờ làm lại ở batch mới, chưa QC được (hoặc bấm 'Làm lại tại chỗ' nếu đã in lẻ xong).")
 		}
 		return nil, apperr.Unprocessable("Item chưa được đưa vào batch sản xuất nên chưa thể QC")
 	}
