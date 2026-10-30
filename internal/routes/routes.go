@@ -254,6 +254,8 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		orders.POST("/the/preflight", shipManage, h.PreflightTHE)
 		orders.GET("/:id/the/shipments", orderRead, h.OrderTHEShipments)
 		orders.GET("/:id/the/label", orderRead, h.OrderTHELabel)
+		// Ask THE now: drops a label THE has cancelled (read-only otherwise).
+		orders.POST("/:id/the/check", orderRead, h.CheckOrderOnTHE)
 		orders.POST("/:id/the/cancel", adminOwner, h.CancelOrderTHEShipment)
 	}
 

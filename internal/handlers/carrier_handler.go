@@ -102,6 +102,20 @@ func (h *Handlers) OrderTHELabel(c *gin.Context) {
 	c.Data(http.StatusOK, ctype, f.Data)
 }
 
+// POST /api/orders/:id/the/check
+func (h *Handlers) CheckOrderOnTHE(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	rows, err := h.svc.Carrier.CheckOrderOnTHE(detached(c), actor(c), id)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, rows)
+}
+
 // POST /api/orders/:id/the/cancel { reason }
 func (h *Handlers) CancelOrderTHEShipment(c *gin.Context) {
 	id, ok := uintParam(c, "id")

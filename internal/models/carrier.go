@@ -105,6 +105,12 @@ type CarrierShipment struct {
 	CreatedByID *uint      `json:"created_by_id"`
 	LabeledAt   *time.Time `json:"labeled_at"`
 	CancelledAt *time.Time `json:"cancelled_at"`
+	// TheStatus is the package status THE last reported ("pre-transit",
+	// "in-transit", "canceled"…) and StatusCheckedAt when FFM last asked. A paid
+	// label can still be cancelled on THE's side (staff, CMS), so FFM keeps asking
+	// and drops a label THE has killed (see CarrierService.checkLabeled).
+	TheStatus       string     `json:"the_status" gorm:"size:30;not null;default:''"`
+	StatusCheckedAt *time.Time `json:"status_checked_at"`
 }
 
 func (CarrierShipment) TableName() string { return "carrier_shipments" }

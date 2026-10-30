@@ -123,7 +123,7 @@ func (s *PackingService) ShipOrdersToCarrierWith(ctx context.Context, actor Acto
 		}
 		// "Xuất kho" (XK): the goods leave the warehouse. Nothing is created on THE.
 		if opts.ExportOnly {
-			sc, err := s.exportScanned(actor, order)
+			sc, err := s.exportScanned(ctx, actor, order)
 			if err != nil {
 				out.Skipped = append(out.Skipped, SkippedShipOrder{OrderID: id, InternalCode: order.InternalCode, Reason: skippedFor(order, err).Reason})
 				continue
@@ -240,7 +240,7 @@ func (s *PackingService) ShipScannedOrderWith(ctx context.Context, actor Actor, 
 		return nil, err
 	}
 	if opts.ExportOnly {
-		return s.exportScanned(actor, order)
+		return s.exportScanned(ctx, actor, order)
 	}
 	cfg, cli, err := s.theFor(opts)
 	if err != nil {
@@ -319,8 +319,12 @@ func exportBlockReason(o *models.Order) string {
 // exportScanned records one XK scan: the order left the warehouse. Same end state
 // as a send (a Handoff row + seller_status HANDED_OFF) so the journey screen and
 // the tracking gate keep working, but without creating anything on THE.
-func (s *PackingService) exportScanned(actor Actor, order *models.Order) (*ScannedShip, error) {
+func (s *PackingService) exportScanned(ctx context.Context, actor Actor, order *models.Order) (*ScannedShip, error) {
 	if reason := exportBlockReason(order); reason != "" {
+		return nil, apperr.Conflict(reason)
+	}
+	// The box must not leave carrying a label THE has killed.
+	if reason := s.the.ExportLabelBlock(ctx, order.ID); reason != "" {
 		return nil, apperr.Conflict(reason)
 	}
 	live := activeOrderItems(order.Items)

@@ -64,8 +64,11 @@ type QCResultOrder struct {
 	// (empty = none yet). Creating the label and taking the goods out of the
 	// warehouse are two separate steps, so the ship queue shows which orders
 	// already have their label and only wait for "Xuất kho".
-	THETracking  string `json:"the_tracking,omitempty"`
-	THELastMile  string `json:"the_last_mile,omitempty"`
+	THETracking string `json:"the_tracking,omitempty"`
+	THELastMile string `json:"the_last_mile,omitempty"`
+	// THECancelled is the code of the label THE killed, when the order's latest
+	// shipment ended that way: it needs a new label before it may leave.
+	THECancelled string `json:"the_cancelled,omitempty"`
 	TotalItems   int    `json:"total_items"`
 	PassedItems  int    `json:"passed_items"`
 	ReworkItems  int    `json:"rework_items"`
@@ -209,11 +212,13 @@ func (s *QCService) buildResultOrders(ids []uint) ([]QCResultOrder, error) {
 		return nil, apperr.Internal("could not load waiting baskets").Wrap(err)
 	}
 	// Display-only enrichment: a failure here must not hide the QC results.
-	shipments, _ := s.repo.Carrier.LiveShipmentsByOrder(ids)
+	shipments, _ := s.repo.Carrier.LatestShipmentsByOrder(ids)
 	for i := range out {
 		o := &out[i]
 		if sh, ok := shipments[o.OrderID]; ok && sh.Status == models.ShipmentLabeled {
 			o.THETracking, o.THELastMile = sh.TrackingCode, sh.LastMileTracking
+		} else if ok && cancelledByTHE(&sh) {
+			o.THECancelled = nonEmpty(sh.TrackingCode, sh.OrderNumber)
 		}
 		if b, ok := baskets[o.OrderID]; ok {
 			n := b.Number

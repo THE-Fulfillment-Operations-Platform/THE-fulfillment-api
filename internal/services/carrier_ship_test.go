@@ -41,6 +41,8 @@ type fakeTHE struct {
 	creates  int
 	delivers int
 	cancels  int
+	gets     int
+	getErr   error // THE not answering reads
 	// one-shot failure injection
 	createTransportAfterApply  bool  // create lands on THE, the answer is lost
 	deliverTransportAfterApply bool  // delivery charges, the answer is lost
@@ -143,6 +145,10 @@ func (f *fakeTHE) DeliverPackage(_ context.Context, id string) (*theapi.DeliverR
 func (f *fakeTHE) GetPackage(_ context.Context, id string) (*theapi.PackageDetail, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.gets++
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
 	p := f.pkgs[id]
 	if p == nil {
 		return nil, &theapi.Error{Status: 404, Message: "Not found"}
@@ -213,7 +219,7 @@ type theEnv struct {
 func newTHEEnv(t *testing.T) *theEnv {
 	t.Helper()
 	db := newHandoffDB(t)
-	if err := db.AutoMigrate(&models.Basket{}, &models.CarrierConfig{}, &models.CarrierShipment{}); err != nil {
+	if err := db.AutoMigrate(&models.Basket{}, &models.CarrierConfig{}, &models.CarrierShipment{}, &models.Note{}); err != nil {
 		t.Fatal(err)
 	}
 	// The production guard (migrate.go): one live shipment per order.

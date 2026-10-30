@@ -491,7 +491,13 @@ func (s *CarrierService) ShipOrderOnTHE(ctx context.Context, actor Actor, c *mod
 	}
 
 	if live != nil && live.Status == models.ShipmentLabeled {
-		return outcomeOf(live, true), nil
+		// Already paid — unless THE has since killed that package (staff cancel,
+		// expired label): then it is voided and a new label is made right here,
+		// instead of handing the dead one back as "already done".
+		if voided, _ := s.checkLabeled(ctx, cli, live, o); !voided {
+			return outcomeOf(live, true), nil
+		}
+		live = nil
 	}
 	if live != nil && live.Status == models.ShipmentCreating && time.Since(live.UpdatedAt) < creatingStaleAfter {
 		return nil, shipErr(ShipErrWait, "Đơn này vừa được gửi tạo trên THE ở lượt khác — đợi 2 phút rồi gửi lại")
@@ -793,8 +799,7 @@ func (s *CarrierService) goneOnTHE(ctx context.Context, cli theAPI, live *models
 	case err != nil && !isNotFound(err):
 		return false
 	case err == nil:
-		st := strings.ToLower(strings.TrimSpace(d.Status.String()))
-		if st != "archived" && st != "canceled" && st != "cancelled" {
+		if !theStatusDead(d.Status.String()) {
 			return false
 		}
 	}
@@ -813,8 +818,9 @@ func (s *CarrierService) abandonPending(ctx context.Context, cli theAPI, sh *mod
 	cctx, cancel := context.WithTimeout(ctx, theReadTimeout)
 	defer cancel()
 	d, err := cli.GetPackage(cctx, sh.ExternalID)
-	if err == nil && strings.TrimSpace(d.Code.String()) != "" {
-		// Delivered after all: adopt instead of abandoning.
+	if err == nil && strings.TrimSpace(d.Code.String()) != "" && !theStatusDead(d.Status.String()) {
+		// Delivered after all: adopt instead of abandoning. (A cancelled package
+		// keeps showing its THE code — that one is dead, not delivered.)
 		return s.markLabeled(cctx, cli, sh, d.Code.String(), d.BillCode.String(), "", nil, "")
 	}
 	if err != nil && !isNotFound(err) {
@@ -860,7 +866,7 @@ func (s *CarrierService) deliverOnTHE(ctx context.Context, cli theAPI, sh *model
 			return shipErr(ShipErrTHE, "Đơn THE cũ không còn trên THE — gửi lại để tạo đơn mới")
 		case err != nil:
 			return shipErr(ShipErrUnclear, "Chưa kiểm tra được với THE: "+theErrorMessage(err)+" — thử lại sau")
-		case strings.TrimSpace(d.Code.String()) != "":
+		case strings.TrimSpace(d.Code.String()) != "" && !theStatusDead(d.Status.String()):
 			lctx, cancel := context.WithTimeout(ctx, theReadTimeout)
 			defer cancel()
 			return s.markLabeled(lctx, cli, sh, d.Code.String(), d.BillCode.String(), "", nil, "")
@@ -883,7 +889,15 @@ func (s *CarrierService) deliverOnTHE(ctx context.Context, cli theAPI, sh *model
 		switch {
 		case err != nil && !isNotFound(err):
 			return shipErr(ShipErrUnclear, "Chưa kiểm tra được với THE: "+theErrorMessage(err)+" — thử lại sau")
-		case err == nil && strings.TrimSpace(d.Code.String()) != "":
+		case err != nil || theStatusDead(d.Status.String()):
+			// THE's staff cancelled it instead of handling it: nothing to wait for.
+			st := "không còn trên THE"
+			if err == nil {
+				st = strings.TrimSpace(d.Status.String())
+			}
+			s.voidCancelledOnTHE(sh, st)
+			return shipErr(ShipErrTHE, sh.Error)
+		case strings.TrimSpace(d.Code.String()) != "":
 			lctx, cancel := context.WithTimeout(ctx, theReadTimeout)
 			defer cancel()
 			return s.markLabeled(lctx, cli, sh, d.Code.String(), d.BillCode.String(), "", nil, "")
@@ -978,29 +992,9 @@ func (s *CarrierService) pullLastMile(ctx context.Context, cli theAPI, sh *model
 	if sh.Status != models.ShipmentLabeled || sh.LastMileTracking != "" || sh.ExternalID == "" {
 		return
 	}
-	cctx, cancel := context.WithTimeout(ctx, theReadTimeout)
-	defer cancel()
-	d, err := cli.GetPackage(cctx, sh.ExternalID)
-	if err != nil {
-		return
-	}
-	if returnedToPending(d) {
-		s.holdReturned(sh)
-		return
-	}
-	number, carrier := d.LastMile()
-	if number == "" {
-		return
-	}
-	fields := map[string]any{"last_mile_tracking": number}
-	if carrier != "" {
-		fields["last_mile_carrier"] = carrier
-	}
-	if err := s.repo.Carrier.UpdateShipment(sh.ID, fields); err != nil {
-		return
-	}
-	sh.LastMileTracking = number
-	s.setOrderTracking(o, number)
+	// Same question as the status re-check — and the same handling when THE
+	// answers that the package is dead or was taken back.
+	s.checkLabeled(ctx, cli, sh, o)
 }
 
 // returnedToPending: THE shows a delivered package as pending again, without
@@ -1072,6 +1066,8 @@ func (s *CarrierService) StartLastMilePoll(ctx context.Context, interval time.Du
 			case <-t.C:
 				_, _ = s.SyncLastMile(ctx, 50)
 				_, _ = s.SyncHeld(ctx, 50)
+				// Paid labels THE may have killed since (staff cancel, expiry).
+				_, _ = s.SyncLabeledStatus(ctx, 30)
 			}
 		}
 	}()
@@ -1130,7 +1126,18 @@ func (s *CarrierService) SyncHeld(ctx context.Context, limit int) (int, error) {
 		cctx, cancel := context.WithTimeout(ctx, theReadTimeout)
 		d, err := cli.GetPackage(cctx, sh.ExternalID)
 		cancel()
-		if err != nil || strings.TrimSpace(d.Code.String()) == "" {
+		switch {
+		case err != nil && isNotFound(err):
+			s.voidCancelledOnTHE(sh, "không còn trên THE")
+			continue
+		case err != nil:
+			continue
+		case theStatusDead(d.Status.String()):
+			// Cancelled instead of handled (it may well show a THE code): the order
+			// must stop waiting, and that code is not a label.
+			s.voidCancelledOnTHE(sh, strings.TrimSpace(d.Status.String()))
+			continue
+		case strings.TrimSpace(d.Code.String()) == "":
 			continue
 		}
 		lctx, cancel := context.WithTimeout(ctx, theReadTimeout)

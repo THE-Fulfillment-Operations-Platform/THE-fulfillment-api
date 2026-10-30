@@ -155,6 +155,40 @@ func (r *CarrierRepository) OrderHadPackage(orderID uint, externalID string) (bo
 	return n > 0, err
 }
 
+// LabeledToRecheck lists paid (LABELED) shipments labeled after `since` that
+// FFM has not asked THE about since `checkedBefore`, never-checked first, then
+// the longest-unchecked — so a big backlog rotates instead of starving.
+func (r *CarrierRepository) LabeledToRecheck(limit int, since, checkedBefore time.Time) ([]models.CarrierShipment, error) {
+	var rows []models.CarrierShipment
+	err := r.db.Omit("label").
+		// the_status 'delivered' is final: nothing left to watch.
+		Where("status = ? AND labeled_at > ? AND the_status <> 'delivered' AND (status_checked_at IS NULL OR status_checked_at < ?)",
+			models.ShipmentLabeled, since, checkedBefore).
+		Order("CASE WHEN status_checked_at IS NULL THEN 0 ELSE 1 END, status_checked_at ASC").
+		Limit(limit).Find(&rows).Error
+	return rows, err
+}
+
+// LatestShipmentsByOrder maps order id → its most recent shipment row (any
+// status, label omitted).
+func (r *CarrierRepository) LatestShipmentsByOrder(orderIDs []uint) (map[uint]models.CarrierShipment, error) {
+	out := map[uint]models.CarrierShipment{}
+	for start := 0; start < len(orderIDs); start += idChunk {
+		end := start + idChunk
+		if end > len(orderIDs) {
+			end = len(orderIDs)
+		}
+		var rows []models.CarrierShipment
+		if err := r.db.Omit("label").Where("order_id IN ?", orderIDs[start:end]).Order("id ASC").Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		for _, s := range rows {
+			out[s.OrderID] = s // ascending ids: the last one wins
+		}
+	}
+	return out, nil
+}
+
 // HeldOnTHE lists shipments THE keeps pending for its staff (CREATED, error
 // starting with the held marker), touched after `since`, newest first.
 func (r *CarrierRepository) HeldOnTHE(limit int, marker string, since time.Time) ([]models.CarrierShipment, error) {

@@ -114,5 +114,8 @@ func (h *Handlers) RunLastMileSync(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
+	// Same pass catches labels THE killed (at most one ask per shipment per
+	// recheckEvery, so an open screen refreshing costs nothing extra).
+	_, _ = h.svc.Carrier.SyncLabeledStatus(ctx, 30)
 	response.OK(c, gin.H{"synced": got})
 }

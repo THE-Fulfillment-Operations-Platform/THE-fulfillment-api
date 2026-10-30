@@ -63,6 +63,10 @@ func (s *CarrierService) Label(ctx context.Context, actor Actor, orderID uint) (
 	if live == nil || live.Status != models.ShipmentLabeled || live.TrackingCode == "" {
 		return nil, apperr.NotFound("Đơn này chưa có đơn THE đã chốt — chưa có label")
 	}
+	// Never print a label THE has killed since (cancelled by THE staff, expired).
+	if err := s.labelUsable(ctx, live); err != nil {
+		return nil, err
+	}
 	full, err := s.repo.Carrier.ShipmentByID(live.ID)
 	if err != nil {
 		return nil, apperr.Internal("could not read shipment").Wrap(err)
@@ -175,7 +179,7 @@ func (s *CarrierService) cancelShipment(ctx context.Context, actor Actor, orderI
 	gone := false
 	if d, gerr := cli.GetPackage(cctx, live.ExternalID); gerr != nil {
 		gone = isNotFound(gerr)
-	} else if st := strings.ToLower(strings.TrimSpace(d.Status.String())); st == "archived" || st == "canceled" || st == "cancelled" {
+	} else if theStatusDead(d.Status.String()) {
 		gone = true
 	}
 	if !gone {
