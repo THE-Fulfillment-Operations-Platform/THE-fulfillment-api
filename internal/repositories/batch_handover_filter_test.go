@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"gorm.io/gorm"
+
 	"the-fulfillment/backend/internal/models"
 )
 
@@ -12,7 +14,11 @@ import (
 // còn sống đều thuộc đơn đã rời xưởng. Lọc phải tách "Đã QC" đúng như nhãn, ở
 // server, để phân trang và tổng số đúng.
 func TestBatchList_HandoverFilter(t *testing.T) {
-	db := newQueueTestDB(t)
+	checkBatchHandoverFilter(t, newQueueTestDB(t))
+}
+
+func checkBatchHandoverFilter(t *testing.T, db *gorm.DB) {
+	t.Helper()
 	n := 0
 	// part tạo một sản phẩm của đơn đang ở seller status st.
 	part := func(st models.SellerStatus) *models.OrderItem {
