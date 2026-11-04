@@ -37,8 +37,13 @@ func (s *OrderService) ListOrders(f repositories.OrderFilter) ([]models.Order, i
 	if err := annotateStoreOrderDupSlice(s.repo, rows); err != nil {
 		return rows, total, err
 	}
+	ptrs := make([]*models.Order, len(rows))
 	for i := range rows {
 		rows[i].Items = activeOrderItems(rows[i].Items)
+		ptrs[i] = &rows[i]
+	}
+	if err := annotateWarrantyCounts(s.repo, ptrs); err != nil {
+		return rows, total, err
 	}
 	return rows, total, nil
 }
@@ -52,6 +57,9 @@ func (s *OrderService) GetOrder(id uint) (*models.Order, error) {
 		return nil, apperr.Internal("lookup failed").Wrap(err)
 	}
 	FillItemProductNames(o.Items)
+	if err := annotateWarrantyCounts(s.repo, []*models.Order{o}); err != nil {
+		return nil, apperr.Internal("warranty count failed").Wrap(err)
+	}
 	return o, nil
 }
 
@@ -113,6 +121,9 @@ func (s *OrderService) ListItems(f repositories.ItemFilter) ([]models.OrderItem,
 		}
 	}
 	if err := annotateStoreOrderDup(s.repo, orders); err != nil {
+		return rows, total, err
+	}
+	if err := annotateWarrantyCounts(s.repo, orders); err != nil {
 		return rows, total, err
 	}
 	return rows, total, nil

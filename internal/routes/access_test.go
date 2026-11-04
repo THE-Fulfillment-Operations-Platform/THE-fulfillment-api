@@ -39,7 +39,9 @@ var (
 		models.RoleProduction, models.RoleQC, models.RolePacking, models.RoleShipping}
 	oOrderRead = append(append([]models.Role{}, oInternal...), models.RoleCS)
 	oOwner     = []models.Role{models.RoleOwner}
-	oSeller    = []models.Role{models.RoleSeller}
+	// Who WarrantyPolicy lets press "Bảo hành" (TECHNICIAN is tested as ADMIN).
+	oWarranty = []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleProduction, models.RoleQC}
+	oSeller   = []models.Role{models.RoleSeller}
 )
 
 type routeCase struct {
@@ -94,6 +96,12 @@ var routeCases = []routeCase{
 	{"POST", "/api/orders/import/commit", oOpsAdmin, nil},
 	{"PUT", "/api/orders/1", oOpsAdmin, nil},
 	{"POST", "/api/orders/1/cancel", oOpsAdmin, nil},
+	// Bảo hành: the route gate is the orders "manage" tick; the narrower "who may
+	// press it" (WarrantyPolicy.AllowedRoles) is checked in the service, and is
+	// tested there — here the 403 for OPS comes from that check.
+	{"GET", "/api/orders/1/warranty-info", oOrderRead, nil},
+	{"GET", "/api/orders/1/warranties", oOrderRead, nil},
+	{"POST", "/api/orders/1/warranty", oWarranty, nil}, // route gate = read orders; the service narrows to WarrantyPolicy.AllowedRoles
 	{"DELETE", "/api/orders/1", oAdminOwner, nil},
 	{"POST", "/api/orders/bulk-delete", oAdminOwner, nil},
 	{"POST", "/api/orders/ship-to-carrier", oShipCarrier, nil},

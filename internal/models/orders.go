@@ -173,7 +173,22 @@ type Order struct {
 	CancelStage    CancelStage `json:"cancel_stage" gorm:"size:20;not null;default:''"`
 	CancelBillable bool        `json:"cancel_billable" gorm:"not null;default:false"`
 
+	// Warranty chain (nút "Bảo hành"). A warranty re-ship is a NEW order, never a
+	// reset of the old one (status only moves forward), so the link lives in these
+	// three columns. All stay empty/zero on an ordinary order.
+	//   ParentOrderID: the order the button was pressed on (the one that broke).
+	//   RootOrderID:   the first order of the chain; a child of a child keeps it.
+	//   WarrantySeq:   1, 2, 3… within the chain — the small number on the badge.
+	// The reason / who pays / partial re-ship live in OrderWarranty (own table).
+	ParentOrderID *uint `json:"parent_order_id" gorm:"index"`
+	RootOrderID   *uint `json:"root_order_id" gorm:"index"`
+	WarrantySeq   int   `json:"warranty_seq" gorm:"not null;default:0"`
+
 	Items []OrderItem `json:"items,omitempty" gorm:"foreignKey:OrderID"`
+
+	// WarrantyCount is computed, never stored: how many warranty orders hang off
+	// this one ("Đã bảo hành ×N"). Detail and list endpoints fill it in.
+	WarrantyCount int `json:"warranty_count" gorm:"-"`
 
 	// StoreOrderDup is a computed, non-persisted flag: true when this StoreOrderID
 	// is shared by more than one order for the same seller (a repeated store order

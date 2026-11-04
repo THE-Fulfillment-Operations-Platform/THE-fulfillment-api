@@ -72,6 +72,7 @@ type Repositories struct {
 	Carrier      *CarrierRepository
 	Role         *RoleRepository
 	Basket       *BasketRepository
+	Warranty     *WarrantyRepository
 }
 
 // New builds the repository bundle from a GORM handle.
@@ -100,5 +101,6 @@ func New(db *gorm.DB) *Repositories {
 		Carrier:      &CarrierRepository{db: db},
 		Role:         &RoleRepository{db: db},
 		Basket:       &BasketRepository{db: db},
+		Warranty:     &WarrantyRepository{db: db},
 	}
 }

@@ -227,6 +227,12 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		// Edit / cancel / delete — authorization is also re-checked in the service.
 		orders.PUT("/:id", ordersManage, h.UpdateOrder)
 		orders.POST("/:id/cancel", ordersManage, h.CancelOrder)
+		// Nút "Bảo hành": a NEW order linked to the old one (see services/warranty_service.go).
+		// Who may press it is WarrantyPolicy.AllowedRoles, checked in the service
+		// (PRODUCTION / QC hold no orders "manage" tick, so the route gate is read-only).
+		orders.GET("/:id/warranty-info", orderRead, h.WarrantyInfo)
+		orders.GET("/:id/warranties", orderRead, h.ListWarranties)
+		orders.POST("/:id/warranty", orderRead, h.CreateWarranty)
 		orders.DELETE("/:id", adminOwner, ordersManage, h.DeleteOrder)
 		orders.POST("/bulk-delete", adminOwner, ordersManage, h.BulkDeleteOrders)
 		// Send QC-finished orders to THE. This is the step that ends the factory

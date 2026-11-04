@@ -490,3 +490,52 @@ func (h *Handlers) SellerOrderHistory(c *gin.Context) {
 	}
 	response.OK(c, events)
 }
+
+// WarrantyInfo says whether the Bảo hành button works for an order.
+// GET /api/orders/:id/warranty-info
+func (h *Handlers) WarrantyInfo(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	info, err := h.svc.Order.WarrantyInfo(actor(c), id)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, info)
+}
+
+// ListWarranties lists the warranty orders under an order.
+// GET /api/orders/:id/warranties
+func (h *Handlers) ListWarranties(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	rows, err := h.svc.Order.ListWarranties(id)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, rows)
+}
+
+// CreateWarranty creates a warranty order from a delivered / returned order.
+// POST /api/orders/:id/warranty
+func (h *Handlers) CreateWarranty(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	var in services.CreateWarrantyInput
+	if !bindJSON(c, &in) {
+		return
+	}
+	o, err := h.svc.Order.CreateWarranty(actor(c), id, in)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.Created(c, o)
+}

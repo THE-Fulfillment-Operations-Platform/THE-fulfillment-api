@@ -178,3 +178,31 @@ func TestTHE_ResendKeepsTheShopOrderID(t *testing.T) {
 		t.Fatalf("packages under the shop id: %+v", got)
 	}
 }
+
+// Đơn bảo hành (#3092) đi THE như đơn thường: mã shop "SON1-BH1" khác mã gốc
+// "SON1", nên mua label không đụng package của đơn gốc và không bị chặn. Seller
+// không bị tính khoản nào — FFM không có phí ship tính seller, chi phí label
+// chỉ ghi ở carrier_shipments.
+func TestTHE_WarrantyOrderBuysItsLabelLikeAnyOrder(t *testing.T) {
+	e := newTHEEnv(t)
+	root := e.order(t, "100401")
+	e.shopID(t, root, "SON1")
+	if res := e.send(t, root); len(res.Shipped) != 1 {
+		t.Fatalf("root send: %+v", res)
+	}
+	bh := e.order(t, "100402")
+	e.shopID(t, bh, "SON1-BH1")
+	res := e.send(t, bh)
+	if len(res.Shipped) != 1 || len(res.Skipped) != 0 {
+		t.Fatalf("-BH1 must ship normally: %+v", res)
+	}
+	if got := e.fake.byNumber("SON1-BH1"); len(got) != 1 || !got[0].charged {
+		t.Fatalf("THE must hold one paid package under SON1-BH1, got %+v", got)
+	}
+	if got := e.fake.byNumber("SON1"); len(got) != 1 {
+		t.Fatalf("root package must stay alone under SON1, got %+v", got)
+	}
+	if sh := e.shipment(t, bh.ID); sh.OrderNumber != "SON1-BH1" {
+		t.Fatalf("shipment order number %q", sh.OrderNumber)
+	}
+}

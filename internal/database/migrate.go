@@ -32,6 +32,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&models.MasterImportJob{},
 		// orders
 		&models.Order{},
+		&models.OrderWarranty{},
 		&models.OrderItem{},
 		&models.ItemAsset{},
 		&models.DailyCounter{},
@@ -389,6 +390,9 @@ func ensurePerformanceIndexes(db *gorm.DB) error {
 		// Carrier shipments cost real money: at most ONE live shipment per order.
 		// The service claims the row before calling THE; when two clicks / two
 		// scans race, the second insert fails here instead of paying twice.
+		// Warranty chains: one warranty_seq per chain among live orders, so two
+		// presses of "Bảo hành" racing past the service checks cannot both become -BH2.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uniq_orders_warranty_seq ON orders (root_order_id, warranty_seq) WHERE warranty_seq > 0 AND deleted_at IS NULL`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uniq_carrier_shipments_live_order ON carrier_shipments (order_id) WHERE status NOT IN ('CANCELLED', 'FAILED') AND deleted_at IS NULL`,
 	}
 	for _, stmt := range stmts {
