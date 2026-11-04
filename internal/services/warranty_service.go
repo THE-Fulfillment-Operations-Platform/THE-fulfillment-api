@@ -52,6 +52,9 @@ type CreateWarrantyInput struct {
 // WarrantyInfo tells the screen whether the button works for an order, and what
 // the next warranty order would be called.
 type WarrantyInfo struct {
+	// RoleAllowed: the caller's role may press the button at all. False = the
+	// screen shows nothing; true with CanWarranty false = a greyed button + Reason.
+	RoleAllowed bool   `json:"role_allowed"`
 	CanWarranty bool   `json:"can_warranty"`
 	Reason      string `json:"reason,omitempty"` // why not, when CanWarranty is false
 	// Blocking is the unfinished warranty order that blocks a second one.
@@ -115,6 +118,7 @@ func (s *OrderService) WarrantyInfo(actor Actor, id uint) (*WarrantyInfo, error)
 	info := &WarrantyInfo{
 		NextSeq: maxSeq + 1, NextStoreOrder: pol.Code(rootStore, maxSeq+1),
 		BillSeller: pol.BillSeller, RootOrderID: root, CanOverride: pol.CanOverride(actor.Role),
+		RoleAllowed: pol.CanCreate(actor.Role),
 	}
 	for _, t := range pol.ReturnedTrackingStatuses {
 		info.ReturnedStatuse = append(info.ReturnedStatuse, string(t))
@@ -243,7 +247,10 @@ func (s *OrderService) CreateWarranty(actor Actor, id uint, in CreateWarrantyInp
 			OrderDate:      orderDate, DailySeq: daily, CreatedByID: actor.IDPtr(),
 			ParentOrderID: &parentID, RootOrderID: &root, WarrantySeq: seq,
 		}
-		addressChanged := applyWarrantyAddress(order, in.Address)
+		addressChanged, err := applyWarrantyAddress(order, in.Address)
+		if err != nil {
+			return err
+		}
 		order.Note = warrantyOrderNote(seq, in, parent.Note)
 
 		if err := txRepo.Order.Create(order); err != nil {
@@ -262,6 +269,8 @@ func (s *OrderService) CreateWarranty(actor Actor, id uint, in CreateWarrantyInp
 				SKUID: src.SKUID, SKUCode: src.SKUCode, Quantity: p.qty,
 				DesignURL: src.DesignURL, BackDesignURL: src.BackDesignURL, MockupURL: src.MockupURL,
 				EngraveText: src.EngraveText, ImageCode: src.ImageCode, QCDescription: src.QCDescription,
+				// Production files: the batch and print/cut stations read them from the item.
+				PrintFileURL: src.PrintFileURL, CutFileURL: src.CutFileURL, ProductionFileName: src.ProductionFileName,
 				InternalStatus: models.StatusPending, DesignStatus: models.DesignReady,
 			})
 		}
@@ -363,29 +372,30 @@ func pickWarrantyItems(parent *models.Order, in []WarrantyItemInput) ([]pickedIt
 	return out, models.WarrantyScopePartial, nil
 }
 
-// applyWarrantyAddress overwrites the address fields the form filled in and
-// reports whether any value actually changed.
-func applyWarrantyAddress(o *models.Order, a *WarrantyAddressInput) bool {
+// applyWarrantyAddress: nil = keep the old address. Otherwise the form is the
+// whole new address, applied as sent (so Địa chỉ 2, phone… can be cleared). The
+// fields an ordinary order also requires — name, address 1, country — must stay
+// filled. Reports whether any value changed.
+func applyWarrantyAddress(o *models.Order, a *WarrantyAddressInput) (bool, error) {
 	if a == nil {
-		return false
+		return false, nil
 	}
-	changed := false
-	set := func(dst *string, v string) {
-		v = strings.TrimSpace(v)
-		if v != "" && v != *dst {
-			*dst = v
-			changed = true
-		}
+	n := WarrantyAddressInput{
+		ShippingName: strings.TrimSpace(a.ShippingName), ShippingAddress1: strings.TrimSpace(a.ShippingAddress1),
+		ShippingAddress2: strings.TrimSpace(a.ShippingAddress2), ShippingCity: strings.TrimSpace(a.ShippingCity),
+		ShippingZip: strings.TrimSpace(a.ShippingZip), ShippingProvince: strings.TrimSpace(a.ShippingProvince),
+		ShippingCountry: strings.TrimSpace(a.ShippingCountry), ShippingPhone: strings.TrimSpace(a.ShippingPhone),
 	}
-	set(&o.ShippingName, a.ShippingName)
-	set(&o.ShippingAddress1, a.ShippingAddress1)
-	set(&o.ShippingAddress2, a.ShippingAddress2)
-	set(&o.ShippingCity, a.ShippingCity)
-	set(&o.ShippingZip, a.ShippingZip)
-	set(&o.ShippingProvince, a.ShippingProvince)
-	set(&o.ShippingCountry, a.ShippingCountry)
-	set(&o.ShippingPhone, a.ShippingPhone)
-	return changed
+	if n.ShippingName == "" || n.ShippingAddress1 == "" || n.ShippingCountry == "" {
+		return false, apperr.Unprocessable("Địa chỉ mới cần có người nhận, địa chỉ 1 và quốc gia")
+	}
+	changed := n.ShippingName != o.ShippingName || n.ShippingAddress1 != o.ShippingAddress1 ||
+		n.ShippingAddress2 != o.ShippingAddress2 || n.ShippingCity != o.ShippingCity ||
+		n.ShippingZip != o.ShippingZip || n.ShippingProvince != o.ShippingProvince ||
+		n.ShippingCountry != o.ShippingCountry || n.ShippingPhone != o.ShippingPhone
+	o.ShippingName, o.ShippingAddress1, o.ShippingAddress2, o.ShippingCity = n.ShippingName, n.ShippingAddress1, n.ShippingAddress2, n.ShippingCity
+	o.ShippingZip, o.ShippingProvince, o.ShippingCountry, o.ShippingPhone = n.ShippingZip, n.ShippingProvince, n.ShippingCountry, n.ShippingPhone
+	return changed, nil
 }
 
 func warrantyOrderNote(seq int, in CreateWarrantyInput, parentNote string) string {

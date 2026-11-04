@@ -222,6 +222,12 @@ func TestCreateWarranty_Permissions(t *testing.T) {
 	db := newWarrantyDB(t)
 	svc := newOrderService(db)
 	root := seedDelivered(t, db, "SON5", 1)
+	if info, _ := svc.WarrantyInfo(Actor{ID: 9, Role: models.RoleCS}, root.ID); info.RoleAllowed || info.CanWarranty {
+		t.Fatalf("CS must not be role_allowed: %+v", info)
+	}
+	if info, _ := svc.WarrantyInfo(Actor{ID: 9, Role: models.RoleQC}, root.ID); !info.RoleAllowed || !info.CanWarranty {
+		t.Fatalf("QC must be role_allowed: %+v", info)
+	}
 	for _, role := range []models.Role{models.RoleDesigner, models.RolePacking, models.RoleShipping, models.RoleCS, models.RoleSeller} {
 		if _, err := svc.CreateWarranty(Actor{ID: 9, Role: role}, root.ID, okInput()); status(err) != 403 {
 			t.Fatalf("%s must be 403, got %v", role, err)
@@ -277,7 +283,7 @@ func TestCreateWarranty_PartialAndAddress(t *testing.T) {
 
 	in := okInput()
 	in.Items = []WarrantyItemInput{{ItemID: items[0].ID, Quantity: 2}}
-	in.Address = &WarrantyAddressInput{ShippingAddress1: "9 New Rd"}
+	in.Address = &WarrantyAddressInput{ShippingName: "An", ShippingAddress1: "9 New Rd", ShippingCountry: "US"}
 	got, err := svc.CreateWarranty(admin, old.ID, in)
 	if err != nil {
 		t.Fatal(err)
@@ -364,5 +370,70 @@ func TestCreateWarranty_SearchByRootCodeFindsChain(t *testing.T) {
 	}
 	if !got["SON20721"] || !got["SON20721-BH1"] {
 		t.Fatalf("got %v", got)
+	}
+}
+
+// Đơn con phải mang theo file in/cắt: batch và trạm in đọc chúng từ chính sản phẩm.
+func TestCreateWarranty_CopiesProductionFiles(t *testing.T) {
+	db := newWarrantyDB(t)
+	svc := newOrderService(db)
+	old := seedDelivered(t, db, "SON9", 1)
+	db.Model(&models.OrderItem{}).Where("order_id = ?", old.ID).Updates(map[string]any{
+		"print_file_url": "https://x/print.pdf", "cut_file_url": "https://x/cut.dxf", "production_file_name": "SON9_print",
+	})
+	got, err := svc.CreateWarranty(admin, old.ID, okInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	it := got.Items[0]
+	if it.PrintFileURL != "https://x/print.pdf" || it.CutFileURL != "https://x/cut.dxf" || it.ProductionFileName != "SON9_print" {
+		t.Fatalf("production files not copied: %+v", it)
+	}
+}
+
+// "Sửa địa chỉ" áp nguyên form: xoá được Địa chỉ 2 / SĐT; thiếu trường bắt buộc thì từ chối.
+func TestCreateWarranty_EditedAddressCanClearFields(t *testing.T) {
+	db := newWarrantyDB(t)
+	svc := newOrderService(db)
+	old := seedDelivered(t, db, "SON10", 1)
+	db.Model(old).Updates(map[string]any{"shipping_address2": "Apt 5", "shipping_phone": "555"})
+
+	in := okInput()
+	in.Address = &WarrantyAddressInput{ShippingName: "An", ShippingAddress1: "1 Main St", ShippingCountry: "US", ShippingCity: "NYC"}
+	got, err := svc.CreateWarranty(admin, old.ID, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ShippingAddress2 != "" || got.ShippingPhone != "" || got.ShippingCity != "NYC" {
+		t.Fatalf("cleared fields must stay cleared: %+v", got)
+	}
+	var rec models.OrderWarranty
+	db.Where("order_id = ?", got.ID).First(&rec)
+	if !rec.AddressChanged {
+		t.Fatalf("clearing fields is a change")
+	}
+	// The old order keeps its address.
+	var after models.Order
+	db.First(&after, old.ID)
+	if after.ShippingAddress2 != "Apt 5" {
+		t.Fatalf("old order changed")
+	}
+
+	bad := okInput()
+	bad.Address = &WarrantyAddressInput{ShippingName: "An", ShippingAddress1: "", ShippingCountry: "US"}
+	if _, err := svc.CreateWarranty(owner, old.ID, bad); status(err) != 422 {
+		t.Fatalf("missing address 1 must be 422, got %v", err)
+	}
+	// Same values sent back = not a change.
+	same := okInput()
+	same.Address = &WarrantyAddressInput{ShippingName: "An", ShippingAddress1: "1 Main St", ShippingAddress2: "Apt 5", ShippingCountry: "US", ShippingPhone: "555"}
+	got2, err := svc.CreateWarranty(owner, old.ID, same)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = models.OrderWarranty{}
+	db.Where("order_id = ?", got2.ID).First(&rec)
+	if rec.AddressChanged {
+		t.Fatalf("identical address is not a change")
 	}
 }

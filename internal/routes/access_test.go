@@ -96,9 +96,10 @@ var routeCases = []routeCase{
 	{"POST", "/api/orders/import/commit", oOpsAdmin, nil},
 	{"PUT", "/api/orders/1", oOpsAdmin, nil},
 	{"POST", "/api/orders/1/cancel", oOpsAdmin, nil},
-	// Bảo hành: the route gate is the orders "manage" tick; the narrower "who may
-	// press it" (WarrantyPolicy.AllowedRoles) is checked in the service, and is
-	// tested there — here the 403 for OPS comes from that check.
+	// Bảo hành: the route gate is only "may read orders" (PRODUCTION and QC hold no
+	// orders "manage" tick); the narrower "who may press it"
+	// (WarrantyPolicy.AllowedRoles) is checked in the service. Here the roles outside
+	// that list get 403 from that check; the allowed ones reach the (nil) service.
 	{"GET", "/api/orders/1/warranty-info", oOrderRead, nil},
 	{"GET", "/api/orders/1/warranties", oOrderRead, nil},
 	{"POST", "/api/orders/1/warranty", oWarranty, nil}, // route gate = read orders; the service narrows to WarrantyPolicy.AllowedRoles
@@ -304,5 +305,19 @@ func TestCustomTicksApplyWithoutRelogin(t *testing.T) {
 		handlers.New(&services.Services{Access: services.NewAccessService(repositories.New(h.db))}), h.jwt)
 	if code := h3.status("GET", "/api/qc/results", token); code != http.StatusUnauthorized {
 		t.Errorf("locked account: status %d, want 401", code)
+	}
+}
+
+// TECHNICIAN is tested as ADMIN above; this pins the warranty button for it (and
+// the other allowed roles) explicitly, and shows the excluded roles get 403.
+func TestWarrantyButtonRoles(t *testing.T) {
+	h := newAccessHarness(t)
+	allowed := map[models.Role]bool{models.RoleOwner: true, models.RoleTechnician: true, models.RoleAdmin: true,
+		models.RoleOps: true, models.RoleProduction: true, models.RoleQC: true}
+	for _, role := range models.AllRoles {
+		code := h.status("POST", "/api/orders/1/warranty", h.tokens[role])
+		if got := code != http.StatusForbidden; got != allowed[role] {
+			t.Errorf("POST warranty as %s: allowed=%v, want %v (status %d)", role, got, allowed[role], code)
+		}
 	}
 }
