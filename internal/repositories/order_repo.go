@@ -1056,9 +1056,7 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 		q = q.Where("order_items.internal_status = ?", f.InternalStatus)
 	}
 	if f.HandedOver {
-		q = q.Where("orders.seller_status IN ?", []models.SellerStatus{
-			models.SellerStatusHandedOff, models.SellerStatusShipped, models.SellerStatusDelivered,
-		})
+		q = q.Where("orders.seller_status IN ?", models.HandedOverStatuses)
 	}
 	if f.DesignStatus != "" {
 		q = q.Where("order_items.design_status = ?", f.DesignStatus)
