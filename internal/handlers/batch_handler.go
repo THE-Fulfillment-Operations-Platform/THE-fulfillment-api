@@ -53,6 +53,8 @@ func (h *Handlers) ListBatches(c *gin.Context) {
 		ExcludeClosed: c.Query("open") == "1" || c.Query("open") == "true",
 		// ?files=ready|missing — tách "Chờ xử lý" theo đã đủ link in + cắt hay chưa.
 		Files: c.Query("files"),
+		// ?handover=done|pending — tách "Đã QC" theo đã bàn giao hết hay chưa. Đi kèm status=QC_PASSED.
+		Handover: c.Query("handover"),
 	}
 	rows, total, err := h.svc.Batch.List(f)
 	if err != nil {

@@ -44,12 +44,35 @@ type BatchFilter struct {
 	// with Status=PENDING by the batch list; other callers leave it empty and get
 	// the plain status filter (the dashboard counts all PENDING together).
 	Files string
+	// Handover splits "Đã QC" the way the batch list labels it: "done" = QC_PASSED
+	// and every live part of the batch belongs to an order that already left the
+	// workshop (HANDED_OFF / SHIPPED / DELIVERED) — the "Đã bàn giao" badge;
+	// "pending" = every other QC_PASSED batch (including a partly handed-off one).
+	// Combined with Status=QC_PASSED by the batch list; empty = plain status filter.
+	Handover string
 }
 
 // filesReadyCond is the SQL form of the web's batchStatusBadge "Đã có file SX".
 const filesReadyCond = `batches.status = 'PENDING' AND batches.closed_at IS NULL
 	AND EXISTS (SELECT 1 FROM batch_links bl WHERE bl.batch_id = batches.id AND bl.kind = 'PRINT' AND bl.url <> '' AND bl.deleted_at IS NULL)
 	AND EXISTS (SELECT 1 FROM batch_links bl WHERE bl.batch_id = batches.id AND bl.kind = 'CUT' AND bl.url <> '' AND bl.deleted_at IS NULL)`
+
+// liveBatchPartsSQL selects the batch's parts that still count — the SQL twin of
+// activeBatchItems (not scrapped, order item not cancelled) plus orders cancelled
+// as a whole.
+const liveBatchPartsSQL = `SELECT 1 FROM batch_items bi
+	JOIN order_items oi ON oi.id = bi.order_item_id AND oi.deleted_at IS NULL
+	JOIN orders o ON o.id = oi.order_id AND o.deleted_at IS NULL
+	WHERE bi.batch_id = batches.id AND bi.deleted_at IS NULL AND bi.scrapped_at IS NULL
+	AND oi.cancellation_status NOT IN ('SELLER_CANCELLED', 'APPROVED')
+	AND o.review_status <> 'CANCELLED'`
+
+// handoverDoneCond is the SQL form of the web's "Đã bàn giao" batch badge: QC
+// done, at least one live part, and no live part whose order is still in the
+// workshop. A batch with nothing live (all scrapped/cancelled) is not "handed over".
+var handoverDoneCond = `batches.status = 'QC_PASSED'
+	AND EXISTS (` + liveBatchPartsSQL + `)
+	AND NOT EXISTS (` + liveBatchPartsSQL + ` AND o.seller_status NOT IN ('HANDED_OFF', 'SHIPPED', 'DELIVERED'))`
 
 type BatchRepository struct{ db *gorm.DB }
 
@@ -277,6 +300,12 @@ func (r *BatchRepository) baseQuery(f BatchFilter) *gorm.DB {
 	case "missing":
 		q = q.Where("batches.status = 'PENDING' AND NOT (" + filesReadyCond + ")")
 	}
+	switch f.Handover {
+	case "done":
+		q = q.Where(handoverDoneCond)
+	case "pending":
+		q = q.Where("batches.status = 'QC_PASSED' AND NOT (" + handoverDoneCond + ")")
+	}
 	if code := strings.TrimSpace(f.Code); code != "" {
 		q = q.Where("batches.id IN (?)", r.db.Model(&models.BatchItem{}).
 			Select("batch_items.batch_id").
@@ -346,11 +375,34 @@ func (r *BatchRepository) List(f BatchFilter) ([]models.Batch, int64, error) {
 	if err := r.attachPairQuotas(ptrs); err != nil {
 		return rows, total, err
 	}
+	handed, err := r.handedOverIDs(ids)
+	if err != nil {
+		return rows, total, err
+	}
 	for i := range rows {
 		rows[i].ScrappedCount = scrapped[rows[i].ID]
+		rows[i].HandedOver = handed[rows[i].ID]
 		rows[i].FillMaterialUnits(&rows[i].Material)
 	}
 	return rows, total, nil
+}
+
+// handedOverIDs returns which of the given batches are fully handed over (see
+// handoverDoneCond), in one statement.
+func (r *BatchRepository) handedOverIDs(ids []uint) (map[uint]bool, error) {
+	out := map[uint]bool{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	var found []uint
+	if err := r.db.Model(&models.Batch{}).Where("batches.id IN ?", ids).
+		Where(handoverDoneCond).Pluck("batches.id", &found).Error; err != nil {
+		return nil, err
+	}
+	for _, id := range found {
+		out[id] = true
+	}
+	return out, nil
 }
 
 // ---------- Batch links (print / cut) ----------

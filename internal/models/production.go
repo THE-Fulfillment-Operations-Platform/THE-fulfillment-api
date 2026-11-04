@@ -34,6 +34,10 @@ type Batch struct {
 	// ScrappedCount is not stored: list/detail queries fill it so the UI can say
 	// "0 còn lại · 1 đã huỷ" instead of showing a batch that looks empty.
 	ScrappedCount int `json:"scrapped_count" gorm:"-"`
+	// HandedOver is not stored: the batch list fills it. True = QC_PASSED and every
+	// live part belongs to an order already handed off / shipped / delivered (the
+	// "Đã bàn giao" badge). Same rule as BatchFilter.Handover = "done".
+	HandedOver bool `json:"handed_over" gorm:"-"`
 	// MaterialUnits is how many sheets of the material this batch needs:
 	// ⌈Σ quantity / quota⌉ over its live parts, quota per product from the
 	// (SKU, material) pair — declared, else estimated from the sizes. nil when
