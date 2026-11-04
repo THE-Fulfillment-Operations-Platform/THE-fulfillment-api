@@ -140,8 +140,8 @@ func (s *OrderService) WarrantyInfo(actor Actor, id uint) (*WarrantyInfo, error)
 	}
 	if open != nil {
 		info.Blocking = &WarrantyRef{ID: open.ID, InternalCode: open.InternalCode, StoreOrderID: open.StoreOrderID}
-		if !pol.CanOverride(actor.Role) {
-			info.Reason = fmt.Sprintf("Đơn %s đang bảo hành, chưa giao xong — chưa tạo thêm được", open.StoreOrderID)
+		if blocked, why := pol.BlockedByOpen(actor.Role, open); blocked {
+			info.Reason = why
 			return info, nil
 		}
 	}
@@ -203,8 +203,8 @@ func (s *OrderService) CreateWarranty(actor Actor, id uint, in CreateWarrantyInp
 		}
 		if open, err := txRepo.Warranty.OpenInChain(root, pol.ReturnedTrackingStatuses); err != nil {
 			return err
-		} else if open != nil && !pol.CanOverride(actor.Role) {
-			return apperr.Conflict(fmt.Sprintf("Đơn %s đang bảo hành, chưa giao xong — chưa tạo thêm được", open.StoreOrderID))
+		} else if blocked, why := pol.BlockedByOpen(actor.Role, open); blocked {
+			return apperr.Conflict(why)
 		}
 
 		picked, scope, err := pickWarrantyItems(parent, in.Items)
@@ -460,4 +460,60 @@ func annotateWarrantyCounts(repo *repositories.Repositories, orders []*models.Or
 		}
 	}
 	return nil
+}
+
+// AnnotateWarrantyButton sets Order.WarrantyEligible on every order of a list:
+// true when a user of this role can press Bảo hành on it right now — the same
+// WarrantyPolicy.CanPress that WarrantyInfo ends up at, so the button in the list
+// never leads to an error toast. One extra query for the whole page (open warranty
+// orders of all the chains), not one per row.
+func (s *OrderService) AnnotateWarrantyButton(role models.Role, orders []*models.Order) error {
+	pol := WarrantyPolicy
+	roots := []uint{}
+	seen := map[uint]bool{}
+	for _, o := range orders {
+		if o == nil {
+			continue
+		}
+		o.WarrantyEligible = false
+		if !pol.CanCreate(role) {
+			continue
+		}
+		if ok, _ := pol.Eligible(o); !ok {
+			continue
+		}
+		if r := warrantyRoot(o); !seen[r] {
+			seen[r] = true
+			roots = append(roots, r)
+		}
+	}
+	var open map[uint]*models.Order
+	if !pol.CanOverride(role) {
+		var err error
+		if open, err = s.repo.Warranty.OpenInChains(roots, pol.ReturnedTrackingStatuses); err != nil {
+			return apperr.Internal("warranty lookup failed").Wrap(err)
+		}
+	}
+	for _, o := range orders {
+		if o == nil {
+			continue
+		}
+		o.WarrantyEligible, _ = pol.CanPress(role, o, open[warrantyRoot(o)])
+	}
+	return nil
+}
+
+// ListItemsAs is ListItems plus the Bảo hành button flag for the viewer's role.
+func (s *OrderService) ListItemsAs(role models.Role, f repositories.ItemFilter) ([]models.OrderItem, int64, error) {
+	rows, total, err := s.ListItems(f)
+	if err != nil {
+		return rows, total, err
+	}
+	orders := make([]*models.Order, 0, len(rows))
+	for i := range rows {
+		if rows[i].Order != nil {
+			orders = append(orders, rows[i].Order)
+		}
+	}
+	return rows, total, s.AnnotateWarrantyButton(role, orders)
 }

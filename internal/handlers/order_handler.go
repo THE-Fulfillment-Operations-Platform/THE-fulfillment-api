@@ -204,7 +204,7 @@ func itemFilterFrom(c *gin.Context) repositories.ItemFilter {
 		Search:           strings.TrimSpace(c.Query("q")),
 		InternalStatus:   c.Query("status"),
 		Warranty:         warrantyFilter(c.Query("warranty")),
-		WarrantyEligible: services.WarrantyPolicy.EligibleScope,
+		WarrantyEligible: services.WarrantyPolicy.PressableScope(actor(c).Role),
 		HandedOver:       c.Query("handed_over") == "1" || c.Query("handed_over") == "true",
 		DesignStatus:     c.Query("design_status"),
 		ReviewStatus:     reviewStatus,
@@ -227,20 +227,13 @@ func itemFilterFrom(c *gin.Context) repositories.ItemFilter {
 // ListItems lists order items with filters. GET /api/items
 func (h *Handlers) ListItems(c *gin.Context) {
 	f := itemFilterFrom(c)
-	rows, total, err := h.svc.Order.ListItems(f)
+	// warranty_eligible = "this caller can press Bảo hành on this order now" (role,
+	// eligibility and the chain's unfinished-warranty guard, all from WarrantyPolicy),
+	// so the role list and rules stay in the policy and are not copied into the web.
+	rows, total, err := h.svc.Order.ListItemsAs(actor(c).Role, f)
 	if err != nil {
 		response.Fail(c, err)
 		return
-	}
-	// warranty_eligible also means "this caller may press the button": the list
-	// shows the Bảo hành button off this one flag, so the role list stays in
-	// WarrantyPolicy and is not copied into the web.
-	if !services.WarrantyPolicy.CanCreate(actor(c).Role) {
-		for i := range rows {
-			if rows[i].Order != nil {
-				rows[i].Order.WarrantyEligible = false
-			}
-		}
 	}
 	response.List(c, rows, metaFor(f.Page, total))
 }

@@ -11,32 +11,29 @@ import (
 	"the-fulfillment/backend/internal/repositories"
 )
 
-// Bộ lọc "Bảo hành" của màn Orders/Items (#3194). Điều kiện "có thể bảo hành"
-// phải CÙNG MỘT luật với WarrantyPolicy.Eligible: test này dựng đủ tổ hợp trạng
-// thái, hỏi Eligible (Go) cho từng đơn rồi so với danh sách SQL trả về. Lệch một
-// đơn là fail. Chạy trên sqlite ở đây, và trên Postgres thật ở TestWarrantyFilterPostgres.
+// Bộ lọc "Bảo hành" + nút Bảo hành ở danh sách Orders/Items (#3194). Hai điều phải
+// đúng: (1) SQL của bộ lọc "Có thể bảo hành" trùng WarrantyPolicy.CanPress, (2) cờ
+// warranty_eligible trên từng dòng trùng CanPress — tức bấm nút không ra toast lỗi.
+// Chạy trên sqlite ở TestWarrantyFilter và Postgres thật ở TestWarrantyFilterPostgres.
 
-func itemOrderIDs(t *testing.T, svc *OrderService, warranty string) []uint {
-	return itemOrderIDsFor(t, svc, repositories.ItemFilter{Warranty: warranty})
-}
+var (
+	viewerTech  = models.RoleTechnician
+	viewerOwner = models.RoleOwner
+)
 
-func itemOrderIDsFor(t *testing.T, svc *OrderService, f repositories.ItemFilter) []uint {
+// listOrderIDs returns the order ids of the item list under f, every page, and
+// (when role != "") checks each row's warranty_eligible flag equals CanPress.
+func listOrderIDs(t *testing.T, svc *OrderService, role models.Role, f repositories.ItemFilter) []uint {
 	t.Helper()
-	f.IncludeCancelled = true
-	f.WarrantyEligible = WarrantyPolicy.EligibleScope // itemFilterFrom (handler) sets this in production
+	f.WarrantyEligible = WarrantyPolicy.PressableScope(role) // itemFilterFrom (handler) does this in production
 	ids := []uint{}
 	for page := 1; ; page++ {
 		f.Page = repositories.Page{Page: page, PageSize: 100}
-		rows, total, err := svc.ListItems(f)
+		rows, total, err := svc.ListItemsAs(role, f)
 		if err != nil {
-			t.Fatalf("ListItems(%+v): %v", f.Warranty, err)
+			t.Fatalf("ListItemsAs(%+v): %v", f.Warranty, err)
 		}
 		for _, r := range rows {
-			if r.Order != nil {
-				if ok, _ := WarrantyPolicy.Eligible(r.Order); r.Order.WarrantyEligible != ok {
-					t.Fatalf("order %d: warranty_eligible flag disagrees with Eligible", r.Order.ID)
-				}
-			}
 			ids = append(ids, r.OrderID)
 		}
 		if len(rows) == 0 || len(ids) >= int(total) {
@@ -50,9 +47,59 @@ func itemOrderIDsFor(t *testing.T, svc *OrderService, f repositories.ItemFilter)
 func sameIDs(t *testing.T, what string, got, want []uint) {
 	t.Helper()
 	sort.Slice(want, func(i, j int) bool { return want[i] < want[j] })
+	if got == nil {
+		got = []uint{}
+	}
+	if want == nil {
+		want = []uint{}
+	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("%s: got %v want %v", what, got, want)
 	}
+}
+
+// pressable computes, order by order and in Go only, who CanPress says yes to.
+func pressable(t *testing.T, db *gorm.DB, role models.Role) []uint {
+	t.Helper()
+	repo := repositories.New(db)
+	var orders []models.Order
+	if err := db.Find(&orders).Error; err != nil {
+		t.Fatalf("load orders: %v", err)
+	}
+	var out []uint
+	for i := range orders {
+		o := &orders[i]
+		open, err := repo.Warranty.OpenInChain(warrantyRoot(o), WarrantyPolicy.ReturnedTrackingStatuses)
+		if err != nil {
+			t.Fatalf("OpenInChain: %v", err)
+		}
+		if ok, _ := WarrantyPolicy.CanPress(role, o, open); ok {
+			out = append(out, o.ID)
+		}
+	}
+	return out
+}
+
+// flagged = rows whose warranty_eligible is true in the plain (unfiltered) list.
+func flagged(t *testing.T, svc *OrderService, role models.Role) []uint {
+	t.Helper()
+	var out []uint
+	for page := 1; ; page++ {
+		rows, total, err := svc.ListItemsAs(role, repositories.ItemFilter{Page: repositories.Page{Page: page, PageSize: 100}, IncludeCancelled: true})
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		for _, r := range rows {
+			if r.Order != nil && r.Order.WarrantyEligible {
+				out = append(out, r.OrderID)
+			}
+		}
+		if len(rows) == 0 || page*100 >= int(total) {
+			break
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 func checkWarrantyFilter(t *testing.T, db *gorm.DB) {
@@ -63,18 +110,18 @@ func checkWarrantyFilter(t *testing.T, db *gorm.DB) {
 		t.Fatalf("seller: %v", err)
 	}
 
-	// 1. Mọi tổ hợp trạng thái: SQL phải trùng Eligible.
+	// 1. Mọi tổ hợp trạng thái (seller status lấy từ models.AllSellerStatuses).
 	reviews := []models.ReviewStatus{models.ReviewPending, models.ReviewNeedsFix, models.ReviewApproved, models.ReviewRejected, models.ReviewCancelled}
 	cancels := []models.CancellationStatus{models.CancellationNone, models.CancellationSeller, models.CancellationRequested, models.CancellationApproved, models.CancellationRejected}
-	sellers := []models.SellerStatus{models.SellerStatusProduction, models.SellerStatusPacked, models.SellerStatusHandedOff, models.SellerStatusShipped, models.SellerStatusDelivered}
 	trackings := []models.TrackingStatus{models.TrackingNone, models.TrackingPending, models.TrackingPreTransit, models.TrackingInTransit,
 		models.TrackingOutForDelivery, models.TrackingPickUp, models.TrackingDelivered, models.TrackingUndelivered,
 		models.TrackingException, models.TrackingExpired, models.TrackingCancelled}
-	var want []uint
+	var wantPolicy []uint
 	n := 0
+	var cancelledItemOrder uint
 	for _, rv := range reviews {
 		for _, c := range cancels {
-			for _, s := range sellers {
+			for _, s := range models.AllSellerStatuses {
 				for _, tr := range trackings {
 					n++
 					code := fmt.Sprintf("M%04d", n)
@@ -88,57 +135,148 @@ func checkWarrantyFilter(t *testing.T, db *gorm.DB) {
 						t.Fatalf("seed item %s: %v", code, err)
 					}
 					if ok, _ := WarrantyPolicy.Eligible(o); ok {
-						want = append(want, o.ID)
+						wantPolicy = append(wantPolicy, o.ID)
+						if cancelledItemOrder == 0 {
+							cancelledItemOrder = o.ID
+						}
 					}
 				}
 			}
 		}
 	}
-	if len(want) == 0 || len(want) == n {
-		t.Fatalf("matrix is degenerate: %d of %d eligible", len(want), n)
+	if len(wantPolicy) == 0 || len(wantPolicy) == n {
+		t.Fatalf("matrix is degenerate: %d of %d eligible", len(wantPolicy), n)
 	}
-	sameIDs(t, "eligible vs Eligible()", itemOrderIDs(t, svc, "eligible"), want)
+	// Không có chuỗi nào: mọi vai trò được bấm thấy đúng tập Eligible.
+	sameIDs(t, "eligible (tech) vs Eligible()", listOrderIDs(t, svc, viewerTech, repositories.ItemFilter{Warranty: "eligible"}), append([]uint{}, wantPolicy...))
+	sameIDs(t, "flag (tech) vs Eligible()", flagged(t, svc, viewerTech), append([]uint{}, wantPolicy...))
+	// Vai trò không được bấm (CS) không thấy gì, không có nút.
+	sameIDs(t, "eligible (CS)", listOrderIDs(t, svc, models.RoleCS, repositories.ItemFilter{Warranty: "eligible"}), nil)
+	sameIDs(t, "flag (CS)", flagged(t, svc, models.RoleCS), nil)
 
-	// 2. Chuỗi bảo hành: gốc -> BH1 -> (BH1 giao xong) -> BH2 (cha = BH1, gốc = gốc).
+	// Đường mặc định (IncludeCancelled=false): dòng item đã huỷ bị ẩn, còn lại thì như nhau.
+	if err := db.Model(&models.OrderItem{}).Where("order_id = ?", cancelledItemOrder).
+		Update("cancellation_status", models.CancellationApproved).Error; err != nil {
+		t.Fatalf("cancel item: %v", err)
+	}
+	var hidden []uint
+	for _, id := range wantPolicy {
+		if id != cancelledItemOrder {
+			hidden = append(hidden, id)
+		}
+	}
+	sameIDs(t, "default path hides cancelled line", listOrderIDs(t, svc, viewerTech, repositories.ItemFilter{Warranty: "eligible"}), hidden)
+	sameIDs(t, "IncludeCancelled shows it", listOrderIDs(t, svc, viewerTech, repositories.ItemFilter{Warranty: "eligible", IncludeCancelled: true}), append([]uint{}, wantPolicy...))
+	db.Model(&models.OrderItem{}).Where("order_id = ?", cancelledItemOrder).Update("cancellation_status", models.CancellationNone)
+
+	// 2. Chuỗi: gốc đã giao -> BH1 (đang chờ duyệt = chưa giao xong).
 	root := seedDelivered(t, db, "CHAIN1", 1)
 	bh1, err := svc.CreateWarranty(admin, root.ID, okInput())
 	if err != nil {
 		t.Fatalf("BH1: %v", err)
 	}
-	sameIDs(t, "child after BH1", itemOrderIDs(t, svc, "child"), []uint{bh1.ID})
-	sameIDs(t, "root after BH1", itemOrderIDs(t, svc, "root"), []uint{root.ID})
+	sameIDs(t, "child after BH1", listOrderIDs(t, svc, viewerTech, repositories.ItemFilter{Warranty: "child"}), []uint{bh1.ID})
+	sameIDs(t, "root after BH1", listOrderIDs(t, svc, viewerTech, repositories.ItemFilter{Warranty: "root"}), []uint{root.ID})
+
+	// Ca chuỗi đang có BH chưa giao: KTV không thấy nút / không nằm trong lọc, OWNER thì có.
+	has := func(ids []uint, id uint) bool {
+		for _, x := range ids {
+			if x == id {
+				return true
+			}
+		}
+		return false
+	}
+	techFlag := flagged(t, svc, viewerTech)
+	ownerFlag := flagged(t, svc, viewerOwner)
+	techFilter := listOrderIDs(t, svc, viewerTech, repositories.ItemFilter{Warranty: "eligible"})
+	ownerFilter := listOrderIDs(t, svc, viewerOwner, repositories.ItemFilter{Warranty: "eligible"})
+	if has(techFlag, root.ID) || has(techFilter, root.ID) {
+		t.Fatalf("KTV must NOT see the button / filter hit for a chain with an unfinished BH")
+	}
+	if !has(ownerFlag, root.ID) || !has(ownerFilter, root.ID) {
+		t.Fatalf("OWNER may override the guard: must see the button and the filter hit")
+	}
+	// ...và đúng điều WarrantyInfo nói: KTV không bấm được, OWNER bấm được.
+	if info, _ := svc.WarrantyInfo(Actor{ID: 3, Role: viewerTech}, root.ID); info == nil || info.CanWarranty {
+		t.Fatalf("WarrantyInfo(KTV).CanWarranty must be false: %+v", info)
+	}
+	if info, _ := svc.WarrantyInfo(Actor{ID: 1, Role: viewerOwner}, root.ID); info == nil || !info.CanWarranty {
+		t.Fatalf("WarrantyInfo(OWNER).CanWarranty must be true: %+v", info)
+	}
+
+	// BH1 giao xong -> chặn hết, KTV bấm được lại; rồi BH2 từ BH1.
 	if err := db.Model(&models.Order{}).Where("id = ?", bh1.ID).Updates(map[string]any{
 		"review_status": models.ReviewApproved, "seller_status": models.SellerStatusDelivered, "tracking_status": models.TrackingDelivered}).Error; err != nil {
 		t.Fatalf("deliver BH1: %v", err)
+	}
+	if !has(flagged(t, svc, viewerTech), root.ID) {
+		t.Fatalf("once BH1 is delivered KTV must see the button on the root again")
 	}
 	bh2, err := svc.CreateWarranty(admin, bh1.ID, okInput())
 	if err != nil {
 		t.Fatalf("BH2: %v", err)
 	}
-	sameIDs(t, "child after BH2", itemOrderIDs(t, svc, "child"), []uint{bh1.ID, bh2.ID})
-	// "Đã từng bảo hành" = đúng những đơn mà huy hiệu "Đã BH ×N" hiện (Counts > 0).
-	var all []uint
-	db.Model(&models.Order{}).Pluck("id", &all)
-	counts, err := repositories.New(db).Warranty.Counts(all)
-	if err != nil {
-		t.Fatalf("counts: %v", err)
+	sameIDs(t, "child after BH2", listOrderIDs(t, svc, viewerTech, repositories.ItemFilter{Warranty: "child"}), []uint{bh1.ID, bh2.ID})
+
+	// "root" = đã từng bảo hành = Counts>0 (gốc VÀ BH1 vì BH1 có BH2: khớp huy hiệu "Đã BH ×N").
+	counts := func() []uint {
+		var all []uint
+		db.Model(&models.Order{}).Pluck("id", &all)
+		c, err := repositories.New(db).Warranty.Counts(all)
+		if err != nil {
+			t.Fatalf("counts: %v", err)
+		}
+		var out []uint
+		for _, id := range all {
+			if c[id] > 0 {
+				out = append(out, id)
+			}
+		}
+		return out
 	}
-	var wantRoot []uint
-	for _, id := range all {
-		if counts[id] > 0 {
-			wantRoot = append(wantRoot, id)
+	sameIDs(t, "root vs Counts>0", listOrderIDs(t, svc, viewerTech, repositories.ItemFilter{Warranty: "root"}), counts())
+	if len(counts()) != 2 {
+		t.Fatalf("expected root and BH1 to count as warrantied, got %v", counts())
+	}
+	sid := seller.ID
+	sameIDs(t, "root + seller", listOrderIDs(t, svc, viewerTech, repositories.ItemFilter{Warranty: "root", SellerID: &sid}), []uint{root.ID, bh1.ID})
+
+	// 3. Soft-delete: BH2 bị xoá -> BH1 hết "đã từng BH", child chỉ còn BH1; đơn bị xoá không lọt vào đâu.
+	if err := db.Delete(&models.Order{}, bh2.ID).Error; err != nil {
+		t.Fatalf("soft delete BH2: %v", err)
+	}
+	sameIDs(t, "child after BH2 deleted", listOrderIDs(t, svc, viewerTech, repositories.ItemFilter{Warranty: "child"}), []uint{bh1.ID})
+	sameIDs(t, "root after BH2 deleted", listOrderIDs(t, svc, viewerTech, repositories.ItemFilter{Warranty: "root"}), []uint{root.ID})
+	sameIDs(t, "root vs Counts>0 after delete", listOrderIDs(t, svc, viewerTech, repositories.ItemFilter{Warranty: "root"}), counts())
+	// Đơn gốc bị xoá: BH1 vẫn là đơn con còn sống, đơn gốc biến khỏi mọi danh sách.
+	if err := db.Delete(&models.Order{}, root.ID).Error; err != nil {
+		t.Fatalf("soft delete root: %v", err)
+	}
+	for _, w := range []string{"", "eligible", "child", "root"} {
+		if has(listOrderIDs(t, svc, viewerOwner, repositories.ItemFilter{Warranty: w}), root.ID) {
+			t.Fatalf("soft-deleted root leaked into warranty=%q", w)
 		}
 	}
-	sameIDs(t, "root vs Counts>0", itemOrderIDs(t, svc, "root"), wantRoot)
-	if len(wantRoot) != 2 { // gốc và BH1
-		t.Fatalf("expected root+BH1 to have warranties, got %v", wantRoot)
+	// BH2 xoá mềm không còn là "đang bảo hành dở" chặn ai: BH1 (đã giao) bấm được.
+	if !has(flagged(t, svc, viewerTech), bh1.ID) {
+		t.Fatalf("BH1 delivered with no live open BH: KTV must see the button")
 	}
-	// Bộ lọc đứng cùng bộ lọc khác: thêm seller không phá ngoặc OR của "root".
-	sid := seller.ID
-	sameIDs(t, "root + seller", itemOrderIDsFor(t, svc, repositories.ItemFilter{Warranty: "root", SellerID: &sid}), []uint{root.ID, bh1.ID})
-	// Không lọc: thấy tất cả.
-	if got := itemOrderIDs(t, svc, ""); len(got) != n+3 {
-		t.Fatalf("no filter: got %d orders want %d", len(got), n+3)
+
+	// 4. Toàn cục: bộ lọc SQL = cờ trên dòng = CanPress từng đơn, cho từng vai trò.
+	for _, role := range []models.Role{viewerTech, viewerOwner, models.RoleCS} {
+		want := pressable(t, db, role)
+		// pressable() reads soft-deleted rows too; keep only live ones.
+		var live []uint
+		for _, id := range want {
+			var c int64
+			db.Model(&models.Order{}).Where("id = ?", id).Count(&c)
+			if c > 0 {
+				live = append(live, id)
+			}
+		}
+		sameIDs(t, "filter vs CanPress "+string(role), listOrderIDs(t, svc, role, repositories.ItemFilter{Warranty: "eligible", IncludeCancelled: true}), append([]uint{}, live...))
+		sameIDs(t, "flag vs CanPress "+string(role), flagged(t, svc, role), append([]uint{}, live...))
 	}
 }
 

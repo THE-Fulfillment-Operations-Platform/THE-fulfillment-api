@@ -7,6 +7,7 @@ import (
 	"gorm.io/gorm"
 
 	"the-fulfillment/backend/internal/models"
+	"the-fulfillment/backend/internal/repositories"
 )
 
 // WarrantyPolicyConfig is the ONE place that holds the choices anh Kiên has not
@@ -109,28 +110,43 @@ func (p WarrantyPolicyConfig) Eligible(o *models.Order) (bool, string) {
 	return false, "Chỉ bảo hành được đơn đã giao hoặc đơn hãng báo trả về / giao không thành"
 }
 
-// EligibleScope is Eligible written as a SQL condition, for the "Có thể bảo
-// hành" filter of the item list. It lives HERE, next to Eligible, and reads the
-// same policy fields, so a rule changed in one place cannot be forgotten in the
-// other (an earlier version kept two copies and they drifted). The test
-// TestWarrantyEligibleScopeMatchesEligible walks every status combination and
-// fails if the two ever disagree — edit both functions together.
+// BlockedByOpen: the chain still has an unfinished warranty order (open) and this
+// role may not skip the double-click guard. WarrantyInfo, CreateWarranty, the
+// list's button flag and the "eligible" filter all ask this one function.
+func (p WarrantyPolicyConfig) BlockedByOpen(r models.Role, open *models.Order) (bool, string) {
+	if open != nil && !p.CanOverride(r) {
+		return true, "Đơn " + open.StoreOrderID + " đang bảo hành, chưa giao xong — chưa tạo thêm được"
+	}
+	return false, ""
+}
+
+// CanPress: may a user of role r press the button on o right now, given the
+// chain's open warranty order (nil = none). Role, Eligible and BlockedByOpen in one
+// place; PressableScope below is the SQL twin, kept honest by TestWarrantyFilter.
+func (p WarrantyPolicyConfig) CanPress(r models.Role, o *models.Order, open *models.Order) (bool, string) {
+	if !p.CanCreate(r) {
+		return false, "Vai trò của bạn không được bấm Bảo hành"
+	}
+	if ok, why := p.Eligible(o); !ok {
+		return false, why
+	}
+	if blocked, why := p.BlockedByOpen(r, open); blocked {
+		return false, why
+	}
+	return true, ""
+}
+
+// EligibleScope is Eligible written as a SQL condition. It lives HERE, next to
+// Eligible, and reads the same policy fields, so a rule changed in one place cannot
+// be forgotten in the other (an earlier version kept two copies and they drifted).
+// TestWarrantyFilter walks every status combination and fails if the two ever
+// disagree — edit both functions together.
 //
 // db must be a query that already joins `orders` (the item list does).
 func (p WarrantyPolicyConfig) EligibleScope(db *gorm.DB) *gorm.DB {
 	returned := make([]string, 0, len(p.ReturnedTrackingStatuses))
 	for _, t := range p.ReturnedTrackingStatuses {
 		returned = append(returned, string(t))
-	}
-	// Same boundary as Eligible (SellerStatus.HandedOver), not a second hand-written list.
-	handedOver := []string{}
-	for _, s := range []models.SellerStatus{
-		models.SellerStatusProduction, models.SellerStatusPacked, models.SellerStatusHandedOff,
-		models.SellerStatusShipped, models.SellerStatusDelivered,
-	} {
-		if s.HandedOver() {
-			handedOver = append(handedOver, string(s))
-		}
 	}
 	if len(returned) == 0 {
 		returned = []string{""} // an empty IN () is invalid SQL; "" never matches NOT NULL tracking
@@ -141,6 +157,27 @@ func (p WarrantyPolicyConfig) EligibleScope(db *gorm.DB) *gorm.DB {
 		string(models.ReviewApproved),
 		[]string{string(models.CancellationSeller), string(models.CancellationApproved)},
 		string(models.SellerStatusDelivered), string(models.TrackingDelivered),
-		handedOver, returned,
+		models.HandedOverStatuses, returned, // HandedOverStatuses = Rank-based, from models.AllSellerStatuses
 	)
+}
+
+// PressableScope returns the "Có thể bảo hành" filter for a viewer of role r: the
+// SQL twin of CanPress (role allowed, EligibleScope, and — unless the role may
+// override — no open warranty order in the chain). The "open" definition is
+// repositories.OpenWarrantyConds, the same one OpenInChain uses.
+func (p WarrantyPolicyConfig) PressableScope(r models.Role) func(*gorm.DB) *gorm.DB {
+	return func(db *gorm.DB) *gorm.DB {
+		if !p.CanCreate(r) {
+			return db.Where("1 = 0")
+		}
+		db = p.EligibleScope(db)
+		if p.CanOverride(r) {
+			return db
+		}
+		open := repositories.OpenWarrantyConds(
+			db.Session(&gorm.Session{NewDB: true}).Table("orders AS oc").Select("1").
+				Where("oc.root_order_id = COALESCE(orders.root_order_id, orders.id) AND oc.warranty_seq > 0 AND oc.deleted_at IS NULL"),
+			"oc.", p.ReturnedTrackingStatuses)
+		return db.Where("NOT EXISTS (?)", open)
+	}
 }

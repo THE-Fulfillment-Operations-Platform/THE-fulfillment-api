@@ -198,10 +198,24 @@ func (s SellerStatus) HandedOver() bool {
 	return s.Rank() >= SellerStatusHandedOff.Rank()
 }
 
-// HandedOverStatuses is the SQL-friendly form of HandedOver.
-var HandedOverStatuses = []string{
-	string(SellerStatusHandedOff), string(SellerStatusShipped), string(SellerStatusDelivered),
+// AllSellerStatuses is THE list of seller statuses. Anything that must walk every
+// status (HandedOverStatuses below, the warranty SQL, tests) reads it, so a new
+// status is added here once. Keep it in lifecycle order.
+var AllSellerStatuses = []SellerStatus{
+	SellerStatusProduction, SellerStatusPacked, SellerStatusHandedOff, SellerStatusShipped, SellerStatusDelivered,
 }
+
+// HandedOverStatuses is the SQL-friendly form of HandedOver, derived from
+// AllSellerStatuses so it cannot drift from the Rank-based Go check.
+var HandedOverStatuses = func() []string {
+	out := []string{}
+	for _, s := range AllSellerStatuses {
+		if s.HandedOver() {
+			out = append(out, string(s))
+		}
+	}
+	return out
+}()
 
 // DesignStatus tracks the designer's progress on an item before it enters a batch.
 type DesignStatus string

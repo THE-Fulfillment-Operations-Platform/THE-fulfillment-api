@@ -126,9 +126,6 @@ func (s *OrderService) ListItems(f repositories.ItemFilter) ([]models.OrderItem,
 	if err := annotateWarrantyCounts(s.repo, orders); err != nil {
 		return rows, total, err
 	}
-	for _, o := range orders {
-		o.WarrantyEligible, _ = WarrantyPolicy.Eligible(o)
-	}
 	return rows, total, nil
 }
 

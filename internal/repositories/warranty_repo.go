@@ -40,22 +40,50 @@ func (r *WarrantyRepository) MaxSeq(rootID uint) (int, error) {
 // statuses that mean "came back" — such an order is finished, not open, so the
 // chain may be warrantied again from it.
 func (r *WarrantyRepository) OpenInChain(rootID uint, returned []models.TrackingStatus) (*models.Order, error) {
+	m, err := r.OpenInChains([]uint{rootID}, returned)
+	if err != nil {
+		return nil, err
+	}
+	return m[rootID], nil
+}
+
+// OpenInChains is OpenInChain for many chains in ONE query (the order list needs
+// it per page): root id -> its first unfinished warranty order. Roots with none
+// are absent from the map.
+func (r *WarrantyRepository) OpenInChains(rootIDs []uint, returned []models.TrackingStatus) (map[uint]*models.Order, error) {
+	out := map[uint]*models.Order{}
+	if len(rootIDs) == 0 {
+		return out, nil
+	}
+	var rows []models.Order
+	q := r.db.Where("root_order_id IN ? AND warranty_seq > 0", rootIDs)
+	if err := OpenWarrantyConds(q, "", returned).Order("id asc").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		o := rows[i]
+		if o.RootOrderID != nil && out[*o.RootOrderID] == nil {
+			out[*o.RootOrderID] = &o
+		}
+	}
+	return out, nil
+}
+
+// OpenWarrantyConds narrows q (a query on orders, columns prefixed by prefix such
+// as "oc.") to warranty orders that are still open: not rejected/cancelled and not
+// yet delivered or returned. It is the single definition of "open" — the Go check
+// (OpenInChain) and the SQL filter (NOT EXISTS in the item list) both use it.
+func OpenWarrantyConds(q *gorm.DB, prefix string, returned []models.TrackingStatus) *gorm.DB {
 	rs := make([]string, 0, len(returned)+1)
 	rs = append(rs, string(models.TrackingDelivered))
 	for _, t := range returned {
 		rs = append(rs, string(t))
 	}
-	var o models.Order
-	res := r.db.Where("root_order_id = ? AND warranty_seq > 0", rootID).
-		Where("review_status NOT IN ?", []string{string(models.ReviewRejected), string(models.ReviewCancelled)}).
-		Where("cancellation_status NOT IN ?", []string{string(models.CancellationSeller), string(models.CancellationApproved)}).
-		Where("seller_status <> ?", models.SellerStatusDelivered).
-		Where("tracking_status NOT IN ?", rs).
-		Order("id asc").Limit(1).Find(&o)
-	if res.Error != nil || res.RowsAffected == 0 {
-		return nil, res.Error
-	}
-	return &o, nil
+	return q.
+		Where(prefix+"review_status NOT IN ?", []string{string(models.ReviewRejected), string(models.ReviewCancelled)}).
+		Where(prefix+"cancellation_status NOT IN ?", []string{string(models.CancellationSeller), string(models.CancellationApproved)}).
+		Where(prefix+"seller_status <> ?", models.SellerStatusDelivered).
+		Where(prefix+"tracking_status NOT IN ?", rs)
 }
 
 // Counts returns, for each given order, how many warranty orders hang off it: the

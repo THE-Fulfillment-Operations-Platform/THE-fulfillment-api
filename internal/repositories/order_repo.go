@@ -727,10 +727,13 @@ type ItemFilter struct {
 	// than one boolean.
 	WithSKUMaterials bool
 	// Warranty narrows the list by warranty state (the "Bảo hành" filter):
-	//   "eligible" — orders WarrantyEligible says may be warrantied now,
+	//   "eligible" — orders the VIEWER can press Bảo hành on now (WarrantyEligible =
+	//                WarrantyPolicy.PressableScope(role): role, eligibility, no open BH in chain),
 	//   "child"    — warranty orders themselves (warranty_seq > 0, the -BH1 ones),
-	//   "root"     — orders that have been warrantied before (the same count the
-	//                "Đã BH ×N" badge shows: WarrantyRepository.Counts > 0).
+	//   "root"     — orders that have been warrantied before: at least one warranty
+	//                order names them as root or parent, i.e. exactly where the "Đã BH ×N"
+	//                badge shows (WarrantyRepository.Counts > 0). A warranty order that
+	//                itself got a further BH therefore counts too.
 	// "" = no filter. WarrantyEligible is the policy condition and is injected by
 	// itemFilterFrom (repositories cannot import services); "eligible" without it
 	// matches nothing rather than everything.
