@@ -203,6 +203,8 @@ func itemFilterFrom(c *gin.Context) repositories.ItemFilter {
 		InternalCode:     strings.TrimSpace(c.Query("internal_code")),
 		Search:           strings.TrimSpace(c.Query("q")),
 		InternalStatus:   c.Query("status"),
+		Warranty:         warrantyFilter(c.Query("warranty")),
+		WarrantyEligible: services.WarrantyPolicy.EligibleScope,
 		HandedOver:       c.Query("handed_over") == "1" || c.Query("handed_over") == "true",
 		DesignStatus:     c.Query("design_status"),
 		ReviewStatus:     reviewStatus,
@@ -229,6 +231,16 @@ func (h *Handlers) ListItems(c *gin.Context) {
 	if err != nil {
 		response.Fail(c, err)
 		return
+	}
+	// warranty_eligible also means "this caller may press the button": the list
+	// shows the Bảo hành button off this one flag, so the role list stays in
+	// WarrantyPolicy and is not copied into the web.
+	if !services.WarrantyPolicy.CanCreate(actor(c).Role) {
+		for i := range rows {
+			if rows[i].Order != nil {
+				rows[i].Order.WarrantyEligible = false
+			}
+		}
 	}
 	response.List(c, rows, metaFor(f.Page, total))
 }
@@ -538,4 +550,14 @@ func (h *Handlers) CreateWarranty(c *gin.Context) {
 		return
 	}
 	response.Created(c, o)
+}
+
+// warrantyFilter whitelists ?warranty= for the item list: eligible | child | root.
+// Anything else means "no filter".
+func warrantyFilter(v string) string {
+	switch v {
+	case "eligible", "child", "root":
+		return v
+	}
+	return ""
 }

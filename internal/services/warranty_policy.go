@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 
+	"gorm.io/gorm"
+
 	"the-fulfillment/backend/internal/models"
 )
 
@@ -105,4 +107,40 @@ func (p WarrantyPolicyConfig) Eligible(o *models.Order) (bool, string) {
 		}
 	}
 	return false, "Chỉ bảo hành được đơn đã giao hoặc đơn hãng báo trả về / giao không thành"
+}
+
+// EligibleScope is Eligible written as a SQL condition, for the "Có thể bảo
+// hành" filter of the item list. It lives HERE, next to Eligible, and reads the
+// same policy fields, so a rule changed in one place cannot be forgotten in the
+// other (an earlier version kept two copies and they drifted). The test
+// TestWarrantyEligibleScopeMatchesEligible walks every status combination and
+// fails if the two ever disagree — edit both functions together.
+//
+// db must be a query that already joins `orders` (the item list does).
+func (p WarrantyPolicyConfig) EligibleScope(db *gorm.DB) *gorm.DB {
+	returned := make([]string, 0, len(p.ReturnedTrackingStatuses))
+	for _, t := range p.ReturnedTrackingStatuses {
+		returned = append(returned, string(t))
+	}
+	// Same boundary as Eligible (SellerStatus.HandedOver), not a second hand-written list.
+	handedOver := []string{}
+	for _, s := range []models.SellerStatus{
+		models.SellerStatusProduction, models.SellerStatusPacked, models.SellerStatusHandedOff,
+		models.SellerStatusShipped, models.SellerStatusDelivered,
+	} {
+		if s.HandedOver() {
+			handedOver = append(handedOver, string(s))
+		}
+	}
+	if len(returned) == 0 {
+		returned = []string{""} // an empty IN () is invalid SQL; "" never matches NOT NULL tracking
+	}
+	return db.Where(
+		"(orders.review_status = ? AND COALESCE(orders.cancellation_status, '') NOT IN ? AND "+
+			"(orders.seller_status = ? OR orders.tracking_status = ? OR (orders.seller_status IN ? AND orders.tracking_status IN ?)))",
+		string(models.ReviewApproved),
+		[]string{string(models.CancellationSeller), string(models.CancellationApproved)},
+		string(models.SellerStatusDelivered), string(models.TrackingDelivered),
+		handedOver, returned,
+	)
 }

@@ -726,6 +726,17 @@ type ItemFilter struct {
 	// long and having it drift between a "lean" and a "full" variant is a worse bug
 	// than one boolean.
 	WithSKUMaterials bool
+	// Warranty narrows the list by warranty state (the "Bảo hành" filter):
+	//   "eligible" — orders WarrantyEligible says may be warrantied now,
+	//   "child"    — warranty orders themselves (warranty_seq > 0, the -BH1 ones),
+	//   "root"     — orders that have been warrantied before (the same count the
+	//                "Đã BH ×N" badge shows: WarrantyRepository.Counts > 0).
+	// "" = no filter. WarrantyEligible is the policy condition and is injected by
+	// itemFilterFrom (repositories cannot import services); "eligible" without it
+	// matches nothing rather than everything.
+	Warranty         string
+	WarrantyEligible func(*gorm.DB) *gorm.DB
+
 	// WithSeller adds the parent order's seller (1 extra round trip). Only screens
 	// that print the seller's name need it.
 	WithSeller bool
@@ -1048,6 +1059,22 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 	}
 	if f.DesignStatus != "" {
 		q = q.Where("order_items.design_status = ?", f.DesignStatus)
+	}
+	switch f.Warranty {
+	case "eligible":
+		if f.WarrantyEligible == nil {
+			q = q.Where("1 = 0")
+		} else {
+			q = f.WarrantyEligible(q)
+		}
+	case "child":
+		q = q.Where("orders.warranty_seq > 0")
+	case "root":
+		// Mirrors WarrantyRepository.Counts: an order counts as warrantied when a
+		// warranty order names it as root or as parent.
+		q = q.Where("(orders.id IN (?) OR orders.id IN (?))",
+			r.db.Model(&models.Order{}).Select("root_order_id").Where("warranty_seq > 0 AND root_order_id IS NOT NULL AND deleted_at IS NULL"),
+			r.db.Model(&models.Order{}).Select("parent_order_id").Where("warranty_seq > 0 AND parent_order_id IS NOT NULL AND deleted_at IS NULL"))
 	}
 	if f.ReviewStatus != "" {
 		q = q.Where("orders.review_status = ?", f.ReviewStatus)

@@ -190,6 +190,13 @@ type Order struct {
 	// this one ("Đã bảo hành ×N"). Detail and list endpoints fill it in.
 	WarrantyCount int `json:"warranty_count" gorm:"-"`
 
+	// WarrantyEligible is computed from WarrantyPolicy.Eligible (the same function the
+	// "Có thể bảo hành" filter is tested against), so the list can show the Bảo hành
+	// button without one request per row. Only the item list fills it in; the
+	// handler clears it for roles the policy does not allow to press the button.
+
+	WarrantyEligible bool `json:"warranty_eligible" gorm:"-"`
+
 	// StoreOrderDup is a computed, non-persisted flag: true when this StoreOrderID
 	// is shared by more than one order for the same seller (a repeated store order
 	// id, not merely multiple items of one order). List endpoints set it so every

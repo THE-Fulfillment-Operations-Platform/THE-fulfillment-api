@@ -171,3 +171,12 @@ func TestWarrantyPostgres(t *testing.T) {
 	}
 	t.Logf("owners got seq %v", seqs)
 }
+
+// Bộ lọc "Bảo hành" trên Postgres thật (cùng kiểm tra với sqlite).
+func TestWarrantyFilterPostgres(t *testing.T) {
+	db := openWarrantyPG(t)
+	if err := database.AutoMigrate(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	checkWarrantyFilter(t, db)
+}
