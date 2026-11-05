@@ -206,6 +206,7 @@ func itemFilterFrom(c *gin.Context) repositories.ItemFilter {
 		Warranty:         warrantyFilter(c.Query("warranty")),
 		WarrantyEligible: services.WarrantyPolicy.PressableScope(actor(c).Role),
 		HandedOver:       c.Query("handed_over") == "1" || c.Query("handed_over") == "true",
+		Packed:           c.Query("packed") == "1" || c.Query("packed") == "true",
 		DesignStatus:     c.Query("design_status"),
 		ReviewStatus:     reviewStatus,
 		IncludeCancelled: includeCancelled,

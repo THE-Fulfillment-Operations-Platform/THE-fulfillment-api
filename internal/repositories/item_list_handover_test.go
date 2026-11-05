@@ -33,6 +33,21 @@ func checkItemListHandoverFilter(t *testing.T, db *gorm.DB) {
 	ship := mk(models.SellerStatusShipped, qc)
 	done := mk(models.SellerStatusDelivered, qc)
 	cut := mk(models.SellerStatusProduction, models.StatusCut)
+	packed1 := mk(models.SellerStatusPacked, qc)
+	packed2 := mk(models.SellerStatusPacked, qc)
+	// Đơn chưa duyệt / đã huỷ: chip hiện trạng thái duyệt / "Đã huỷ", không phải Đã QC.
+	unapproved := mk(models.SellerStatusProduction, qc)
+	cancelled := mk(models.SellerStatusProduction, qc)
+	packedCancelled := mk(models.SellerStatusPacked, qc)
+	if err := db.Model(&models.Order{}).Where("id = ?", unapproved.OrderID).Update("review_status", models.ReviewPending).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&models.Order{}).Where("id = ?", cancelled.OrderID).Update("cancellation_status", models.CancellationSeller).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&models.Order{}).Where("id = ?", packedCancelled.OrderID).Update("review_status", models.ReviewCancelled).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	repo := &OrderItemRepository{db: db}
 	ids := func(rows []models.OrderItem) map[uint]bool {
@@ -57,7 +72,7 @@ func checkItemListHandoverFilter(t *testing.T, db *gorm.DB) {
 	if total != 3 || len(rows) != 3 || !got[qc1.ID] || !got[qc2.ID] || !got[qc3.ID] {
 		t.Fatalf("Đã QC phải ra đúng 3 dòng chưa bàn giao, got total=%d ids=%v", total, got)
 	}
-	for _, x := range []*models.OrderItem{off, ship, done, cut} {
+	for _, x := range []*models.OrderItem{off, ship, done, cut, packed1, packed2, unapproved, cancelled, packedCancelled} {
 		if got[x.ID] {
 			t.Fatalf("Đã QC lọt dòng %d (đơn đã bàn giao / khâu khác)", x.ID)
 		}
@@ -81,16 +96,17 @@ func checkItemListHandoverFilter(t *testing.T, db *gorm.DB) {
 		t.Fatalf("phân trang Đã bàn giao sai: total=%d len=%d", ht, len(h1))
 	}
 
-	// Hai nhóm không giao nhau và cộng lại bằng mọi dòng QC_PASSED.
-	_, allQC := list(ItemFilter{InternalStatus: string(qc), HandedOver: true}, 20, 1)
-	if allQC != 3 {
-		t.Fatalf("QC_PASSED + bàn giao phải ra 3 dòng, got %d", allQC)
+	// "Đã đóng gói": 2 dòng PACKED đã duyệt, chưa huỷ.
+	rows, total = list(ItemFilter{Packed: true}, 20, 1)
+	got = ids(rows)
+	if total != 2 || !got[packed1.ID] || !got[packed2.ID] {
+		t.Fatalf("Đã đóng gói phải ra đúng 2 dòng, got total=%d ids=%v", total, got)
 	}
 
-	// Không lọc: thấy cả 7 (loại trừ chỉ áp dụng khi chọn Đã QC).
+	// Không lọc: thấy cả 12 (loại trừ chỉ áp dụng khi chọn bộ lọc).
 	_, every := list(ItemFilter{}, 20, 1)
-	if every != 7 {
-		t.Fatalf("không lọc phải thấy 7 dòng, got %d", every)
+	if every != 12 {
+		t.Fatalf("không lọc phải thấy 12 dòng, got %d", every)
 	}
 }
 

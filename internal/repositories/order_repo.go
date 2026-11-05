@@ -696,6 +696,7 @@ type ItemFilter struct {
 	// list, which reads the order's seller status, not the item's internal
 	// status — a handed-off item still sits at QC_PASSED internally.
 	HandedOver     bool
+	Packed         bool // nhóm chip "Đã đóng gói" (seller_status PACKED)
 	DesignStatus   string
 	ReviewStatus   string // exact match on the parent order's review_status
 	BatchID        *uint
@@ -1007,6 +1008,14 @@ func (r *OrderItemRepository) CancelActiveForOrder(orderID uint, p ItemCancelPat
 	return res.RowsAffected, res.Error
 }
 
+// chipActiveOrder là vế "đơn đang hiện trạng thái sản xuất" của orderStatusBadge:
+// chưa huỷ (cancellation_status SELLER_CANCELLED hoặc review CANCELLED) và đã
+// duyệt. Sửa ở web thì sửa ở đây.
+func chipActiveOrder(q *gorm.DB) *gorm.DB {
+	return q.Where("orders.review_status = ?", models.ReviewApproved).
+		Where("orders.cancellation_status <> ?", models.CancellationSeller)
+}
+
 func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 	q := r.db.Model(&models.OrderItem{}).
 		Joins("JOIN orders ON orders.id = order_items.order_id AND orders.deleted_at IS NULL")
@@ -1054,15 +1063,21 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 	}
 	if f.InternalStatus != "" {
 		q = q.Where("order_items.internal_status = ?", f.InternalStatus)
-		// "Đã QC" là khâu cuối của sản xuất, và sản phẩm đứng nguyên ở đó khi đơn đã
-		// bàn giao (internal_status không đổi nữa). Nhưng cột Trạng thái của màn
-		// Đơn hàng thôi hiện khâu nội bộ khi đơn đã bàn giao — nó hiện "Đã bàn giao"
-		// (xem orderStatusBadge ở web). Không loại ra thì lọc "Đã QC" ra lẫn cả
-		// dòng chip "Đã bàn giao". Cùng định nghĩa bàn giao với HandedOver bên dưới;
-		// muốn xem nhóm đã bàn giao thì bật HandedOver.
-		if f.InternalStatus == string(models.StatusQCPassed) && !f.HandedOver {
-			q = q.Where("orders.seller_status NOT IN ?", models.HandedOverStatuses)
+		// Cột Trạng thái của màn Đơn hàng chỉ hiện khâu nội bộ ("Đã QC"...) khi đơn
+		// còn trong xưởng, đã duyệt và chưa huỷ (orderStatusBadge ở web). Sản phẩm
+		// thì đứng nguyên ở QC_PASSED khi đơn đã đóng gói / bàn giao, nên so riêng
+		// internal_status sẽ ra lẫn các dòng mà chip ghi "Đã đóng gói", "Đã bàn giao".
+		// Chọn "Đã QC" là lọc đúng nhóm dòng đang hiện chip đó. Chỉ áp cho QC_PASSED:
+		// các khâu trước (PENDING cho số đếm ở dashboard...) chưa bị đổi hành vi.
+		if f.InternalStatus == string(models.StatusQCPassed) {
+			q = q.Where("orders.seller_status = ?", models.SellerStatusProduction)
+			q = chipActiveOrder(q)
 		}
+	}
+	if f.Packed {
+		// Nhóm hiện chip "Đã đóng gói": đơn PACKED, đã duyệt, chưa huỷ.
+		q = q.Where("orders.seller_status = ?", models.SellerStatusPacked)
+		q = chipActiveOrder(q)
 	}
 	if f.HandedOver {
 		q = q.Where("orders.seller_status IN ?", models.HandedOverStatuses)
