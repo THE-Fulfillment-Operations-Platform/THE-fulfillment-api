@@ -61,3 +61,18 @@ func TestBatchList_HandoverFilterPostgres(t *testing.T) {
 	}
 	checkBatchHandoverFilter(t, db)
 }
+
+func TestItemList_QCFilterExcludesHandedOverPostgres(t *testing.T) {
+	db := openHandoverPG(t)
+	if err := db.AutoMigrate(
+		&models.Seller{}, &models.Material{}, &models.SKU{}, &models.SKUMaterial{},
+		&models.Order{}, &models.OrderItem{},
+		&models.Batch{}, &models.BatchItem{}, &models.BatchLink{},
+	); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := db.Create(&models.Seller{Code: "S1", Name: "S1"}).Error; err != nil {
+		t.Fatalf("seller: %v", err)
+	}
+	checkItemListHandoverFilter(t, db)
+}

@@ -1054,6 +1054,15 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 	}
 	if f.InternalStatus != "" {
 		q = q.Where("order_items.internal_status = ?", f.InternalStatus)
+		// "Đã QC" là khâu cuối của sản xuất, và sản phẩm đứng nguyên ở đó khi đơn đã
+		// bàn giao (internal_status không đổi nữa). Nhưng cột Trạng thái của màn
+		// Đơn hàng thôi hiện khâu nội bộ khi đơn đã bàn giao — nó hiện "Đã bàn giao"
+		// (xem orderStatusBadge ở web). Không loại ra thì lọc "Đã QC" ra lẫn cả
+		// dòng chip "Đã bàn giao". Cùng định nghĩa bàn giao với HandedOver bên dưới;
+		// muốn xem nhóm đã bàn giao thì bật HandedOver.
+		if f.InternalStatus == string(models.StatusQCPassed) && !f.HandedOver {
+			q = q.Where("orders.seller_status NOT IN ?", models.HandedOverStatuses)
+		}
 	}
 	if f.HandedOver {
 		q = q.Where("orders.seller_status IN ?", models.HandedOverStatuses)
