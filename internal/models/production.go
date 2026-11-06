@@ -120,21 +120,29 @@ type BatchItem struct {
 
 	// Sequence là STT của phần trong batch (1, 2, 3…), không lưu DB: màn chi
 	// tiết/Excel điền qua NumberBatchItems. Cùng thứ tự với tem QR (tem in theo
-	// thứ tự phần trong batch, mỗi cái một tem). 0 = không đánh số (đơn đã huỷ).
+	// thứ tự phần trong batch, mỗi cái một tem). 0 = không có tem/không đánh số (phần đã huỷ ghi bỏ hoặc đơn đã huỷ).
 	Sequence int `json:"sequence" gorm:"-"`
 }
 
-// NumberBatchItems đánh STT 1..N cho các phần của một batch theo id tăng dần
-// (thứ tự batch_items.id = thứ tự thêm vào batch = thứ tự tem QR). Phần của dòng
-// đã bị huỷ (seller huỷ / duyệt huỷ) KHÔNG được đánh số và không chiếm số — chúng
-// không có trong bảng, Excel và tem. Sắp xếp tại chỗ để mọi nơi gọi cùng thấy
-// một thứ tự; gọi lại nhiều lần cho kết quả y hệt.
+// Labelled là MỘT quy tắc duy nhất cho "phần này có tem / có STT": chưa bị ghi bỏ
+// VÀ dòng đơn không bị huỷ (seller huỷ / duyệt huỷ). Tem QR, bảng và Excel đều
+// theo đúng quy tắc này (web in tem cho các dòng có sequence > 0).
+func (b BatchItem) Labelled() bool {
+	if b.Scrapped() {
+		return false
+	}
+	oi := b.OrderItem
+	return oi == nil || (oi.CancellationStatus != CancellationSeller && oi.CancellationStatus != CancellationApproved)
+}
+
+// NumberBatchItems đánh STT 1..N liên tục, theo batch_items.id tăng dần (thứ tự
+// tem QR), chỉ cho phần thoả Labelled(); phần còn lại có Sequence = 0 và không
+// chiếm số. Sắp xếp tại chỗ; gọi lại nhiều lần cho kết quả y hệt.
 func NumberBatchItems(items []BatchItem) {
 	sort.SliceStable(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 	n := 0
 	for i := range items {
-		oi := items[i].OrderItem
-		if oi != nil && (oi.CancellationStatus == CancellationSeller || oi.CancellationStatus == CancellationApproved) {
+		if !items[i].Labelled() {
 			items[i].Sequence = 0
 			continue
 		}

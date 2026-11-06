@@ -1,6 +1,9 @@
 package models
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestNumberBatchItems(t *testing.T) {
 	mk := func(id uint, cancel CancellationStatus) BatchItem {
@@ -30,5 +33,32 @@ func TestNumberBatchItems(t *testing.T) {
 	NumberBatchItems(items)
 	if items[2].Sequence != 2 {
 		t.Fatalf("renumber changed seq: %d", items[2].Sequence)
+	}
+}
+
+func TestNumberBatchItems_ScrappedAndCancelledInterleaved(t *testing.T) {
+	now := time.Now()
+	mk := func(id uint, cancel CancellationStatus, scrapped bool) BatchItem {
+		bi := BatchItem{OrderItem: &OrderItem{CancellationStatus: cancel}}
+		bi.ID = id
+		if scrapped {
+			bi.ScrappedAt = &now
+		}
+		return bi
+	}
+	items := []BatchItem{
+		mk(1, CancellationNone, false),
+		mk(2, CancellationSeller, false),
+		mk(3, CancellationNone, true),
+		mk(4, CancellationNone, false),
+		mk(5, CancellationApproved, true),
+		mk(6, CancellationNone, false),
+	}
+	NumberBatchItems(items)
+	want := []int{1, 0, 0, 2, 0, 3}
+	for i := range items {
+		if items[i].Sequence != want[i] {
+			t.Fatalf("id %d: seq=%d want %d", items[i].ID, items[i].Sequence, want[i])
+		}
 	}
 }

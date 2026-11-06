@@ -287,3 +287,36 @@ func TestProductionTemplateGrid_SequenceFollowsLabelOrder(t *testing.T) {
 		}
 	}
 }
+
+// Excel: phần scrapped và dòng đơn huỷ xen giữa không có STT, số còn lại liên tục.
+func TestProductionTemplateGrid_SequenceSkipsScrappedAndCancelled(t *testing.T) {
+	now := time.Now()
+	mk := func(id uint, code string, cancel models.CancellationStatus, scrapped bool) models.BatchItem {
+		bi := models.BatchItem{OrderItem: &models.OrderItem{InternalCode: code, CancellationStatus: cancel}}
+		bi.ID = id
+		if scrapped {
+			bi.ScrappedAt = &now
+		}
+		return bi
+	}
+	batch := &models.Batch{Code: "#1", Items: []models.BatchItem{
+		mk(1, "A", models.CancellationNone, false),
+		mk(2, "X", models.CancellationSeller, false),
+		mk(3, "S", models.CancellationNone, true),
+		mk(4, "B", models.CancellationNone, false),
+	}}
+	grid := ProductionTemplateGrid(batch)
+	var got []string
+	for _, r := range grid[1:] {
+		got = append(got, r[0]+"="+r[8])
+	}
+	want := []string{"A=1", "S=", "B=2"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	}
+}
