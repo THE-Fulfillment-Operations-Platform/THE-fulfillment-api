@@ -45,6 +45,7 @@ type EditOrderItemInput struct {
 	// Change the SKU (or the SKU's name in Master Data) instead.
 	DesignURL     *string `json:"design_url"`
 	BackDesignURL *string `json:"back_design_url"`
+	MockupURL     *string `json:"mockup_url"` // seller mockup the QC station compares against
 	EngraveText   *string `json:"engrave_text"`
 	Note          *string `json:"note"` // maps to qc_description (production/QC note)
 }
@@ -158,6 +159,7 @@ func (s *OrderService) updateOrderCore(actor Actor, order *models.Order, in Upda
 			}
 			applyStr(itemChanges, "design_url", &item.DesignURL, iu.DesignURL)
 			applyStr(itemChanges, "back_design_url", &item.BackDesignURL, iu.BackDesignURL)
+			applyStr(itemChanges, "mockup_url", &item.MockupURL, iu.MockupURL)
 			applyStr(itemChanges, "engrave_text", &item.EngraveText, iu.EngraveText)
 			applyStr(itemChanges, "qc_description", &item.QCDescription, iu.Note)
 			if len(itemChanges) > 0 {
