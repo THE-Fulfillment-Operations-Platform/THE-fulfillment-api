@@ -173,12 +173,15 @@ func (r *BatchRepository) FindByID(id uint) (*models.Batch, error) {
 		Preload("Links", func(db *gorm.DB) *gorm.DB { return db.Joins("UpdatedBy").Order("kind asc") }).
 		Preload("Items", func(db *gorm.DB) *gorm.DB {
 			// Seller rides along for the QR label print (tem in tên seller).
-			return activeBatchItems(db).Joins("OrderItem.Order").Joins("OrderItem.Order.Seller").Joins("Material")
+			return activeBatchItems(db).Joins("OrderItem.Order").Joins("OrderItem.Order.Seller").Joins("Material").
+				Order("batch_items.id asc")
 		}).
 		First(&b, id).Error
 	if err != nil {
 		return nil, err
 	}
+	// STT theo thứ tự tem QR — một nguồn cho bảng, tem và Excel.
+	models.NumberBatchItems(b.Items)
 	// Số phần đã huỷ: màn chi tiết phải nói được "0 còn lại · 2 đã huỷ" thay vì
 	// hiện một batch trông như trống rỗng. Danh sách đã điền sẵn trường này; chi
 	// tiết thì chưa, nên batch vừa bị huỷ mở ra không giải thích được gì.

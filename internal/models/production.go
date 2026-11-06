@@ -2,6 +2,7 @@ package models
 
 import (
 	"math/big"
+	"sort"
 	"time"
 )
 
@@ -116,6 +117,30 @@ type BatchItem struct {
 	ScrappedAt   *time.Time `json:"scrapped_at,omitempty" gorm:"index"`
 	ScrapReason  string     `json:"scrap_reason,omitempty" gorm:"size:60"`
 	ScrappedByID *uint      `json:"scrapped_by_id,omitempty"`
+
+	// Sequence là STT của phần trong batch (1, 2, 3…), không lưu DB: màn chi
+	// tiết/Excel điền qua NumberBatchItems. Cùng thứ tự với tem QR (tem in theo
+	// thứ tự phần trong batch, mỗi cái một tem). 0 = không đánh số (đơn đã huỷ).
+	Sequence int `json:"sequence" gorm:"-"`
+}
+
+// NumberBatchItems đánh STT 1..N cho các phần của một batch theo id tăng dần
+// (thứ tự batch_items.id = thứ tự thêm vào batch = thứ tự tem QR). Phần của dòng
+// đã bị huỷ (seller huỷ / duyệt huỷ) KHÔNG được đánh số và không chiếm số — chúng
+// không có trong bảng, Excel và tem. Sắp xếp tại chỗ để mọi nơi gọi cùng thấy
+// một thứ tự; gọi lại nhiều lần cho kết quả y hệt.
+func NumberBatchItems(items []BatchItem) {
+	sort.SliceStable(items, func(i, j int) bool { return items[i].ID < items[j].ID })
+	n := 0
+	for i := range items {
+		oi := items[i].OrderItem
+		if oi != nil && (oi.CancellationStatus == CancellationSeller || oi.CancellationStatus == CancellationApproved) {
+			items[i].Sequence = 0
+			continue
+		}
+		n++
+		items[i].Sequence = n
+	}
 }
 
 // Scrapped reports whether this production part was written off after a QC fail.

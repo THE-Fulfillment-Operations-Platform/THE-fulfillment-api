@@ -163,6 +163,8 @@ func TestProductionTemplateGrid(t *testing.T) {
 	}
 	batch.CreatedAt = time.Date(2026, 7, 6, 10, 0, 0, 0, time.UTC)
 
+	// Cột "Số thứ tự" là STT tự đánh (vị trí trong batch), KHÔNG phải
+	// ProductionSequence nhập tay (5 ở trên) — nên dòng đầu ra "1".
 	grid := ProductionTemplateGrid(batch)
 	if len(grid) != 2 {
 		t.Fatalf("want header + 1 data row, got %d rows", len(grid))
@@ -186,7 +188,7 @@ func TestProductionTemplateGrid(t *testing.T) {
 
 	wantRow := []string{
 		"ORD-000001_1", "#101001", "2026-07-06", "Etsy-1", "WOOD-01", "Gỗ",
-		"Sign 20cm khắc tên", "IMG-77", "5", "3", "https://d/1", "https://m/1",
+		"Sign 20cm khắc tên", "IMG-77", "1", "3", "https://d/1", "https://m/1",
 		"ORD-000001_1", "John Doe", "wood-01.pdf", "https://p/1", "https://c/1",
 	}
 	row := grid[1]
@@ -249,5 +251,39 @@ func TestProductionTemplateGrid_BackDesignColumnOnlyWhenNeeded(t *testing.T) {
 	// The shared header slice must not have been modified by the append.
 	if again := ProductionTemplateGrid(&models.Batch{Code: "#1", Items: []models.BatchItem{{OrderItem: &front}}}); len(again[0]) != 17 {
 		t.Fatalf("header leaked the extra column into later exports: %v", again[0])
+	}
+}
+
+// TestProductionTemplateGrid_SequenceFollowsLabelOrder: STT trong Excel là vị trí
+// của item trong batch theo id tăng dần (thứ tự tem QR), bỏ qua dòng đã huỷ và
+// không phụ thuộc thứ tự mảng đưa vào.
+func TestProductionTemplateGrid_SequenceFollowsLabelOrder(t *testing.T) {
+	mk := func(id uint, code string, cancel models.CancellationStatus) models.BatchItem {
+		bi := models.BatchItem{OrderItem: &models.OrderItem{InternalCode: code, CancellationStatus: cancel, ProductionSequence: 99}}
+		bi.ID = id
+		return bi
+	}
+	batch := &models.Batch{
+		Code: "#1",
+		Items: []models.BatchItem{
+			mk(30, "C", models.CancellationNone),
+			mk(10, "A", models.CancellationNone),
+			mk(20, "X", models.CancellationSeller), // huỷ: không có dòng, không chiếm số
+			mk(25, "B", models.CancellationNone),
+		},
+	}
+	grid := ProductionTemplateGrid(batch)
+	var got []string
+	for _, r := range grid[1:] {
+		got = append(got, r[0]+"="+r[8])
+	}
+	want := []string{"A=1", "B=2", "C=3"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
 	}
 }

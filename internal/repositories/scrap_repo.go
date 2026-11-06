@@ -121,6 +121,7 @@ func (r *BatchRepository) AllBatchItemsDetailed(batchID uint) ([]models.BatchIte
 		Where("batch_items.batch_id = ?", batchID).
 		Order("batch_items.id asc").
 		Find(&items).Error
+	models.NumberBatchItems(items)
 	return items, err
 }
 

@@ -827,8 +827,7 @@ var productionTemplateHeaders = []string{
 // are back, unchanged; do not trim them on a "chủ yếu" again.
 const productionBackDesignHeader = "Link design mặt sau"
 
-// seqStr renders a production sequence, leaving an unassigned (0) sequence blank
-// so the legacy sheet does not show a spurious ordering position.
+// seqStr renders the batch sequence (STT), leaving 0 (not numbered) blank.
 func seqStr(n int) string {
 	if n == 0 {
 		return ""
@@ -848,6 +847,10 @@ func ProductionTemplateGrid(batch *models.Batch) [][]string {
 	var backs []string // per data row, for the optional back-design column
 	twoSided := false
 
+	// Cùng hàm đánh STT với API chi tiết batch: cột "Số thứ tự" của Excel khớp
+	// cột STT trên bảng và thứ tự tem QR. Gọi lại ở đây để hàm thuần này đúng
+	// kể cả khi caller đưa vào batch chưa đánh số.
+	models.NumberBatchItems(batch.Items)
 	for _, bi := range batch.Items {
 		it := bi.OrderItem
 		if it == nil || itemCancelled(it.CancellationStatus) {
@@ -880,23 +883,23 @@ func ProductionTemplateGrid(batch *models.Batch) [][]string {
 			cutURL = it.CutFileURL
 		}
 		grid = append(grid, []string{
-			it.InternalCode,               // Mã nội bộ
-			batch.Code,                    // SỐ Batch
-			date,                          // Ngày
-			orderID,                       // Order ID
-			it.SKUCode,                    // SKU
-			materialName,                  // Loại VL
-			it.QCDescription,              // Mô tả Sp để QC
-			it.ImageCode,                  // Mã ảnh
-			seqStr(it.ProductionSequence), // Số thứ tự (blank when unassigned)
-			itoa(it.Quantity),             // Số lượng
-			it.DesignURL,                  // Link ảnh
-			it.MockupURL,                  // Mock up
-			it.InternalCode,               // Mã nội bộ (legacy 2nd copy)
-			customer,                      // Tên khách
-			it.ProductionFileName,         // Tên File
-			printURL,                      // Link in (batch link overrides legacy item link)
-			cutURL,                        // Link cắt (batch link overrides legacy item link)
+			it.InternalCode,       // Mã nội bộ
+			batch.Code,            // SỐ Batch
+			date,                  // Ngày
+			orderID,               // Order ID
+			it.SKUCode,            // SKU
+			materialName,          // Loại VL
+			it.QCDescription,      // Mô tả Sp để QC
+			it.ImageCode,          // Mã ảnh
+			seqStr(bi.Sequence),   // Số thứ tự = vị trí trong batch = thứ tự tem QR
+			itoa(it.Quantity),     // Số lượng
+			it.DesignURL,          // Link ảnh
+			it.MockupURL,          // Mock up
+			it.InternalCode,       // Mã nội bộ (legacy 2nd copy)
+			customer,              // Tên khách
+			it.ProductionFileName, // Tên File
+			printURL,              // Link in (batch link overrides legacy item link)
+			cutURL,                // Link cắt (batch link overrides legacy item link)
 		})
 	}
 	if twoSided {
