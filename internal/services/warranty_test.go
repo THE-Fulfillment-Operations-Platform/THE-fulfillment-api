@@ -257,7 +257,9 @@ func TestCreateWarranty_WhichOrdersGetTheButton(t *testing.T) {
 		{"delivered", mk("E1", models.SellerStatusDelivered, models.TrackingDelivered, models.ReviewApproved), true},
 		{"carrier undelivered", mk("E2", models.SellerStatusShipped, models.TrackingUndelivered, models.ReviewApproved), true},
 		{"carrier exception", mk("E3", models.SellerStatusShipped, models.TrackingException, models.ReviewApproved), true},
-		{"in transit", mk("E4", models.SellerStatusShipped, models.TrackingInTransit, models.ReviewApproved), false},
+		{"in transit (đã bàn giao, luật 07/11)", mk("E4", models.SellerStatusShipped, models.TrackingInTransit, models.ReviewApproved), true},
+		{"xuất kho, chưa có tracking (07/11)", mk("E7", models.SellerStatusHandedOff, models.TrackingNone, models.ReviewApproved), true},
+		{"đã đóng gói, chưa xuất kho", mk("E8", models.SellerStatusPacked, models.TrackingNone, models.ReviewApproved), false},
 		{"in production", mk("E5", models.SellerStatusProduction, models.TrackingNone, models.ReviewApproved), false},
 		{"pending review", mk("E6", models.SellerStatusProduction, models.TrackingNone, models.ReviewPending), false},
 	}

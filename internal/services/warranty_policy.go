@@ -97,17 +97,13 @@ func (p WarrantyPolicyConfig) Eligible(o *models.Order) (bool, string) {
 	case models.CancellationSeller, models.CancellationApproved:
 		return false, "Đơn đã huỷ"
 	}
-	if o.SellerStatus == models.SellerStatusDelivered || o.TrackingStatus == models.TrackingDelivered {
+	// Nghĩa chốt 07/11/2026: mọi đơn đã xuất kho / bàn giao trở đi đều bảo hành
+	// được, không đợi tracking báo DELIVERED (đơn xuất kho bằng quét XK thường
+	// không có tracking). DELIVERED (seller hoặc tracking) vẫn tính như cũ.
+	if o.SellerStatus.HandedOver() || o.TrackingStatus == models.TrackingDelivered {
 		return true, ""
 	}
-	if o.SellerStatus.HandedOver() {
-		for _, t := range p.ReturnedTrackingStatuses {
-			if o.TrackingStatus == t {
-				return true, ""
-			}
-		}
-	}
-	return false, "Chỉ bảo hành được đơn đã giao hoặc đơn hãng báo trả về / giao không thành"
+	return false, "Chỉ bảo hành được đơn đã xuất kho/bàn giao"
 }
 
 // BlockedByOpen: the chain still has an unfinished warranty order (open) and this
@@ -144,20 +140,12 @@ func (p WarrantyPolicyConfig) CanPress(r models.Role, o *models.Order, open *mod
 //
 // db must be a query that already joins `orders` (the item list does).
 func (p WarrantyPolicyConfig) EligibleScope(db *gorm.DB) *gorm.DB {
-	returned := make([]string, 0, len(p.ReturnedTrackingStatuses))
-	for _, t := range p.ReturnedTrackingStatuses {
-		returned = append(returned, string(t))
-	}
-	if len(returned) == 0 {
-		returned = []string{""} // an empty IN () is invalid SQL; "" never matches NOT NULL tracking
-	}
 	return db.Where(
 		"(orders.review_status = ? AND COALESCE(orders.cancellation_status, '') NOT IN ? AND "+
-			"(orders.seller_status = ? OR orders.tracking_status = ? OR (orders.seller_status IN ? AND orders.tracking_status IN ?)))",
+			"(orders.seller_status IN ? OR orders.tracking_status = ?))",
 		string(models.ReviewApproved),
 		[]string{string(models.CancellationSeller), string(models.CancellationApproved)},
-		string(models.SellerStatusDelivered), string(models.TrackingDelivered),
-		models.HandedOverStatuses, returned, // HandedOverStatuses = Rank-based, from models.AllSellerStatuses
+		models.HandedOverStatuses, string(models.TrackingDelivered), // HandedOverStatuses = Rank-based, from models.AllSellerStatuses
 	)
 }
 

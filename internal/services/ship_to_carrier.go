@@ -70,13 +70,17 @@ type ShipSendOptions struct {
 	ShipOptions
 	ManualHandoff bool `json:"manual_handoff"`
 	// ExportOnly is the "quét xuất kho" (XK) scan: the order has left the
-	// warehouse, nothing more. It only COUNTS and records that fact — no THE call
-	// (so no weight / box / HS condition: those belong to the label station, where
-	// the parcel is weighed) and no wait for QC to be complete (most goods are done
-	// by the time they reach the door, and when the system still shows some
-	// product in production the scan goes through with a warning instead of
-	// holding the truck). Only scan-by-scan (ShipScannedOrderWith) honours it.
+	// warehouse, nothing more. It records that fact — no THE call (so no weight /
+	// box / HS condition: those belong to the label station). Since 07/11/2026 it
+	// DOES wait for QC: an order with products not QC-passed (or in a basket) is
+	// refused with 409 unless an OWNER / ADMIN forces it (ForceUnQC + reason).
+	// Only scan-by-scan (ShipScannedOrderWith) and the bulk export honour it.
 	ExportOnly bool `json:"export_only"`
+	// ForceUnQC lets an OWNER / ADMIN export an order that still has products not
+	// QC-passed (the truck is waiting). Needs ForceReason; the role is checked in
+	// the service, never trusted from the web.
+	ForceUnQC   bool   `json:"force_unqc"`
+	ForceReason string `json:"force_reason"`
 }
 
 // ShipOrdersToCarrier hands finished orders to the carrier.
@@ -123,7 +127,7 @@ func (s *PackingService) ShipOrdersToCarrierWith(ctx context.Context, actor Acto
 		}
 		// "Xuất kho" (XK): the goods leave the warehouse. Nothing is created on THE.
 		if opts.ExportOnly {
-			sc, err := s.exportScanned(ctx, actor, order)
+			sc, err := s.exportScanned(ctx, actor, order, opts)
 			if err != nil {
 				out.Skipped = append(out.Skipped, SkippedShipOrder{OrderID: id, InternalCode: order.InternalCode, Reason: skippedFor(order, err).Reason})
 				continue
@@ -240,7 +244,7 @@ func (s *PackingService) ShipScannedOrderWith(ctx context.Context, actor Actor, 
 		return nil, err
 	}
 	if opts.ExportOnly {
-		return s.exportScanned(ctx, actor, order)
+		return s.exportScanned(ctx, actor, order, opts)
 	}
 	cfg, cli, err := s.theFor(opts)
 	if err != nil {
@@ -297,9 +301,10 @@ func (s *PackingService) ShipScannedOrderWith(ctx context.Context, actor Actor, 
 // exportNote is the handoff note of an XK scan.
 const exportNote = "Quét xuất kho"
 
-// exportBlockReason is the ONLY thing that stops an XK scan: an order that cannot
-// physically be leaving (unapproved, cancelled, already recorded as out) or that
-// has nothing in it. QC progress and weight / box data are deliberately not here.
+// exportBlockReason stops an XK scan for an order that cannot physically be
+// leaving (unapproved, cancelled, already recorded as out) or has nothing in it.
+// Weight / box data are deliberately not here. QC progress is checked apart, in
+// exportQCBlock, because OWNER / ADMIN may override it.
 func exportBlockReason(o *models.Order) string {
 	if o.ReviewStatus != models.ReviewApproved {
 		return "Đơn chưa được duyệt"
@@ -316,23 +321,58 @@ func exportBlockReason(o *models.Order) string {
 	return ""
 }
 
-// exportScanned records one XK scan: the order left the warehouse. Same end state
-// as a send (a Handoff row + seller_status HANDED_OFF) so the journey screen and
-// the tracking gate keep working, but without creating anything on THE.
-func (s *PackingService) exportScanned(ctx context.Context, actor Actor, order *models.Order) (*ScannedShip, error) {
-	if reason := exportBlockReason(order); reason != "" {
-		return nil, apperr.Conflict(reason)
-	}
-	// The box must not leave carrying a label THE has killed.
-	if reason := s.the.ExportLabelBlock(ctx, order.ID); reason != "" {
-		return nil, apperr.Conflict(reason)
-	}
-	live := activeOrderItems(order.Items)
+// canForceExport: only OWNER and ADMIN may export an order that is not QC-passed.
+func canForceExport(a Actor) bool {
+	return a.Role == models.RoleOwner || a.Role == models.RoleAdmin
+}
+
+// exportQCBlock returns the 409 text when live items are not all QC-passed, plus
+// the unfinished / total counts.
+func exportQCBlock(o *models.Order) (string, int, int) {
+	live := activeOrderItems(o.Items)
 	unfinished := 0
 	for _, it := range live {
 		if it.InternalStatus != models.StatusQCPassed {
 			unfinished++
 		}
+	}
+	if unfinished == 0 {
+		return "", 0, len(live)
+	}
+	return fmt.Sprintf("Đơn %s còn %d/%d sản phẩm chưa QC đạt, chưa xuất kho được", o.InternalCode, unfinished, len(live)), unfinished, len(live)
+}
+
+// exportScanned records one XK scan: the order left the warehouse. Same end state
+// as a send (a Handoff row + seller_status HANDED_OFF) so the journey screen and
+// the tracking gate keep working, but without creating anything on THE.
+// An order with products not QC-passed (or waiting in a basket) is refused with
+// 409; OWNER / ADMIN may force it with a reason, which is audited.
+func (s *PackingService) exportScanned(ctx context.Context, actor Actor, order *models.Order, opts ShipSendOptions) (*ScannedShip, error) {
+	if reason := exportBlockReason(order); reason != "" {
+		return nil, apperr.Conflict(reason)
+	}
+	qcReason, unfinished, total := exportQCBlock(order)
+	forced := false
+	if qcReason == "" {
+		if reason := basketBlockReason(s.repo, order.ID); reason != "" {
+			qcReason = reason
+		}
+	}
+	if qcReason != "" {
+		if !opts.ForceUnQC {
+			return nil, apperr.Conflict(qcReason)
+		}
+		if !canForceExport(actor) {
+			return nil, apperr.Forbidden("Chỉ Owner hoặc Admin được xuất kho đơn chưa QC đạt")
+		}
+		if strings.TrimSpace(opts.ForceReason) == "" {
+			return nil, apperr.BadRequest("Hãy nhập lý do xuất kho đơn chưa QC đạt")
+		}
+		forced = true
+	}
+	// The box must not leave carrying a label THE has killed.
+	if reason := s.the.ExportLabelBlock(ctx, order.ID); reason != "" {
+		return nil, apperr.Conflict(reason)
 	}
 	handoff, err := s.shipOneNote(actor, order, exportNote)
 	if err != nil {
@@ -340,15 +380,16 @@ func (s *PackingService) exportScanned(ctx context.Context, actor Actor, order *
 	}
 	// The goods are out: a waiting basket (giỏ chờ) of this order has nothing left to wait for.
 	_ = s.repo.Basket.ReleaseForOrders([]uint{order.ID}, actor.IDPtr(), "Đơn đã xuất kho", time.Now())
-	if unfinished > 0 {
+	if forced {
 		s.audit.Log(actor, "ORDER_EXPORT_UNFINISHED", "order", &order.ID,
-			fmt.Sprintf("Đơn %s xuất kho khi hệ thống còn %d/%d sản phẩm chưa QC đạt", order.InternalCode, unfinished, len(live)), nil)
+			fmt.Sprintf("%s vượt chặn QC: đơn %s xuất kho khi còn %d/%d sản phẩm chưa QC đạt (hoặc đang ở giỏ chờ). Lý do: %s",
+				actor.Email, order.InternalCode, unfinished, total, strings.TrimSpace(opts.ForceReason)), nil)
 	}
 	s.tracking.RegisterOrderAsync(order)
 	return &ScannedShip{
 		OrderID: order.ID, InternalCode: order.InternalCode, StoreOrderID: order.StoreOrderID,
 		SellerName: order.Seller.Name, HandoffCode: handoff.Code,
-		Exported: true, UnfinishedItems: unfinished, TotalItems: len(live),
+		Exported: true, UnfinishedItems: unfinished, TotalItems: total,
 	}, nil
 }
 
