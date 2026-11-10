@@ -212,6 +212,9 @@ type ScannedShip struct {
 	// LabelOnly marks a scan that only created / found the THE label: the order
 	// has NOT left the warehouse yet (no handoff) — it still needs its "Xuất kho".
 	LabelOnly bool `json:"label_only,omitempty"`
+	// AlreadyExported: with LabelOnly, the order had already been scanned out
+	// ("Xuất kho") before the label was made — the UI must not say "chưa xuất kho".
+	AlreadyExported bool `json:"already_exported,omitempty"`
 	// Exported marks an XK scan (ExportOnly). UnfinishedItems / TotalItems then say
 	// how many live products the system still showed as not QC-passed when the
 	// order went out (0 = nothing to warn about).
@@ -274,6 +277,7 @@ func (s *PackingService) ShipScannedOrderWith(ctx context.Context, actor Actor, 
 		return &ScannedShip{
 			OrderID: order.ID, InternalCode: order.InternalCode, StoreOrderID: order.StoreOrderID,
 			SellerName: order.Seller.Name, THE: outcome, LabelOnly: true,
+			AlreadyExported: order.SellerStatus.HandedOver(),
 		}, nil
 	}
 
