@@ -146,7 +146,9 @@ func (h *Handlers) SetBatchLink(c *gin.Context) {
 
 // DeleteBatch removes a not-yet-produced batch (for a split parent: the whole
 // child tree), releasing its items back to the batching pool. Batches already
-// printed/cut/QC'd are refused — that is the scrap/close flow's territory.
+// printed/cut/QC'd are refused — that is the scrap/close flow's territory —
+// unless every produced part belongs to an approved-cancelled order item (see
+// BatchService.Delete).
 // DELETE /api/batches/:id
 func (h *Handlers) DeleteBatch(c *gin.Context) {
 	id, ok := uintParam(c, "id")

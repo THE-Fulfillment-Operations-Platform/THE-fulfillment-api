@@ -134,6 +134,14 @@ func recomputeOrderItemStatus(repo *repositories.Repositories, itemID uint, acto
 // The returned map carries the status EVERY known item ended on, unchanged ones
 // included, so a caller holding the item in memory never has to re-read it just
 // to learn what it became. Items missing from the map were not found.
+//
+// Item đã DUYỆT HUỶ (cancellation_status = APPROVED) giữ nguyên internal_status:
+// từ lúc duyệt, nó là bằng chứng hàng đã sản xuất tới đâu (CUT, QC_PASSED…), thứ
+// có thể dùng để tính tiền seller, chứ không còn là việc đang chạy. Không luồng
+// nào còn đẩy phần của item đã huỷ (bảng sản xuất bỏ qua, QC từ chối), nên roll-up
+// trước giờ vẫn ra đúng giá trị cũ — trừ khi phần bị xoá cùng batch (xoá batch chỉ
+// còn hàng đã huỷ): lúc đó "không còn phần" sẽ kéo item về PENDING và xoá mất bằng
+// chứng. Ở đây chặn đúng chỗ ấy cho mọi đường gọi, không riêng xoá batch.
 func recomputeOrderItemStatuses(repo *repositories.Repositories, itemIDs []uint, actor Actor) (map[uint]models.InternalStatus, error) {
 	final := map[uint]models.InternalStatus{}
 	if len(itemIDs) == 0 {
@@ -143,7 +151,7 @@ func recomputeOrderItemStatuses(repo *repositories.Repositories, itemIDs []uint,
 	if err != nil {
 		return final, err
 	}
-	current, err := repo.OrderItem.InternalStatusByIDs(itemIDs)
+	states, err := repo.OrderItem.RollupStatesByIDs(itemIDs)
 	if err != nil {
 		return final, err
 	}
@@ -152,9 +160,14 @@ func recomputeOrderItemStatuses(repo *repositories.Repositories, itemIDs []uint,
 	// statement per distinct status (at most four) instead of one per item.
 	moved := map[models.InternalStatus][]uint{}
 	for _, id := range itemIDs {
-		cur, ok := current[id]
+		st, ok := states[id]
 		if !ok {
 			continue // item not found (deleted) — nothing to roll up
+		}
+		cur := st.InternalStatus
+		if st.CancellationStatus == models.CancellationApproved {
+			final[id] = cur // đã duyệt huỷ — giữ nguyên trạng thái sản xuất
+			continue
 		}
 		newStatus := deriveItemStatusesFromRanks(partStatuses[id])
 		final[id] = newStatus

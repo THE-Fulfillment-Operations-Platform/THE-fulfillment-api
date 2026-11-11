@@ -767,16 +767,65 @@ func (r *BatchRepository) ExistingActiveItemMaterial(orderItemIDs []uint) (map[u
 // ---------- Batch delete ----------
 
 // StartedPartCount counts parts across the given batches that production has
-// already touched — status beyond PENDING, or written off at QC. The delete
-// guard refuses while this is non-zero: a deleted batch must never take the
-// record of produced (or scrapped) physical goods with it. Cancelled lines are
-// counted too — their part can only have advanced if production ran.
+// already touched — status beyond PENDING, or written off at QC. Cancelled lines
+// are counted too — their part can only have advanced if production ran. Batch
+// scrap uses it to send a never-started batch to delete instead; the delete
+// guard itself now reads PartsForDelete, because it must tell a produced part of
+// an approved-cancelled line (deletable) from one of a live line (blocked).
 func (r *BatchRepository) StartedPartCount(batchIDs []uint) (int64, error) {
 	var n int64
 	err := r.db.Model(&models.BatchItem{}).
 		Where("batch_id IN ? AND (status <> ? OR scrapped_at IS NOT NULL)", batchIDs, models.StatusPending).
 		Count(&n).Error
 	return n, err
+}
+
+// BatchDeletePart là một phần sản xuất đúng như cửa chặn xoá batch và nhật ký
+// BATCH_DELETE cần thấy: trạng thái phần, có bị ghi bỏ không, và dòng đơn của
+// nó đã được duyệt huỷ chưa.
+type BatchDeletePart struct {
+	ID          uint                  `json:"batch_item_id"`
+	BatchID     uint                  `json:"batch_id"`
+	OrderItemID uint                  `json:"order_item_id"`
+	ItemCode    string                `json:"item_code"`
+	MaterialID  uint                  `json:"material_id"`
+	Attempt     int                   `json:"attempt"`
+	Status      models.InternalStatus `json:"status"`
+	Scrapped    bool                  `json:"scrapped"`
+	// CancellationStatus của dòng đơn; rỗng khi dòng đơn không còn (đã xoá).
+	CancellationStatus models.CancellationStatus `json:"cancellation_status"`
+}
+
+// Started: sản xuất đã chạm tới phần này — qua PENDING, hoặc đã ghi bỏ ở QC.
+// Cùng định nghĩa với StartedPartCount.
+func (p BatchDeletePart) Started() bool {
+	return p.Status != models.StatusPending || p.Scrapped
+}
+
+// CancelApproved: dòng đơn của phần đã được duyệt huỷ.
+func (p BatchDeletePart) CancelApproved() bool {
+	return p.CancellationStatus == models.CancellationApproved
+}
+
+// PartsForDelete đọc mọi phần (còn sống hay đã ghi bỏ) của các batch, kèm mã và
+// trạng thái huỷ của dòng đơn, trong MỘT câu. Dòng đơn đã xoá mềm thì
+// cancellation_status rỗng — cửa chặn coi như chưa huỷ, tức là chặn.
+func (r *BatchRepository) PartsForDelete(batchIDs []uint) ([]BatchDeletePart, error) {
+	var rows []BatchDeletePart
+	if len(batchIDs) == 0 {
+		return rows, nil
+	}
+	err := r.db.Table("batch_items").
+		Select("batch_items.id, batch_items.batch_id, batch_items.order_item_id, "+
+			"batch_items.material_id, batch_items.attempt, batch_items.status, "+
+			"batch_items.scrapped_at IS NOT NULL AS scrapped, "+
+			"COALESCE(order_items.internal_code, '') AS item_code, "+
+			"COALESCE(order_items.cancellation_status, '') AS cancellation_status").
+		Joins("LEFT JOIN order_items ON order_items.id = batch_items.order_item_id AND order_items.deleted_at IS NULL").
+		Where("batch_items.batch_id IN ? AND batch_items.deleted_at IS NULL", batchIDs).
+		Order("batch_items.id").
+		Scan(&rows).Error
+	return rows, err
 }
 
 // OrderItemIDsForBatches returns the distinct order items scheduled into any of

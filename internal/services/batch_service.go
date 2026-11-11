@@ -558,10 +558,19 @@ func cutNeedsPrint(code string, current, next models.InternalStatus) error {
 // can be re-grouped).
 //
 // The guard is deliberately narrow: the batch must still be PENDING (and not
-// closed), and every part untouched (PENDING, not scrapped).
-// A batch that was printed or cut represents physical goods and spent material —
-// that is the scrap/close flow's job, not delete's. Any tem QR printed for the
-// deleted batch becomes waste paper; the replacement batch prints its own.
+// closed), and every part either untouched (PENDING, not scrapped) or belonging
+// to an order item whose cancellation was APPROVED.
+// A batch that was printed or cut for a live order represents physical goods and
+// spent material — that is the scrap/close flow's job, not delete's. Any tem QR
+// printed for the deleted batch becomes waste paper; the replacement batch prints
+// its own.
+//
+// Ngoại lệ hàng đã duyệt huỷ (anh Kiên 11/11, batch #102178/#102183): hàng đã
+// in/cắt/QC rồi đơn mới bị huỷ và huỷ được duyệt. Màn chi tiết ẩn dòng đã huỷ nên
+// batch trông rỗng mà không xoá được. Phần của item đã duyệt huỷ không còn là
+// việc của xưởng, nên không chặn xoá; nhưng item giữ nguyên internal_status
+// (recomputeOrderItemStatuses không hạ item đã duyệt huỷ) làm bằng chứng đã sản
+// xuất, và nhật ký BATCH_DELETE ghi lại từng phần bị xoá cùng trạng thái của nó.
 func (s *BatchService) Delete(actor Actor, batchID uint) error {
 	batch, err := s.repo.Batch.FindLite(batchID)
 	if err != nil {
@@ -570,7 +579,11 @@ func (s *BatchService) Delete(actor Actor, batchID uint) error {
 		}
 		return apperr.Internal("lookup failed").Wrap(err)
 	}
-	var itemIDs []uint
+	var (
+		itemIDs []uint
+		parts   []repositories.BatchDeletePart
+		links   []models.BatchLink
+	)
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
 		txRepo := repositories.New(tx)
 		ids := []uint{batch.ID}
@@ -591,11 +604,13 @@ func (s *BatchService) Delete(actor Actor, batchID uint) error {
 				return apperr.Unprocessable("Batch " + b.Code + " đã đóng — được giữ làm lịch sử sản xuất, không xoá.")
 			}
 		}
-		started, err := txRepo.Batch.StartedPartCount(ids)
+		// Một phần đã sản xuất (hoặc ghi bỏ ở QC) chỉ được đi theo batch khi dòng
+		// đơn của nó đã DUYỆT HUỶ. Còn một phần như thế của dòng chưa huỷ là chặn.
+		parts, err = txRepo.Batch.PartsForDelete(ids)
 		if err != nil {
 			return err
 		}
-		if started > 0 {
+		if blocked := deleteBlockingParts(parts); len(blocked) > 0 {
 			return apperr.Unprocessable("Batch có phần đã được sản xuất hoặc đã huỷ tại QC — chỉ xoá được batch chưa sản xuất.")
 		}
 
@@ -609,11 +624,12 @@ func (s *BatchService) Delete(actor Actor, batchID uint) error {
 		// stale URL survives on the item and the production export's item-level
 		// fallback would offer the deleted batch's file to the next batch.
 		for _, id := range ids {
-			links, err := txRepo.Batch.LinksForBatch(id)
+			batchLinks, err := txRepo.Batch.LinksForBatch(id)
 			if err != nil {
 				return err
 			}
-			for _, link := range links {
+			links = append(links, batchLinks...)
+			for _, link := range batchLinks {
 				column := "print_file_url"
 				if link.Kind == models.BatchLinkCut {
 					column = "cut_file_url"
@@ -643,13 +659,69 @@ func (s *BatchService) Delete(actor Actor, batchID uint) error {
 	}
 
 	// The released items derive their status from whatever parts remain in other
-	// batches — none left means back to PENDING and the batching pool.
+	// batches — none left means back to PENDING and the batching pool. Items whose
+	// cancellation was approved are skipped by the roll-up itself and keep the
+	// status they reached (CUT, QC_PASSED…).
 	_, _ = recomputeOrderItemStatuses(s.repo, itemIDs, actor)
 
-	s.audit.Log(actor, "BATCH_DELETE", "batch", &batch.ID,
-		fmt.Sprintf("Deleted batch %s", batch.Code),
-		models.JSONMap{"released_item_ids": itemIDs})
+	summary, meta := batchDeleteAudit(batch.Code, itemIDs, parts, links)
+	s.audit.Log(actor, "BATCH_DELETE", "batch", &batch.ID, summary, meta)
 	return nil
+}
+
+// deleteBlockingParts trả các phần chặn xoá batch: đã sản xuất (qua PENDING hoặc
+// đã ghi bỏ ở QC) mà dòng đơn CHƯA duyệt huỷ.
+func deleteBlockingParts(parts []repositories.BatchDeletePart) []repositories.BatchDeletePart {
+	var blocked []repositories.BatchDeletePart
+	for _, p := range parts {
+		if p.Started() && !p.CancelApproved() {
+			blocked = append(blocked, p)
+		}
+	}
+	return blocked
+}
+
+// batchDeleteAudit dựng tóm tắt + metadata cho nhật ký BATCH_DELETE: từng phần bị
+// xoá với trạng thái của nó, các item giữ nguyên trạng thái vì đã duyệt huỷ, link
+// in/cắt của batch, và cờ only_cancelled_items = mọi phần đều thuộc dòng đơn đã
+// duyệt huỷ (batch "chỉ còn hàng đã huỷ").
+func batchDeleteAudit(code string, itemIDs []uint, parts []repositories.BatchDeletePart, links []models.BatchLink) (string, models.JSONMap) {
+	onlyCancelled := len(parts) > 0
+	producedCancelled := 0
+	keptSeen := map[uint]bool{}
+	keptItemIDs := []uint{}
+	for _, p := range parts {
+		if !p.CancelApproved() {
+			onlyCancelled = false
+			continue
+		}
+		if p.Started() {
+			producedCancelled++
+		}
+		if !keptSeen[p.OrderItemID] {
+			keptSeen[p.OrderItemID] = true
+			keptItemIDs = append(keptItemIDs, p.OrderItemID)
+		}
+	}
+	linkMeta := make([]models.JSONMap, 0, len(links))
+	for _, l := range links {
+		linkMeta = append(linkMeta, models.JSONMap{"kind": string(l.Kind), "url": l.URL})
+	}
+	if parts == nil {
+		parts = []repositories.BatchDeletePart{}
+	}
+	summary := fmt.Sprintf("Deleted batch %s", code)
+	if onlyCancelled {
+		summary += " (chỉ còn hàng đã duyệt huỷ)"
+	}
+	return summary, models.JSONMap{
+		"released_item_ids":        itemIDs,
+		"parts":                    parts,
+		"only_cancelled_items":     onlyCancelled,
+		"produced_cancelled_parts": producedCancelled,
+		"status_kept_item_ids":     keptItemIDs,
+		"links":                    linkMeta,
+	}
 }
 
 // ---------- Batch links (print / cut) ----------

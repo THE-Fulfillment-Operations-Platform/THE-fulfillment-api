@@ -699,9 +699,13 @@ paths:
       tags: [Batches]
       summary: Xoá batch chưa sản xuất, trả sản phẩm về hàng chờ gom batch
       description: >-
-        Chỉ xoá được batch còn PENDING toàn bộ (chưa in/cắt, chưa QC, chưa có
-        hàng huỷ). Batch đã vào sản xuất trả 422 — hàng lỗi/bỏ xử lý qua flow
-        QC scrap. Sản phẩm được thả về màn gom batch để gom lại.
+        Chỉ xoá được batch có header PENDING, chưa đóng, và mọi phần hoặc chưa
+        sản xuất (chưa in/cắt, chưa QC, chưa ghi bỏ) hoặc thuộc dòng đơn đã duyệt
+        huỷ (cancellation_status APPROVED). Còn một phần đã sản xuất của dòng
+        chưa huỷ thì trả 422 — hàng lỗi/bỏ xử lý qua flow QC scrap. Sản phẩm
+        chưa huỷ được thả về màn gom batch để gom lại; sản phẩm đã duyệt huỷ giữ
+        nguyên internal_status (bằng chứng đã sản xuất). Nhật ký BATCH_DELETE ghi
+        từng phần bị xoá, trạng thái của nó và cờ only_cancelled_items.
       responses:
         '200': { description: Đã xoá }
         '422': { description: Batch đã vào sản xuất / đã đóng }

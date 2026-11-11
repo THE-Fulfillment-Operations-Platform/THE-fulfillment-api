@@ -909,26 +909,36 @@ func (r *OrderItemRepository) FindForBatching(ids []uint) (map[uint]*models.Orde
 	return out, nil
 }
 
-// InternalStatusByIDs returns the current internal status per item, for the
-// status roll-up recompute (no associations needed).
-func (r *OrderItemRepository) InternalStatusByIDs(ids []uint) (map[uint]models.InternalStatus, error) {
-	out := map[uint]models.InternalStatus{}
+// ItemRollupState is what the status roll-up needs to know about an item before
+// it writes: where it stands now, and whether its cancellation was approved (an
+// approved-cancelled item keeps its status — see recomputeOrderItemStatuses).
+type ItemRollupState struct {
+	InternalStatus     models.InternalStatus
+	CancellationStatus models.CancellationStatus
+}
+
+// RollupStatesByIDs returns the current internal status and cancellation status
+// per item, for the status roll-up recompute (no associations needed). Still one
+// query — the cancellation column rides in the same SELECT.
+func (r *OrderItemRepository) RollupStatesByIDs(ids []uint) (map[uint]ItemRollupState, error) {
+	out := map[uint]ItemRollupState{}
 	if len(ids) == 0 {
 		return out, nil
 	}
 	type row struct {
-		ID             uint
-		InternalStatus models.InternalStatus
+		ID                 uint
+		InternalStatus     models.InternalStatus
+		CancellationStatus models.CancellationStatus
 	}
 	var rows []row
 	err := r.db.Model(&models.OrderItem{}).
-		Select("id, internal_status").
+		Select("id, internal_status, cancellation_status").
 		Where("id IN ?", ids).Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
 	for _, r := range rows {
-		out[r.ID] = r.InternalStatus
+		out[r.ID] = ItemRollupState{InternalStatus: r.InternalStatus, CancellationStatus: r.CancellationStatus}
 	}
 	return out, nil
 }
