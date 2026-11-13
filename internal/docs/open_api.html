@@ -260,8 +260,8 @@ X-API-Key: ffm_KEY_CỦA_BẠN</code></pre>
     <tr><th>Trường</th><th>Kiểu</th><th>Ghi chú</th></tr>
     <tr><td><code>sku</code> <span class="req">*</span></td><td>chuỗi ≤ 48</td><td>Mã SKU <strong>của xưởng</strong> — lấy từ <a href="#sku"><code>GET /skus</code></a>. Không phân biệt hoa thường.</td></tr>
     <tr><td><code>quantity</code></td><td>số nguyên ≥ 1</td><td>Mặc định 1.</td></tr>
-    <tr><td><code>mockup_url</code></td><td>link http(s)</td><td>Ảnh mockup để xưởng đối chiếu khi QC. <strong>Nên có</strong> — thiếu thì dòng đó phải chờ bổ sung.</td></tr>
-    <tr><td><code>design_url</code></td><td>link hoặc mã</td><td>File thiết kế mặt trước.</td></tr>
+    <tr><td><code>mockup_url</code> <span class="req">*</span></td><td>link http(s)</td><td>Ảnh mockup để xưởng đối chiếu khi QC. <strong>Bắt buộc</strong> — thiếu thì cả đơn bị từ chối với <code>REQUIRED</code>.</td></tr>
+    <tr><td><code>design_url</code> <span class="req">*</span></td><td>link hoặc mã</td><td>File thiết kế mặt trước (link, hoặc mã tham chiếu thiết kế bên bạn). <strong>Bắt buộc</strong> — thiếu thì cả đơn bị từ chối với <code>REQUIRED</code>.</td></tr>
     <tr><td><code>back_design_url</code></td><td>link hoặc mã</td><td>File thiết kế mặt sau, chỉ với sản phẩm 2 mặt. Phải khác <code>design_url</code>.</td></tr>
     <tr><td><code>image_code</code></td><td>chuỗi ≤ 120</td><td>Mã ảnh / mã thiết kế bên bạn.</td></tr>
     <tr><td><code>engrave_text</code></td><td>chuỗi ≤ 500</td><td>Nội dung khắc, cá nhân hoá.</td></tr>
@@ -480,7 +480,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   await sendOrder({
     order_id: 'TEST-' + Date.now(),
     shipping: { name: 'Jane Doe', address1: '1 Main St', city: 'Saint Paul', province: 'MN', zip: '55112', country: 'US' },
-    items: [{ sku: process.env.FFM_TEST_SKU ?? 'MÃ-SKU-CỦA-XƯỞNG', quantity: 1, mockup_url: 'https://example.com/mockup.png' }],
+    items: [{ sku: process.env.FFM_TEST_SKU ?? 'MÃ-SKU-CỦA-XƯỞNG', quantity: 1, design_url: 'https://example.com/design.png', mockup_url: 'https://example.com/mockup.png' }],
   });
   await syncStatuses(new Date(Date.now() - 30 * 86400_000).toISOString().slice(0, 10));
 }</code></pre>
@@ -555,7 +555,7 @@ if __name__ == "__main__":  # Chạy thử: FFM_API_KEY=ffm_... python3 ffm.py
         "shipping": {"name": "Jane Doe", "address1": "1 Main St", "city": "Saint Paul",
                      "province": "MN", "zip": "55112", "country": "US"},
         "items": [{"sku": os.environ.get("FFM_TEST_SKU", "MÃ-SKU-CỦA-XƯỞNG"), "quantity": 1,
-                   "mockup_url": "https://example.com/mockup.png"}],
+                   "design_url": "https://example.com/design.png", "mockup_url": "https://example.com/mockup.png"}],
     })
     sync_statuses((date.today() - timedelta(days=30)).isoformat())</code></pre>
   <h3>PHP 7.4+ — chỉ cần extension curl</h3>
@@ -663,7 +663,7 @@ if (realpath($argv[0] ?? '') === __FILE__) {
         'shipping' =&gt; ['name' =&gt; 'Jane Doe', 'address1' =&gt; '1 Main St', 'city' =&gt; 'Saint Paul',
                        'province' =&gt; 'MN', 'zip' =&gt; '55112', 'country' =&gt; 'US'],
         'items' =&gt; [['sku' =&gt; getenv('FFM_TEST_SKU') ?: 'MÃ-SKU-CỦA-XƯỞNG', 'quantity' =&gt; 1,
-                     'mockup_url' =&gt; 'https://example.com/mockup.png']],
+                     'design_url' =&gt; 'https://example.com/design.png', 'mockup_url' =&gt; 'https://example.com/mockup.png']],
     ]);
     sync_statuses(date('Y-m-d', strtotime('-30 days')));
 }</code></pre>

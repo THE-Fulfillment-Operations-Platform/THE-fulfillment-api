@@ -282,7 +282,7 @@ components:
         phone: { type: string, maxLength: 60 }
     ItemInput:
       type: object
-      required: [sku]
+      required: [sku, design_url, mockup_url]
       properties:
         sku:
           type: string
@@ -290,8 +290,8 @@ components:
           description: Mã SKU của xưởng — lấy từ `GET /skus`. Không phân biệt hoa thường.
         quantity: { type: integer, minimum: 1, default: 1 }
         image_code: { type: string, maxLength: 120, description: Mã ảnh / mã thiết kế của bạn }
-        mockup_url: { type: string, maxLength: 500, description: "Link ảnh mockup (http/https) — xưởng dùng để đối chiếu khi QC. Nên có." }
-        design_url: { type: string, maxLength: 500, description: Link file thiết kế mặt trước (hoặc mã tham chiếu) }
+        mockup_url: { type: string, maxLength: 500, description: "Bắt buộc. Link ảnh mockup (http/https) — xưởng dùng để đối chiếu khi QC." }
+        design_url: { type: string, maxLength: 500, description: "Bắt buộc. Link file thiết kế mặt trước (hoặc mã tham chiếu)." }
         back_design_url: { type: string, maxLength: 500, description: Link file thiết kế mặt sau, chỉ với sản phẩm 2 mặt }
         engrave_text: { type: string, maxLength: 500, description: Nội dung khắc / cá nhân hoá }
     OrderInput:

@@ -242,6 +242,9 @@ func (s *OrderService) UpdateItemDesign(actor Actor, itemID uint, in UpdateDesig
 	if itemCancelled(item.CancellationStatus) {
 		return nil, apperr.Conflict("Sản phẩm đã huỷ, không thể tiếp tục thiết kế")
 	}
+	if err := checkRequiredLinksKept(item, in.DesignURL, in.MockupURL); err != nil {
+		return nil, err
+	}
 
 	now := time.Now()
 	addAssetSide := func(assetType string, side models.DesignSide, urlStr string) {
@@ -456,10 +459,14 @@ type DirectItemInput struct {
 	SKUCode string `json:"sku_code" binding:"required"`
 	// The product's name is the SKU's, from master data — not something a caller
 	// supplies per line. See models.OrderItem.ProductName.
-	Quantity    int    `json:"quantity"`
-	ImageCode   string `json:"image_code"`
-	MockupURL   string `json:"mockup_url"`
-	EngraveText string `json:"engrave_text"`
+	Quantity  int    `json:"quantity"`
+	ImageCode string `json:"image_code"`
+	// DesignURL (front/single side) and MockupURL are required — the same rule as
+	// the file import (itemArtProblem). BackDesignURL only for two-sided products.
+	DesignURL     string `json:"design_url"`
+	BackDesignURL string `json:"back_design_url"`
+	MockupURL     string `json:"mockup_url"`
+	EngraveText   string `json:"engrave_text"`
 }
 
 type DirectOrderInput struct {
@@ -482,6 +489,12 @@ type DirectOrderInput struct {
 func (s *OrderService) CreateOrderDirect(actor Actor, in DirectOrderInput) (*models.Order, error) {
 	if _, err := s.repo.Seller.FindByID(in.SellerID); err != nil {
 		return nil, apperr.BadRequest("seller_id does not reference an existing seller")
+	}
+	// Same link rule as the file import: no line without its design + mockup.
+	for i, it := range in.Items {
+		if p := itemArtProblem(it.DesignURL, it.BackDesignURL, it.MockupURL); p != nil {
+			return nil, apperr.Unprocessable(fmt.Sprintf("Sản phẩm %d: %s — %s", i+1, p.Message, p.Suggestion))
+		}
 	}
 	// StoreOrderID is a repeatable reference label, not a unique key — so no
 	// duplicate check here. Every order gets its own system-generated InternalCode.
@@ -525,7 +538,9 @@ func (s *OrderService) CreateOrderDirect(actor Actor, in DirectOrderInput) (*mod
 			item := &models.OrderItem{
 				OrderID: order.ID, LineNo: i + 1, InternalCode: itemInternalCode(order.ID, i+1, len(in.Items)),
 				SKUID: skuID, SKUCode: skuCode,
-				Quantity: maxInt(it.Quantity, 1), ImageCode: it.ImageCode, MockupURL: it.MockupURL, EngraveText: it.EngraveText,
+				Quantity: maxInt(it.Quantity, 1), ImageCode: it.ImageCode,
+				DesignURL: strings.TrimSpace(it.DesignURL), BackDesignURL: strings.TrimSpace(it.BackDesignURL),
+				MockupURL: strings.TrimSpace(it.MockupURL), EngraveText: it.EngraveText,
 				InternalStatus: models.StatusPending, DesignStatus: ds,
 			}
 			if err := tx.Create(item).Error; err != nil {

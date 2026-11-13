@@ -113,12 +113,12 @@ func TestImport_ScalesToThousandsOfOrders(t *testing.T) {
 			t.Fatalf("item %d code = %q, want %q", it.ID, it.InternalCode, itemInternalCode(it.OrderID, 1, 1))
 		}
 	}
-	// Every row here carries a mockup, so each item records exactly one asset and
-	// no attention note is raised.
+	// Every row carries its (required) design + mockup, so each item records exactly
+	// two assets and no attention note is raised.
 	var assetCount, noteCount int64
 	db.Model(&models.ItemAsset{}).Count(&assetCount)
 	db.Model(&models.Note{}).Count(&noteCount)
-	if assetCount != orders || noteCount != 0 {
-		t.Fatalf("assets=%d notes=%d, want %d/0", assetCount, noteCount, orders)
+	if assetCount != 2*orders || noteCount != 0 {
+		t.Fatalf("assets=%d notes=%d, want %d/0", assetCount, noteCount, 2*orders)
 	}
 }

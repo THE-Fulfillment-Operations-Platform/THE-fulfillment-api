@@ -664,32 +664,10 @@ func (s *ImportService) validateRow(rowNumber int, row ImportRow, skus map[strin
 		return mkErr("ShippingAddress1", "ADDR_INVALID", "Thiếu tên người nhận / Địa chỉ nhận / Quốc Gia",
 			"Điền đủ 3 cột: name, Địa chỉ nhận, Quốc Gia")
 	}
-	// Mockup URL: blocking only if present but malformed (missing mockup is handled
-	// as a non-blocking required-attention note at commit time).
-	if m := strings.TrimSpace(row.Mockup); m != "" {
-		if !isValidHTTPURL(m) {
-			return mkErr("Mockup", "MOCKUP_INVALID", "Mockup URL is not a valid http(s) URL",
-				"Request seller gửi lại link mockup")
-		}
-	}
-	// Design (front/single): only blocking if provided *as a URL* but malformed. A
-	// bare design reference code (e.g. "design-a") is allowed — Design may be a code,
-	// not a link — so we only validate values that clearly attempt to be a URL.
-	if d := row.FrontDesignValue(); looksLikeURL(d) && !isValidHTTPURL(d) {
-		return mkErr("Front Design", "DESIGN_INVALID", "Front Design URL is not a valid http(s) URL",
-			"Sửa lại link design mặt trước hoặc để trống nếu chưa có")
-	}
-	// Back design is optional (only two-sided products). Same rule: validate only if
-	// it looks like a URL. It must not be identical to the front design.
-	if b := strings.TrimSpace(row.BackDesign); b != "" {
-		if looksLikeURL(b) && !isValidHTTPURL(b) {
-			return mkErr("Back Design", "BACK_DESIGN_INVALID", "Back Design URL is not a valid http(s) URL",
-				"Sửa lại link design mặt sau hoặc để trống nếu sản phẩm chỉ có 1 mặt")
-		}
-		if b == row.FrontDesignValue() {
-			return mkErr("Back Design", "DESIGN_SIDE_DUP", "Link design mặt trước và mặt sau đang giống nhau",
-				"Kiểm tra lại — mỗi mặt phải là file design riêng, hoặc để trống mặt sau")
-		}
+	// Design + mockup links (see itemArtProblem — the same rulebook the open API and
+	// the direct create endpoint apply).
+	if p := itemArtProblem(row.FrontDesignValue(), row.BackDesign, row.Mockup); p != nil {
+		return mkErr(p.Field, p.Code, p.Message, p.Suggestion)
 	}
 	// StoreOrderID uniqueness is intentionally NOT enforced here: a store order id
 	// is a repeatable reference label (many items per order, and the same id may
@@ -697,6 +675,74 @@ func (s *ImportService) validateRow(rowNumber int, row ImportRow, skus map[strin
 	// its own unique InternalCode. A recurring StoreOrderID is surfaced by Preview
 	// as a non-blocking warning (so staff can double-check with the customer), never
 	// a blocking error.
+	return nil
+}
+
+// artProblem is one thing wrong with a product line's design / mockup links.
+type artProblem struct {
+	Field, Code, Message, Suggestion string
+}
+
+// Error codes for a product line that arrived without its links. One row error
+// per row in the file import, so a line missing both gets the combined code.
+const (
+	codeDesignMissing       = "DESIGN_MISSING"
+	codeMockupMissing       = "MOCKUP_MISSING"
+	codeDesignMockupMissing = "DESIGN_MOCKUP_MISSING"
+)
+
+// itemArtProblem checks a product line's links and returns the first problem, or
+// nil. It is the one rulebook for every door an order comes in by: the file import
+// and the seller's self-upload (validateRow), the open API (through validateRow)
+// and the direct create endpoint (CreateOrderDirect).
+//
+// The front design and the mockup are REQUIRED. Until 23/10/2026 a line without
+// them still imported, because the "Chờ thiết kế" screen was where a missing file
+// got caught before production. That screen and the set-ready step are gone — every
+// item is born READY and goes straight to batching — so an order without links
+// reached the workshop with nothing to print and nothing for QC to compare against
+// (anh Kiên, 13/11/2026). The only place left to stop it is the door.
+//
+// There is no "no design needed" flag anywhere in master data (SKU, material,
+// SKU↔material): every SKU is held to this rule. If plain/blank products ever
+// arrive, the exemption belongs on the SKU and is checked here.
+//
+//   - front: required, but may be a design reference CODE rather than a link — only
+//     a value that clearly attempts to be a URL is format-checked.
+//   - mockup: required, and must be an http(s) link (QC loads it as a picture).
+//   - back: optional (only two-sided products); same URL rule as the front, and it
+//     must not repeat the front.
+func itemArtProblem(front, back, mockup string) *artProblem {
+	front, back, mockup = strings.TrimSpace(front), strings.TrimSpace(back), strings.TrimSpace(mockup)
+	switch {
+	case front == "" && mockup == "":
+		return &artProblem{"Front Design, Mockup", codeDesignMockupMissing, "Thiếu link design và link mockup",
+			"Seller gửi lại link design (mặt trước) và link mockup rồi import lại"}
+	case front == "":
+		return &artProblem{"Front Design", codeDesignMissing, "Thiếu link design",
+			"Seller gửi lại link design (mặt trước) rồi import lại"}
+	case mockup == "":
+		return &artProblem{"Mockup", codeMockupMissing, "Thiếu link mockup",
+			"Seller gửi lại link mockup rồi import lại"}
+	}
+	if !isValidHTTPURL(mockup) {
+		return &artProblem{"Mockup", "MOCKUP_INVALID", "Mockup URL is not a valid http(s) URL",
+			"Request seller gửi lại link mockup"}
+	}
+	if looksLikeURL(front) && !isValidHTTPURL(front) {
+		return &artProblem{"Front Design", "DESIGN_INVALID", "Front Design URL is not a valid http(s) URL",
+			"Seller gửi lại link design mặt trước đúng định dạng http(s)"}
+	}
+	if back != "" {
+		if looksLikeURL(back) && !isValidHTTPURL(back) {
+			return &artProblem{"Back Design", "BACK_DESIGN_INVALID", "Back Design URL is not a valid http(s) URL",
+				"Sửa lại link design mặt sau hoặc để trống nếu sản phẩm chỉ có 1 mặt"}
+		}
+		if back == front {
+			return &artProblem{"Back Design", "DESIGN_SIDE_DUP", "Link design mặt trước và mặt sau đang giống nhau",
+				"Kiểm tra lại — mỗi mặt phải là file design riêng, hoặc để trống mặt sau"}
+		}
+	}
 	return nil
 }
 
@@ -999,6 +1045,22 @@ func (s *ImportService) Commit(actor Actor, jobID uint) (*models.ImportJob, erro
 		_ = s.repo.Import.MarkCommitted(job.ID, 0)
 		return job, nil
 	}
+	// A job previewed before design + mockup became required (13/11/2026) may still
+	// hold rows without them: Preview judged those rows valid under the old rule.
+	// Refuse rather than let them through — committing is exactly the hole this rule
+	// closes. A re-preview of the same file lists the rows that need links.
+	missingArt := 0
+	for _, row := range rows {
+		if p := itemArtProblem(row.FrontDesignValue(), row.BackDesign, row.Mockup); p != nil &&
+			(p.Code == codeDesignMissing || p.Code == codeMockupMissing || p.Code == codeDesignMockupMissing) {
+			missingArt++
+		}
+	}
+	if missingArt > 0 {
+		return nil, apperr.Unprocessable(fmt.Sprintf(
+			"Job #%d có %d dòng thiếu link design hoặc mockup (preview từ trước khi hệ thống bắt buộc 2 link này) — "+
+				"bấm Preview lại file để xem dòng nào cần seller gửi lại link", job.ID, missingArt))
+	}
 
 	// Group rows by StoreOrderID preserving order.
 	type group struct {
@@ -1200,8 +1262,9 @@ func expandQuantityRows(rows []ImportRow) []ImportRow {
 
 // orderItemsFromRows turns one order's rows into its line items, in row order.
 // Shared by the file import and the open API so both produce identical items:
-// the same tem codes, the same "no mockup = design missing" rule. A row with
-// Quantity N yields N items of quantity 1 (expandQuantityRows).
+// the same tem codes, the same links. A row with Quantity N yields N items of
+// quantity 1 (expandQuantityRows). Rows reach here already validated, design +
+// mockup included (itemArtProblem).
 func orderItemsFromRows(orderID uint, rows []ImportRow, skus map[string]repositories.SKUInfo) []models.OrderItem {
 	rows = expandQuantityRows(rows)
 	total := len(rows)
@@ -1214,7 +1277,8 @@ func orderItemsFromRows(orderID uint, rows []ImportRow, skus map[string]reposito
 			skuID = &id
 		}
 		// Không còn bước thiết kế / set ready (23/10/2026): sản phẩm sinh ra là
-		// READY — thiếu mockup vẫn được nhắc bằng ghi chú ART_MISSING bên dưới.
+		// READY. Vì vậy link design + mockup bắt buộc ngay ở cửa vào (itemArtProblem,
+		// 13/11/2026) — không còn màn nào phía sau bắt dòng thiếu file.
 		designStatus := models.DesignReady
 		items = append(items, models.OrderItem{
 			OrderID:        orderID,
@@ -1237,7 +1301,10 @@ func orderItemsFromRows(orderID uint, rows []ImportRow, skus map[string]reposito
 
 // itemAssetsAndNotes builds what follows freshly inserted items (their ids must
 // already be set): the versioned design/mockup assets, and a required-attention
-// note for every item that arrived without a mockup.
+// note for every item without a mockup. The import and the open API no longer let
+// such an item in (itemArtProblem); the note still matters for a warranty re-make
+// copied from an old item that predates the rule — review then blocks its approval
+// until someone fills the link in (reviewIssuesWith).
 func itemAssetsAndNotes(items []models.OrderItem, actor Actor) ([]models.ItemAsset, []models.Note) {
 	var assets []models.ItemAsset
 	var notes []models.Note

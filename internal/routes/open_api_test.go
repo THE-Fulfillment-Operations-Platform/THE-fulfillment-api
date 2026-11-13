@@ -166,7 +166,7 @@ func (h *openHarness) issueKey(sellerID string) (id uint, key string) {
 const openOrderBody = `{
   "order_id": "ETSY-1001",
   "shipping": {"name": "Jane Doe", "address1": "1 Main St", "country": "US"},
-  "items": [{"sku": "TESTSKU", "quantity": 2, "mockup_url": "https://example.com/m.png"}]
+  "items": [{"sku": "TESTSKU", "quantity": 2, "design_url": "https://example.com/d.png", "mockup_url": "https://example.com/m.png"}]
 }`
 
 // The full life of an integration: get a key, prove it works, send an order,

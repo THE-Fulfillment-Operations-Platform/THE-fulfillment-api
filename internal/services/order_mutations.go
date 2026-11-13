@@ -82,6 +82,28 @@ func applyStr(changes models.JSONMap, name string, cur *string, in *string) bool
 	return true
 }
 
+// checkRequiredLinksKept refuses an edit that would wipe the design (front) or
+// mockup link off an item. Both are required at every door an order comes in by
+// (itemArtProblem); letting an edit blank them would rebuild, one click later, the
+// very order the import now refuses — and with no design step left it would go
+// straight to batching. Only a WIPE is refused (has a link → sent empty): an item
+// older than the rule that was already empty and is sent back empty is no change,
+// so its other fields stay editable. Replacing a link with a new one is fine.
+func checkRequiredLinksKept(item *models.OrderItem, design, mockup *string) error {
+	wipes := func(in *string, cur string) bool {
+		return in != nil && strings.TrimSpace(*in) == "" && strings.TrimSpace(cur) != ""
+	}
+	if wipes(design, item.DesignURL) {
+		return apperr.Unprocessable("Sản phẩm " + item.InternalCode +
+			": không được xoá trắng link design — muốn đổi thì dán link mới vào")
+	}
+	if wipes(mockup, item.MockupURL) {
+		return apperr.Unprocessable("Sản phẩm " + item.InternalCode +
+			": không được xoá trắng link mockup — muốn đổi thì dán link mới vào")
+	}
+	return nil
+}
+
 // updateOrderCore applies an UpdateOrderInput to an order (and its items) inside a
 // transaction and writes an audit entry. editItems controls whether line-item
 // edits are permitted (callers decide based on role + production state). It assumes
@@ -108,6 +130,9 @@ func (s *OrderService) updateOrderCore(actor Actor, order *models.Order, in Upda
 			}
 			if iu.Quantity != nil && *iu.Quantity < 1 {
 				return nil, apperr.Unprocessable("Số lượng phải >= 1")
+			}
+			if err := checkRequiredLinksKept(item, iu.DesignURL, iu.MockupURL); err != nil {
+				return nil, err
 			}
 		}
 	}

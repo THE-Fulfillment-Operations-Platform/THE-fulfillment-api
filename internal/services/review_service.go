@@ -270,16 +270,21 @@ func reviewIssuesWith(order *models.Order, materialCounts map[uint]int64) []Revi
 			iss.Message = "SKU chưa được gán nguyên vật liệu (Loại VL)."
 			issues = append(issues, iss)
 		}
+		// Design + mockup block approval (13/11/2026): with no design step left,
+		// approval is the last gate before batching, and the import already refuses
+		// a line without them (itemArtProblem). What still reaches review without
+		// links — orders imported before the rule, a warranty re-make of such an
+		// order — gets its links filled in here before it can go to production.
 		if strings.TrimSpace(it.MockupURL) == "" {
 			iss := base
-			iss.Field, iss.Severity, iss.Code = "mockup", "WARNING", "MOCKUP_MISSING"
-			iss.Message = "Thiếu mockup để QC đối chiếu."
+			iss.Field, iss.Severity, iss.Code = "mockup", "BLOCKER", "MOCKUP_MISSING"
+			iss.Message = "Thiếu link mockup — QC không có ảnh để đối chiếu. Điền link mockup rồi mới duyệt."
 			issues = append(issues, iss)
 		}
 		if strings.TrimSpace(it.DesignURL) == "" {
 			iss := base
-			iss.Field, iss.Severity, iss.Code = "design", "WARNING", "DESIGN_MISSING"
-			iss.Message = "Thiếu link design/print file."
+			iss.Field, iss.Severity, iss.Code = "design", "BLOCKER", "DESIGN_MISSING"
+			iss.Message = "Thiếu link design — xưởng không có file để in. Điền link design rồi mới duyệt."
 			issues = append(issues, iss)
 		}
 	}
@@ -308,8 +313,8 @@ func (s *ReviewService) transitionReview(actor Actor, order *models.Order, to mo
 
 // Approve releases an order into the design/production flow. It enforces the
 // same blocking validation the review UI shows (missing shipping/quantity,
-// unmapped SKU, SKU without material) server-side, so an order can never be
-// approved with an unresolved blocker via a direct API call.
+// unmapped SKU, SKU without material, missing design/mockup link) server-side,
+// so an order can never be approved with an unresolved blocker via a direct API call.
 func (s *ReviewService) Approve(actor Actor, id uint, note string) (*models.Order, error) {
 	order, err := s.getOrder(id)
 	if err != nil {

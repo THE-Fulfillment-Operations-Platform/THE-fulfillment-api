@@ -83,9 +83,9 @@ components:
         "MÃ SKU": { type: string }
         "Mã ảnh (nếu có)": { type: string }
         "SỐ LƯỢNG": { type: integer }
-        "DESIGN ORDER": { type: string, description: "Link design mặt trước" }
+        "DESIGN ORDER": { type: string, description: "BẮT BUỘC — link (hoặc mã) design mặt trước; trống là lỗi DESIGN_MISSING" }
         designBack: { type: string, description: "Link design mặt sau (sản phẩm 2 mặt)" }
-        Mockup: { type: string, description: "Mockup URL seller gửi — chuẩn QC" }
+        Mockup: { type: string, description: "BẮT BUỘC — link http(s) ảnh mockup seller gửi, chuẩn QC; trống là lỗi MOCKUP_MISSING" }
         "EngraveText (if have)": { type: string }
         ShippingPhone: { type: string }
         Phone: { type: string, description: "Dự phòng: chỉ dùng khi ShippingPhone trống" }
@@ -414,7 +414,7 @@ paths:
       responses: { '200': { description: OK } }
     post:
       tags: [Orders]
-      summary: Tạo đơn trực tiếp (convenience/TODO — luồng chuẩn là import)
+      summary: Tạo đơn trực tiếp (convenience/TODO — luồng chuẩn là import). Mỗi item bắt buộc design_url + mockup_url như import
       responses: { '201': { description: Created } }
   /api/orders/{id}:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]

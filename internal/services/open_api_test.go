@@ -187,15 +187,18 @@ func TestAPIKey_CapsActiveKeysAndNeedsAName(t *testing.T) {
 // ---------- Create order ----------
 
 // The order lands exactly where an imported one would: pending review, items
-// with tem codes, assets recorded, a required-attention note for the line that
-// came without a mockup — and it remembers the caller's id as its api_ref.
+// with tem codes, assets recorded — and it remembers the caller's id as its
+// api_ref. Every line carries its design + mockup (both required since
+// 13/11/2026), so no "missing art" note is raised.
 func TestOpenCreate_CreatesAReviewableOrder(t *testing.T) {
 	db := newOpenDB(t)
 	svc := openSvc(db)
 
 	in := openOrder("  ETSY-1001  ")
 	in.OrderDate = "2026-09-30"
-	in.Items = append(in.Items, OpenItemInput{SKU: "testsku", EngraveText: "Anna"}) // no quantity, no mockup
+	// No quantity (defaults to 1); the design is a bare reference code, not a link.
+	in.Items = append(in.Items, OpenItemInput{SKU: "testsku", EngraveText: "Anna",
+		DesignURL: "design-anna", MockupURL: "https://example.com/m-anna.png"})
 	res, err := svc.CreateOrder(sellerPrincipal(1, "S1"), "203.0.113.7", in)
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -230,15 +233,19 @@ func TestOpenCreate_CreatesAReviewableOrder(t *testing.T) {
 	if order.Items[0].InternalCode != order.InternalCode+"_1/3" || order.Items[0].SKUID == nil {
 		t.Errorf("item code/sku = %q / %v", order.Items[0].InternalCode, order.Items[0].SKUID)
 	}
-	// Không còn bước thiết kế: mọi sản phẩm sinh ra READY (thiếu mockup vẫn có ghi chú ART_MISSING).
+	// Không còn bước thiết kế: mọi sản phẩm sinh ra READY — vì vậy link design +
+	// mockup đã bắt buộc ngay ở cửa vào, không còn dòng nào sinh ghi chú ART_MISSING.
 	if order.Items[0].DesignStatus != models.DesignReady || order.Items[1].DesignStatus != models.DesignReady || order.Items[2].DesignStatus != models.DesignReady {
 		t.Errorf("design statuses = %s, %s, %s", order.Items[0].DesignStatus, order.Items[1].DesignStatus, order.Items[2].DesignStatus)
+	}
+	if order.Items[2].DesignURL != "design-anna" || order.Items[2].MockupURL != "https://example.com/m-anna.png" {
+		t.Errorf("third item links = %q / %q", order.Items[2].DesignURL, order.Items[2].MockupURL)
 	}
 	var assets, notes int64
 	db.Model(&models.ItemAsset{}).Count(&assets)
 	db.Model(&models.Note{}).Where("reason_code = ?", "ART_MISSING").Count(&notes)
-	if assets != 4 || notes != 1 {
-		t.Errorf("assets=%d notes=%d, want 4 and 1", assets, notes)
+	if assets != 6 || notes != 0 {
+		t.Errorf("assets=%d notes=%d, want 6 (design + mockup × 3 items) and 0", assets, notes)
 	}
 	var audit models.AuditLog
 	if err := db.Where("action = ?", "ORDER_CREATE_API").First(&audit).Error; err != nil {
@@ -326,9 +333,10 @@ func TestOpenCreate_ReportsEveryProblemAndCreatesNothing(t *testing.T) {
 			{SKU: "TESTSKU", Quantity: qty(0)},
 			{SKU: "NOMAT"},
 			{SKU: ""},
-			{SKU: "TESTSKU", MockupURL: "ftp://x/y.png"},
-			{SKU: "TESTSKU", DesignURL: "https://e.com/a.png", BackDesignURL: "https://e.com/a.png"},
-			{SKU: "TESTSKU", DesignURL: "design-a"}, // a bare design code is fine
+			{SKU: "TESTSKU", DesignURL: "https://e.com/d.png", MockupURL: "ftp://x/y.png"},
+			{SKU: "TESTSKU", DesignURL: "https://e.com/a.png", BackDesignURL: "https://e.com/a.png", MockupURL: "https://e.com/m.png"},
+			{SKU: "TESTSKU", DesignURL: "design-a", MockupURL: "https://e.com/m.png"}, // a bare design code is fine
+			{SKU: "TESTSKU"}, // no design, no mockup: both fields reported, not just the first
 		},
 	}
 	_, err := svc.CreateOrder(sellerPrincipal(1, "S1"), "", in)
@@ -353,6 +361,8 @@ func TestOpenCreate_ReportsEveryProblemAndCreatesNothing(t *testing.T) {
 		"items[3].sku":             "REQUIRED",
 		"items[4].mockup_url":      "URL_INVALID",
 		"items[5].back_design_url": "DESIGN_SIDE_DUPLICATE",
+		"items[7].design_url":      "REQUIRED",
+		"items[7].mockup_url":      "REQUIRED",
 	}
 	for field, code := range want {
 		if got[field] != code {

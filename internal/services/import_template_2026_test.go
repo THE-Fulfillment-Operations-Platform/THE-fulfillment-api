@@ -349,6 +349,7 @@ func templateRow(orderID, date, sellerRef string) ImportRow {
 	return ImportRow{
 		SellerRef: sellerRef, OrderDateRaw: date,
 		StoreOrderID: orderID, SKU: "TESTSKU", Quantity: 1, ImageCode: "IMG-" + orderID,
+		FrontDesign:  "https://example.com/design/" + orderID + ".png",
 		Mockup:       "https://example.com/" + orderID + ".png",
 		ShippingName: "Jane Doe", ShippingAddress1: "1 Main St", ShippingCountry: "US",
 		ShippingPhone: "+1900000000",

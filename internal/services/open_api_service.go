@@ -319,6 +319,8 @@ var openItemRule = map[string]struct{ field, code, message string }{
 	"SKU_MISSING":         {"sku", "REQUIRED", "Thiếu mã SKU"},
 	"SKU_UNMAPPED":        {"sku", "SKU_NOT_FOUND", "SKU không có trên hệ thống của xưởng — kiểm tra lại mã, hoặc báo xưởng khai SKU này"},
 	"SKU_NO_MATERIAL":     {"sku", "SKU_NOT_READY", "SKU có trên hệ thống nhưng xưởng chưa khai nguyên vật liệu nên chưa sản xuất được — báo xưởng"},
+	codeDesignMissing:     {"design_url", "REQUIRED", "Thiếu design_url — link (hoặc mã) file thiết kế mặt trước là bắt buộc"},
+	codeMockupMissing:     {"mockup_url", "REQUIRED", "Thiếu mockup_url — link ảnh mockup là bắt buộc, xưởng dùng để đối chiếu khi QC"},
 	"MOCKUP_INVALID":      {"mockup_url", "URL_INVALID", "mockup_url phải là link http(s) hợp lệ"},
 	"DESIGN_INVALID":      {"design_url", "URL_INVALID", "design_url phải là link http(s) hợp lệ"},
 	"BACK_DESIGN_INVALID": {"back_design_url", "URL_INVALID", "back_design_url phải là link http(s) hợp lệ"},
@@ -420,10 +422,18 @@ func (s *OpenAPIService) validate(in *OpenOrderInput, rows []ImportRow, skus map
 		row.StoreOrderID, row.OrderDateRaw, row.SellerRef = "-", "", ""
 		row.ShippingName, row.ShippingAddress1, row.ShippingCountry = "-", "-", "-"
 		if rowErr := s.imports.validateRow(i+1, row, skus, seller); rowErr != nil {
-			if rule, ok := openItemRule[rowErr.ErrorCode]; ok {
-				errs.add(at(rule.field), rule.code, rule.message)
-			} else {
-				errs.add(at(strings.ToLower(rowErr.Field)), rowErr.ErrorCode, rowErr.Message)
+			codes := []string{rowErr.ErrorCode}
+			// The file import reports one error per row, so a line missing both links
+			// gets one combined code there. Here every field speaks for itself.
+			if rowErr.ErrorCode == codeDesignMockupMissing {
+				codes = []string{codeDesignMissing, codeMockupMissing}
+			}
+			for _, code := range codes {
+				if rule, ok := openItemRule[code]; ok {
+					errs.add(at(rule.field), rule.code, rule.message)
+				} else {
+					errs.add(at(strings.ToLower(rowErr.Field)), rowErr.ErrorCode, rowErr.Message)
+				}
 			}
 		}
 	}

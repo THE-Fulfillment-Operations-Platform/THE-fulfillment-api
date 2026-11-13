@@ -57,6 +57,7 @@ func importSvc(db *gorm.DB) *ImportService {
 func row(storeOrderID, imageCode string) ImportRow {
 	return ImportRow{
 		StoreOrderID: storeOrderID, SKU: "TESTSKU", Quantity: 1, ImageCode: imageCode,
+		FrontDesign:  "https://example.com/design/" + imageCode + ".png",
 		Mockup:       "https://example.com/" + imageCode + ".png",
 		ShippingName: "Jane Doe", ShippingAddress1: "1 Main St", ShippingCountry: "US",
 	}
