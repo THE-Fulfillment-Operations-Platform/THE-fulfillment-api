@@ -641,7 +641,13 @@ func TestParseOpenTimeBound(t *testing.T) {
 	today := time.Now().In(loc).Format("2006-01-02")
 	lo, _ := ParseOpenTimeBound(today, "created_from", false)
 	hi, _ := ParseOpenTimeBound(today, "created_to", true)
-	if _, _, total, _ := svc.ListOrders(1, OpenOrderQuery{CreatedFrom: lo, CreatedTo: hi}); total != 1 {
+	// SQLite (chỉ trong test) so mốc thời gian bằng CHUỖI, còn created_at được
+	// ghi theo múi giờ của tiến trình. Máy CI chạy UTC: từ 00:00 tới 07:00 giờ VN
+	// ngày theo UTC và ngày theo VN lệch nhau, so chuỗi "+00:00" với "+07:00" ra
+	// sai dù cùng thời điểm (Postgres thật so timestamptz nên không bị). Đưa mốc
+	// về cùng múi với giá trị đã ghi — vẫn đúng thời điểm đó.
+	l, h := lo.In(time.Local), hi.In(time.Local)
+	if _, _, total, _ := svc.ListOrders(1, OpenOrderQuery{CreatedFrom: &l, CreatedTo: &h}); total != 1 {
 		t.Errorf("created_from=created_to=today found %d orders, want 1", total)
 	}
 }
