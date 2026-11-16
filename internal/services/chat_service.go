@@ -5,33 +5,44 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	"gorm.io/gorm"
 
 	"the-fulfillment/backend/internal/apperr"
+	"the-fulfillment/backend/internal/chatfiles"
 	"the-fulfillment/backend/internal/chathub"
 	"the-fulfillment/backend/internal/models"
 	"the-fulfillment/backend/internal/repositories"
 )
 
-// Chat nội bộ: nhắn tin chữ 1-1, realtime qua WebSocket (Nghĩa #5355 → thu phạm
-// vi #5369 → chỉ bật cho Kỹ thuật viên trước #5370; 16/11/2026).
+// Chat nội bộ, realtime qua WebSocket (Nghĩa #5355 → #5369 → #5370; đợt 2 #5453,
+// 17/11/2026: anh Kiên "nghĩ nội bộ thôi", "seller h họ dùng Lark hết", "có đi em").
 //
 // Ai dùng được chat:
-//   - Tài khoản nội bộ có vai trò nằm trong CHAT_ROLES (mặc định chỉ TECHNICIAN;
-//     "ALL" = mọi vai trò nội bộ). Mở thêm vai trò = sửa env, không sửa code.
-//   - Seller chỉ khi CHAT_ALLOW_SELLER=true (mặc định tắt), và chỉ nhắn được với
-//     tài khoản nội bộ: không thấy, không nhắn được seller khác. Hai tài khoản của
-//     CÙNG một seller (cùng seller_id) coi là một bên.
+//   - Tài khoản nội bộ có vai trò nằm trong CHAT_ROLES (mặc định ALL = mọi vai
+//     trò nội bộ). Bớt vai trò = sửa env, không sửa code.
+//   - Seller chỉ khi CHAT_ALLOW_SELLER=true (mặc định TẮT — seller không thấy
+//     chat, mọi API trả 403), và chỉ nhắn được với tài khoản nội bộ.
 // Ai không dùng được: mọi endpoint chat trả 403, danh bạ của người khác không
 // hiện người đó.
+//
+// Tính năng: 1-1 và nhóm; chữ, ảnh, file; trả lời trích dẫn; cảm xúc; thu hồi;
+// sửa trong 15 phút; ghim cuộc; đã xem; đang soạn; online / lần cuối hoạt động;
+// tìm tin; mã đơn / mã batch có thật tự thành link.
 
 const (
 	chatMaxBody     = 4000
 	chatPageDefault = 40
 	chatPageMax     = 100
+	// chatEditWindow: chỉ sửa được tin trong ngần này sau khi gửi.
+	chatEditWindow = 15 * time.Minute
+	// chatMaxAttachments: số file tối đa trong một tin.
+	chatMaxAttachments = 10
+	chatMaxGroupSize   = 200
+	chatMaxTitle       = 120
 )
 
 // ChatOptions cấu hình chat.
@@ -40,6 +51,17 @@ type ChatOptions struct {
 	// do AllowSeller quyết.
 	Roles       map[models.Role]bool
 	AllowSeller bool
+
+	// Files: kho file (đĩa hoặc Supabase). nil = tắt gửi file.
+	Files chatfiles.Store
+	// FileMaxBytes: cỡ tối đa một file (mặc định 20 MB).
+	FileMaxBytes int64
+	// FileSecret ký URL tải file (rút từ JWT secret, không thêm bí mật mới).
+	FileSecret []byte
+	// FileURLTTL: hạn của URL file đã ký (mặc định 12 giờ).
+	FileURLTTL time.Duration
+	// MinFreeBytes: kho đĩa còn ít hơn ngần này thì không nhận file nữa (mặc định 1 GB).
+	MinFreeBytes int64
 }
 
 // ChatService là nghiệp vụ chat.
@@ -48,6 +70,9 @@ type ChatService struct {
 	hub  *chathub.Hub
 	opts ChatOptions
 	now  func() time.Time
+
+	// typingAt chống dội "đang soạn": mỗi người/cuộc tối đa một lần mỗi giây.
+	typingAt sync.Map
 }
 
 // NewChatService dựng service chat.
@@ -55,7 +80,22 @@ func NewChatService(repo *repositories.Repositories, hub *chathub.Hub, opts Chat
 	if hub == nil {
 		hub = chathub.New()
 	}
-	return &ChatService{repo: repo, hub: hub, opts: opts, now: time.Now}
+	if opts.FileMaxBytes <= 0 {
+		opts.FileMaxBytes = 20 << 20
+	}
+	if opts.FileURLTTL <= 0 {
+		opts.FileURLTTL = 12 * time.Hour
+	}
+	if opts.MinFreeBytes <= 0 {
+		opts.MinFreeBytes = 1 << 30
+	}
+	if len(opts.FileSecret) == 0 {
+		opts.FileSecret = []byte("ffm-chat-file-dev")
+	}
+	s := &ChatService{repo: repo, hub: hub, opts: opts, now: time.Now}
+	hub.Inbound = s.onInbound
+	hub.Presence = s.onPresence
+	return s
 }
 
 // Hub cho handler WebSocket.
@@ -148,11 +188,20 @@ func (s *ChatService) viewerOf(a Actor, users map[uint]chatUser) chatUser {
 	return u
 }
 
+// canManage: người gọi được quản lý thành viên nhóm (người tạo nhóm, Owner/Admin).
+func canManage(a Actor, c *models.ChatConversation) bool {
+	return c.IsGroup() && (c.CreatedByID == a.ID || a.Role.HasAdminRights())
+}
+
 // ---------- DTO ----------
 
-// ChatConfigDTO: web dùng để biết có hiện chat không.
+// ChatConfigDTO: web dùng để biết có hiện chat không và gửi file được không.
 type ChatConfigDTO struct {
-	Enabled bool `json:"enabled"`
+	Enabled      bool     `json:"enabled"`
+	Files        bool     `json:"files"`
+	FileMaxBytes int64    `json:"file_max_bytes"`
+	Reactions    []string `json:"reactions"`
+	EditMinutes  int      `json:"edit_minutes"`
 }
 
 // ChatUserDTO là một người trong danh bạ / người bên kia của cuộc.
@@ -164,21 +213,43 @@ type ChatUserDTO struct {
 	SellerName string      `json:"seller_name,omitempty"`
 }
 
+// ChatMemberDTO là một thành viên của cuộc, kèm mốc đã xem (để hiện "đã xem").
+type ChatMemberDTO struct {
+	ChatUserDTO
+	LastReadMessageID uint       `json:"last_read_message_id"`
+	LastReadAt        *time.Time `json:"last_read_at,omitempty"`
+}
+
 // ChatConversationDTO là một cuộc trong danh sách.
 type ChatConversationDTO struct {
-	ID            uint                `json:"id"`
-	Peer          ChatUserDTO         `json:"peer"`
-	LastMessage   *models.ChatMessage `json:"last_message,omitempty"`
-	LastMessageAt time.Time           `json:"last_message_at"`
-	Unread        int                 `json:"unread"`
-	MyLastRead    uint                `json:"my_last_read"`
+	ID    uint   `json:"id"`
+	Kind  string `json:"kind"`
+	Title string `json:"title"`
+	// Peer: người bên kia của cuộc 1-1. Với nhóm chỉ là tên nhóm (id 0) cho
+	// bản web cũ — web mới xem Kind/Title.
+	Peer          *ChatUserDTO    `json:"peer,omitempty"`
+	Members       []ChatMemberDTO `json:"members"`
+	CreatedByID   uint            `json:"created_by_id"`
+	CanManage     bool            `json:"can_manage"`
+	PinnedAt      *time.Time      `json:"pinned_at,omitempty"`
+	LastMessage   *ChatMessageDTO `json:"last_message,omitempty"`
+	LastMessageAt time.Time       `json:"last_message_at"`
+	Unread        int             `json:"unread"`
+	MyLastRead    uint            `json:"my_last_read"`
+}
+
+func displayName(u chatUser) string {
+	if n := strings.TrimSpace(u.FullName); n != "" {
+		return n
+	}
+	if u.Email != "" {
+		return u.Email
+	}
+	return fmt.Sprintf("Người dùng #%d", u.ID)
 }
 
 func userDTO(viewer, u chatUser) ChatUserDTO {
-	d := ChatUserDTO{ID: u.ID, FullName: u.FullName, Role: u.Role}
-	if strings.TrimSpace(d.FullName) == "" {
-		d.FullName = u.Email
-	}
+	d := ChatUserDTO{ID: u.ID, FullName: displayName(u), Role: u.Role}
 	// Seller không cần (và không nên) thấy email nội bộ.
 	if !isSellerUser(viewer) {
 		d.Email = u.Email
@@ -194,7 +265,10 @@ func (s *ChatService) Config(a Actor) (ChatConfigDTO, error) {
 	if err := s.ensureEnabled(a); err != nil {
 		return ChatConfigDTO{}, err
 	}
-	return ChatConfigDTO{Enabled: true}, nil
+	return ChatConfigDTO{
+		Enabled: true, Files: s.opts.Files != nil, FileMaxBytes: s.opts.FileMaxBytes,
+		Reactions: ChatReactions, EditMinutes: int(chatEditWindow / time.Minute),
+	}, nil
 }
 
 // Directory: những người người gọi nhắn được (trừ chính mình).
@@ -260,7 +334,8 @@ func (s *ChatService) memberIDs(convID uint) ([]uint, error) {
 	return ids, nil
 }
 
-// ListConversations: các cuộc của người gọi, mới nhất trước.
+// ListConversations: các cuộc của người gọi — cuộc đã ghim trước (ghim sau lên
+// trên), rồi tới cuộc có tin mới nhất.
 func (s *ChatService) ListConversations(a Actor) ([]ChatConversationDTO, error) {
 	if err := s.ensureEnabled(a); err != nil {
 		return nil, err
@@ -277,7 +352,16 @@ func (s *ChatService) ListConversations(a Actor) ([]ChatConversationDTO, error) 
 	if err != nil {
 		return nil, err
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].LastMessageAt.After(out[j].LastMessageAt) })
+	sort.SliceStable(out, func(i, j int) bool {
+		pi, pj := out[i].PinnedAt, out[j].PinnedAt
+		if (pi != nil) != (pj != nil) {
+			return pi != nil
+		}
+		if pi != nil && !pi.Equal(*pj) {
+			return pi.After(*pj)
+		}
+		return out[i].LastMessageAt.After(out[j].LastMessageAt)
+	})
 	return out, nil
 }
 
@@ -310,15 +394,10 @@ func (s *ChatService) buildConversations(a Actor, ids []uint) ([]ChatConversatio
 		return nil, apperr.Internal("could not load members").Wrap(err)
 	}
 	userIDs := []uint{a.ID}
-	peerOf := map[uint]uint{}
-	myRead := map[uint]uint{}
+	byConv := map[uint][]models.ChatMember{}
 	for _, m := range members {
-		if m.UserID == a.ID {
-			myRead[m.ConversationID] = m.LastReadMessageID
-		} else {
-			peerOf[m.ConversationID] = m.UserID
-			userIDs = append(userIDs, m.UserID)
-		}
+		byConv[m.ConversationID] = append(byConv[m.ConversationID], m)
+		userIDs = append(userIDs, m.UserID)
 	}
 	users, err := s.loadUsers(userIDs)
 	if err != nil {
@@ -339,18 +418,48 @@ func (s *ChatService) buildConversations(a Actor, ids []uint) ([]ChatConversatio
 	if err != nil {
 		return nil, apperr.Internal("could not load last messages").Wrap(err)
 	}
-	lastBy := map[uint]models.ChatMessage{}
-	for _, m := range lasts {
+	lastDTOs, err := s.messageDTOs(lasts)
+	if err != nil {
+		return nil, err
+	}
+	lastBy := map[uint]ChatMessageDTO{}
+	for _, m := range lastDTOs {
 		lastBy[m.ID] = m
 	}
 	for _, c := range convs {
-		peer, ok := users[peerOf[c.ID]]
-		if !ok {
-			peer = chatUser{ID: peerOf[c.ID], FullName: "Tài khoản đã xoá"}
+		c := c
+		kind := c.Kind
+		if kind == "" {
+			kind = models.ChatKindDirect
 		}
 		d := ChatConversationDTO{
-			ID: c.ID, Peer: userDTO(viewer, peer), LastMessageAt: c.LastMessageAt,
-			Unread: unread[c.ID], MyLastRead: myRead[c.ID],
+			ID: c.ID, Kind: kind, Title: c.Title, CreatedByID: c.CreatedByID,
+			CanManage: canManage(a, &c), LastMessageAt: c.LastMessageAt,
+			Unread: unread[c.ID], Members: []ChatMemberDTO{},
+		}
+		for _, m := range byConv[c.ID] {
+			u, ok := users[m.UserID]
+			if !ok {
+				u = chatUser{ID: m.UserID, FullName: "Tài khoản đã xoá"}
+			}
+			if m.UserID == a.ID {
+				d.MyLastRead, d.PinnedAt = m.LastReadMessageID, m.PinnedAt
+			} else if kind == models.ChatKindDirect {
+				p := userDTO(viewer, u)
+				d.Peer = &p
+			}
+			d.Members = append(d.Members, ChatMemberDTO{
+				ChatUserDTO: userDTO(viewer, u), LastReadMessageID: m.LastReadMessageID, LastReadAt: m.LastReadAt,
+			})
+		}
+		if kind == models.ChatKindDirect && d.Peer == nil {
+			d.Peer = &ChatUserDTO{FullName: "Tài khoản đã xoá"}
+		}
+		if kind == models.ChatKindGroup {
+			// Tab web bản cũ (chưa tải lại sau deploy) chỉ biết cuộc 1-1 và đọc
+			// peer.full_name: đưa tên nhóm vào đó để nó hiện tên thay vì vỡ trang.
+			// Web mới xem kind, không dùng peer của nhóm.
+			d.Peer = &ChatUserDTO{FullName: c.Title}
 		}
 		if m, ok := lastBy[c.LastMessageID]; ok {
 			m := m
@@ -382,7 +491,7 @@ func (s *ChatService) OpenDirect(a Actor, userID uint) (*ChatConversationDTO, er
 		return s.GetConversation(a, c.ID)
 	}
 	now := s.now()
-	conv := &models.ChatConversation{DirectKey: key, CreatedByID: a.ID, LastMessageAt: now}
+	conv := &models.ChatConversation{DirectKey: key, Kind: models.ChatKindDirect, CreatedByID: a.ID, LastMessageAt: now}
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
 		r := repositories.New(tx).Chat
 		if err := r.CreateConversation(conv); err != nil {
@@ -405,8 +514,9 @@ func (s *ChatService) OpenDirect(a Actor, userID uint) (*ChatConversationDTO, er
 	return s.GetConversation(a, conv.ID)
 }
 
-// MarkRead: người gọi đã đọc tới messageID (mốc không bao giờ lùi). Các tab
-// khác của chính người đó nhận sự kiện "read" để xoá số chưa đọc theo.
+// MarkRead: người gọi đã đọc tới messageID (mốc không bao giờ lùi). Mọi thành
+// viên của cuộc nhận sự kiện "read" (kèm user_id): các tab khác của chính người
+// đó xoá số chưa đọc, người khác thấy "đã xem".
 func (s *ChatService) MarkRead(a Actor, convID, messageID uint) error {
 	c, m, err := s.requireMember(a, convID)
 	if err != nil {
@@ -423,8 +533,12 @@ func (s *ChatService) MarkRead(a Actor, convID, messageID uint) error {
 	if err := s.repo.Chat.SaveMember(m); err != nil {
 		return apperr.Internal("could not mark read").Wrap(err)
 	}
-	s.hub.SendJSON([]uint{a.ID}, map[string]interface{}{
-		"type": "read", "conversation_id": convID, "message_id": messageID,
+	ids, err := s.memberIDs(convID)
+	if err != nil {
+		ids = []uint{a.ID}
+	}
+	s.hub.SendJSON(ids, map[string]interface{}{
+		"type": "read", "conversation_id": convID, "user_id": a.ID, "message_id": messageID, "read_at": now,
 	})
 	return nil
 }
@@ -440,7 +554,7 @@ type MessageQuery struct {
 
 // ListMessages trả tin theo thứ tự cũ → mới, kèm hasMore (còn tin cũ hơn).
 // after_id dùng để kéo bù tin lỡ khi WebSocket rớt.
-func (s *ChatService) ListMessages(a Actor, convID uint, q MessageQuery) ([]models.ChatMessage, bool, error) {
+func (s *ChatService) ListMessages(a Actor, convID uint, q MessageQuery) ([]ChatMessageDTO, bool, error) {
 	if _, _, err := s.requireMember(a, convID); err != nil {
 		return nil, false, err
 	}
@@ -456,7 +570,8 @@ func (s *ChatService) ListMessages(a Actor, convID uint, q MessageQuery) ([]mode
 		if err != nil {
 			return nil, false, apperr.Internal("could not list messages").Wrap(err)
 		}
-		return rows, false, nil
+		out, err := s.messageDTOs(rows)
+		return out, false, err
 	}
 	rows, err := s.repo.Chat.MessagesBefore(convID, q.BeforeID, limit+1)
 	if err != nil {
@@ -469,27 +584,43 @@ func (s *ChatService) ListMessages(a Actor, convID uint, q MessageQuery) ([]mode
 	for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
 		rows[i], rows[j] = rows[j], rows[i]
 	}
-	return rows, hasMore, nil
+	out, err := s.messageDTOs(rows)
+	return out, hasMore, err
 }
 
 // SendInput là nội dung một lần gửi.
 type SendInput struct {
-	Body     string `json:"body"`
-	ClientID string `json:"client_id"`
+	Body          string `json:"body"`
+	ClientID      string `json:"client_id"`
+	ReplyToID     uint   `json:"reply_to_id"`
+	AttachmentIDs []uint `json:"attachment_ids"`
 }
 
-// SendMessage gửi một tin chữ vào cuộc và đẩy realtime cho cả hai bên.
-func (s *ChatService) SendMessage(a Actor, convID uint, in SendInput) (*models.ChatMessage, error) {
+func cleanBody(raw string) (string, error) {
+	body := strings.TrimSpace(strings.ReplaceAll(raw, "\r\n", "\n"))
+	if utf8.RuneCountInString(body) > chatMaxBody {
+		return "", apperr.Unprocessable(fmt.Sprintf("Tin nhắn dài quá %d ký tự", chatMaxBody))
+	}
+	return body, nil
+}
+
+// SendMessage gửi một tin (chữ và/hoặc file, có thể trả lời một tin) vào cuộc và
+// đẩy realtime cho mọi thành viên.
+func (s *ChatService) SendMessage(a Actor, convID uint, in SendInput) (*ChatMessageDTO, error) {
 	conv, _, err := s.requireMember(a, convID)
 	if err != nil {
 		return nil, err
 	}
-	body := strings.TrimSpace(strings.ReplaceAll(in.Body, "\r\n", "\n"))
-	if body == "" {
+	body, err := cleanBody(in.Body)
+	if err != nil {
+		return nil, err
+	}
+	attIDs := uniqueUints(in.AttachmentIDs)
+	if body == "" && len(attIDs) == 0 {
 		return nil, apperr.BadRequest("Tin nhắn trống")
 	}
-	if utf8.RuneCountInString(body) > chatMaxBody {
-		return nil, apperr.Unprocessable(fmt.Sprintf("Tin nhắn dài quá %d ký tự", chatMaxBody))
+	if len(attIDs) > chatMaxAttachments {
+		return nil, apperr.Unprocessable(fmt.Sprintf("Mỗi tin gửi tối đa %d file", chatMaxAttachments))
 	}
 	clientID := strings.TrimSpace(in.ClientID)
 	if len(clientID) > 64 {
@@ -497,24 +628,49 @@ func (s *ChatService) SendMessage(a Actor, convID uint, in SendInput) (*models.C
 	}
 	if clientID != "" {
 		if old, err := s.repo.Chat.MessageByClientID(a.ID, clientID); err == nil {
-			return old, nil // gửi lại vì mạng chập chờn: trả đúng tin cũ
+			return s.messageDTO(old) // gửi lại vì mạng chập chờn: trả đúng tin cũ
 		}
 	}
 	ids, err := s.memberIDs(convID)
 	if err != nil {
 		return nil, apperr.Internal("could not load members").Wrap(err)
 	}
-	users, err := s.loadUsers(ids)
-	if err != nil {
-		return nil, err
-	}
-	me := s.viewerOf(a, users)
-	for _, id := range ids {
-		if id != a.ID && !s.canSee(me, users[id]) {
-			return nil, apperr.Forbidden("Người này hiện không nhận được tin nhắn")
+	if !conv.IsGroup() {
+		users, err := s.loadUsers(ids)
+		if err != nil {
+			return nil, err
+		}
+		me := s.viewerOf(a, users)
+		for _, id := range ids {
+			if id != a.ID && !s.canSee(me, users[id]) {
+				return nil, apperr.Forbidden("Người này hiện không nhận được tin nhắn")
+			}
 		}
 	}
-	msg := &models.ChatMessage{ConversationID: convID, SenderID: a.ID, Body: body}
+	var replyTo *uint
+	if in.ReplyToID > 0 {
+		t, err := s.repo.Chat.MessageByID(in.ReplyToID)
+		if err != nil || t.ConversationID != convID {
+			return nil, apperr.Unprocessable("Tin được trả lời không thuộc cuộc này")
+		}
+		replyTo = &t.ID
+	}
+	atts, err := s.repo.Chat.AttachmentsByIDs(attIDs)
+	if err != nil {
+		return nil, apperr.Internal("could not load files").Wrap(err)
+	}
+	if len(atts) != len(attIDs) {
+		return nil, apperr.Unprocessable("File không còn — tải lên lại")
+	}
+	for _, x := range atts {
+		if x.ConversationID != convID || x.UploaderID != a.ID || x.MessageID != nil {
+			return nil, apperr.Unprocessable("File không hợp lệ hoặc đã gửi rồi")
+		}
+	}
+	msg := &models.ChatMessage{
+		ConversationID: convID, SenderID: a.ID, Body: body, Kind: models.ChatMsgText,
+		ReplyToID: replyTo, Refs: s.resolveRefs(body),
+	}
 	if clientID != "" {
 		msg.ClientID = &clientID
 	}
@@ -522,6 +678,12 @@ func (s *ChatService) SendMessage(a Actor, convID uint, in SendInput) (*models.C
 		r := repositories.New(tx).Chat
 		if err := r.CreateMessage(msg); err != nil {
 			return err
+		}
+		for i := range atts {
+			atts[i].MessageID = &msg.ID
+			if err := r.SaveAttachment(&atts[i]); err != nil {
+				return err
+			}
 		}
 		conv.LastMessageID, conv.LastMessageAt = msg.ID, msg.CreatedAt
 		if err := r.SaveConversation(conv); err != nil {
@@ -538,13 +700,45 @@ func (s *ChatService) SendMessage(a Actor, convID uint, in SendInput) (*models.C
 	if err != nil {
 		if clientID != "" {
 			if old, err2 := s.repo.Chat.MessageByClientID(a.ID, clientID); err2 == nil {
-				return old, nil
+				return s.messageDTO(old)
 			}
 		}
 		return nil, apperr.Internal("could not send message").Wrap(err)
 	}
-	s.hub.SendJSON(ids, map[string]interface{}{"type": "message.new", "message": msg})
-	return msg, nil
+	d, err := s.messageDTO(msg)
+	if err != nil {
+		return nil, err
+	}
+	s.hub.SendJSON(ids, map[string]interface{}{"type": "message.new", "message": d})
+	return d, nil
+}
+
+// postSystem ghi một dòng hệ thống ("A đã thêm B") vào cuộc và đẩy cho thành
+// viên. Lỗi chỉ ghi log: dòng hệ thống là phụ, thao tác chính đã xong.
+func (s *ChatService) postSystem(conv *models.ChatConversation, actorID uint, body string, notify []uint) {
+	msg := &models.ChatMessage{ConversationID: conv.ID, SenderID: actorID, Body: body, Kind: models.ChatMsgSystem}
+	err := s.repo.DB.Transaction(func(tx *gorm.DB) error {
+		r := repositories.New(tx).Chat
+		if err := r.CreateMessage(msg); err != nil {
+			return err
+		}
+		conv.LastMessageID, conv.LastMessageAt = msg.ID, msg.CreatedAt
+		if err := r.SaveConversation(conv); err != nil {
+			return err
+		}
+		if m, err := r.Member(conv.ID, actorID); err == nil {
+			m.LastReadMessageID, m.LastReadAt = msg.ID, &msg.CreatedAt
+			return r.SaveMember(m)
+		}
+		return nil
+	})
+	if err != nil {
+		chatLog("system message conv %d: %v", conv.ID, err)
+		return
+	}
+	if d, err := s.messageDTO(msg); err == nil {
+		s.hub.SendJSON(notify, map[string]interface{}{"type": "message.new", "message": d})
+	}
 }
 
 // ---------- WebSocket ----------

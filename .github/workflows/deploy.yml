@@ -74,6 +74,18 @@ jobs:
             $DC up -d caddy
           '
 
+      - name: Chat sau deploy — vai trò được mở, nơi lưu file, chỗ trống ổ đĩa (không in bí mật)
+        continue-on-error: true
+        run: |
+          ssh -i ~/.ssh/deploy_key root@${{ secrets.VPS_HOST }} '
+            cd /root/FFM/THE-fulfillment-web
+            DC="docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.server.yml"
+            sleep 5
+            $DC logs --since 20m backend 2>/dev/null | grep -E "chat: (mở cho|file lưu|gửi file|kho Supabase|CHAT_STORAGE)" | tail -4 || true
+            docker volume ls --format "{{.Name}}" | grep chat_files || echo "chưa có volume chat_files"
+            df -h /var/lib/docker | tail -1
+          '
+
       - name: Kiểm tra /health sau deploy
         run: |
           ssh -i ~/.ssh/deploy_key root@${{ secrets.VPS_HOST }} '

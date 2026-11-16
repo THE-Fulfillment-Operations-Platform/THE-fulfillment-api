@@ -4,8 +4,10 @@
 // Redis/pub-sub. Nếu sau này chạy nhiều instance thì phải thay hub này bằng một
 // kênh phát chung (vd. Postgres LISTEN/NOTIFY).
 //
-// Hub chỉ đẩy sự kiện từ server xuống trình duyệt. Trình duyệt gửi lên duy nhất
-// "ping" (giữ kết nối); mọi thao tác thật (gửi tin, đánh dấu đã đọc) đi qua REST.
+// Hub chủ yếu đẩy sự kiện từ server xuống trình duyệt. Trình duyệt gửi lên
+// "ping" (giữ kết nối) và các tín hiệu nhẹ không cần lưu ("typing" — đang soạn),
+// chuyển cho Inbound; mọi thao tác thật (gửi, sửa, thu hồi, đã đọc) đi qua REST.
+// Hub cũng biết ai đang online (có ít nhất một kết nối) và báo qua Presence.
 package chathub
 
 import (
@@ -45,6 +47,12 @@ type Hub struct {
 
 	tmu     sync.Mutex
 	tickets map[string]ticket
+
+	// Inbound nhận khung trình duyệt gửi lên (trừ ping). Đặt trước khi phục vụ.
+	Inbound func(userID uint, typ string, raw []byte)
+	// Presence được gọi khi một người có kết nối đầu tiên (online=true) hoặc
+	// đóng kết nối cuối cùng (online=false). Gọi ngoài khoá.
+	Presence func(userID uint, online bool)
 }
 
 type ticket struct {
@@ -127,25 +135,57 @@ func (c *Client) close() {
 	c.once.Do(func() { close(c.send) })
 }
 
+// Broadcast gửi một sự kiện tới mọi người đang online.
+func (h *Hub) Broadcast(v interface{}) {
+	h.SendJSON(h.OnlineUsers(), v)
+}
+
+// OnlineUsers: những người đang có ít nhất một kết nối.
+func (h *Hub) OnlineUsers() []uint {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	out := make([]uint, 0, len(h.clients))
+	for id := range h.clients {
+		out = append(out, id)
+	}
+	return out
+}
+
+// IsOnline: người này đang có kết nối.
+func (h *Hub) IsOnline(userID uint) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.clients[userID]) > 0
+}
+
 func (h *Hub) register(c *Client) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	set := h.clients[c.userID]
-	if set == nil {
+	first := set == nil
+	if first {
 		set = map[*Client]struct{}{}
 		h.clients[c.userID] = set
 	}
 	set[c] = struct{}{}
+	h.mu.Unlock()
+	if first && h.Presence != nil {
+		h.Presence(c.userID, true)
+	}
 }
 
 func (h *Hub) unregister(c *Client) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	last := false
 	if set := h.clients[c.userID]; set != nil {
 		delete(set, c)
 		if len(set) == 0 {
 			delete(h.clients, c.userID)
+			last = true
 		}
+	}
+	h.mu.Unlock()
+	if last && h.Presence != nil {
+		h.Presence(c.userID, false)
 	}
 }
 
@@ -160,12 +200,12 @@ func (h *Hub) Serve(conn *websocket.Conn, userID uint) {
 	}
 	done := make(chan struct{})
 	go c.writePump(done)
-	c.readPump()
+	c.readPump(h)
 	c.close()
 	<-done
 }
 
-func (c *Client) readPump() {
+func (c *Client) readPump(h *Hub) {
 	c.conn.SetReadLimit(maxInbound)
 	_ = c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(func(string) error {
@@ -181,8 +221,13 @@ func (c *Client) readPump() {
 		var env struct {
 			Type string `json:"type"`
 		}
-		if json.Unmarshal(data, &env) == nil && env.Type == "ping" {
+		if json.Unmarshal(data, &env) != nil {
+			continue
+		}
+		if env.Type == "ping" {
 			c.enqueue(pong)
+		} else if env.Type != "" && h.Inbound != nil {
+			h.Inbound(c.userID, env.Type, data)
 		}
 	}
 }

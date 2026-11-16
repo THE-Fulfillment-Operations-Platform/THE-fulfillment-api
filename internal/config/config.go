@@ -121,12 +121,23 @@ type Config struct {
 	// ThumbSweepInterval is how often unused thumbnails are evicted from disk.
 	ThumbSweepInterval time.Duration
 
-	// Chat nội bộ (nhắn tin chữ 1-1). ChatRoles là danh sách vai trò NỘI BỘ được
-	// dùng chat, cách nhau dấu phẩy ("ALL" = mọi vai trò nội bộ); mặc định chỉ Kỹ
-	// thuật viên (Nghĩa #5370: KTV dùng thử trước). Seller vào chat chỉ khi
-	// ChatAllowSeller=true, và chỉ nhắn được với tài khoản nội bộ.
+	// Chat nội bộ. ChatRoles là danh sách vai trò NỘI BỘ được dùng chat, cách
+	// nhau dấu phẩy; mặc định "ALL" = mọi vai trò nội bộ (anh Kiên 17/11, #5453:
+	// "nghĩ nội bộ thôi"). Seller vào chat chỉ khi ChatAllowSeller=true — mặc định
+	// tắt hẳn ("seller h họ dùng Lark hết").
 	ChatRoles       string
 	ChatAllowSeller bool
+	// File gửi trong chat. ChatStorage: "auto" (mặc định — có SUPABASE_URL +
+	// SUPABASE_SERVICE_ROLE_KEY thì dùng Supabase Storage, không thì đĩa server),
+	// "supabase", "disk", hoặc "off" (tắt gửi file).
+	ChatStorage     string
+	ChatFilesDir    string
+	ChatFileMaxMB   int
+	ChatFileBucket  string
+	SupabaseURL     string
+	SupabaseKey     string
+	ChatMinFreeMB   int
+	ChatFileURLTTLH int
 }
 
 // Load reads configuration from a .env file (if present) and the process
@@ -214,8 +225,16 @@ func Load() *Config {
 		ThumbURLTTL:        time.Duration(getEnvAsInt("THUMB_URL_TTL_HOURS", 24)) * time.Hour,
 		ThumbSweepInterval: time.Duration(getEnvAsInt("THUMB_SWEEP_INTERVAL_HOURS", 24)) * time.Hour,
 
-		ChatRoles:       getEnv("CHAT_ROLES", "TECHNICIAN"),
+		ChatRoles:       getEnv("CHAT_ROLES", "ALL"),
 		ChatAllowSeller: getEnvAsBool("CHAT_ALLOW_SELLER", false),
+		ChatStorage:     strings.ToLower(getEnv("CHAT_STORAGE", "auto")),
+		ChatFilesDir:    getEnv("CHAT_FILES_DIR", "./data/chat"),
+		ChatFileMaxMB:   getEnvAsInt("CHAT_FILE_MAX_MB", 20),
+		ChatFileBucket:  getEnv("CHAT_FILES_BUCKET", "chat"),
+		SupabaseURL:     getEnv("SUPABASE_URL", ""),
+		SupabaseKey:     firstNonEmpty(getEnv("SUPABASE_SERVICE_ROLE_KEY", ""), getEnv("SUPABASE_SERVICE_KEY", "")),
+		ChatMinFreeMB:   getEnvAsInt("CHAT_MIN_FREE_MB", 1024),
+		ChatFileURLTTLH: getEnvAsInt("CHAT_FILE_URL_TTL_HOURS", 12),
 	}
 
 	// Credentials are what actually make the integration work; a TRACK24H_ENABLED
@@ -419,4 +438,14 @@ func splitAndTrim(s string) []string {
 		}
 	}
 	return out
+}
+
+// firstNonEmpty trả giá trị đầu tiên khác rỗng.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }

@@ -132,6 +132,9 @@ func main() {
 	// minute and put them on the orders. Idle while the integration is off.
 	svc.Carrier.StartLastMilePoll(purgeCtx, time.Minute)
 
+	// Chat: dọn file tải lên mà không gửi (quá 24 giờ), mỗi giờ.
+	svc.Chat.StartJanitor(purgeCtx)
+
 	// Evict mockup thumbnails nobody has looked at in a month, so the cache
 	// tracks what is actually in production rather than growing forever.
 	if svc.Thumb.Enabled() {

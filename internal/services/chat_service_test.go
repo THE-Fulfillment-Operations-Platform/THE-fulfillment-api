@@ -3,6 +3,7 @@ package services
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -215,7 +216,7 @@ func TestChat_UnreadAndMarkRead(t *testing.T) {
 	if err != nil || c2.ID != c.ID {
 		t.Fatalf("mở lại phải ra cùng cuộc: %v / %d vs %d", err, c2.ID, c.ID)
 	}
-	var last *models.ChatMessage
+	var last *ChatMessageDTO
 	for _, b := range []string{"một", "hai", "ba"} {
 		if last, err = s.SendMessage(f.ktv1, c.ID, SendInput{Body: b}); err != nil {
 			t.Fatalf("send: %v", err)
@@ -389,7 +390,8 @@ func TestChat_WebSocketDelivery(t *testing.T) {
 		}
 	}
 
-	// ktv2 đọc ở một tab → chính ktv2 nhận "read"; ktv1 thì không (không có "đã xem").
+	// ktv2 đọc ở một tab → tab khác của ktv2 nhận "read" (xoá số chưa đọc), và
+	// người gửi ktv1 cũng nhận (để hiện "đã xem", #5453) — kèm user_id người đọc.
 	k2b := dial(f.ktv2)
 	defer k2b.Close()
 	next(k2b, "hello")
@@ -399,20 +401,74 @@ func TestChat_WebSocketDelivery(t *testing.T) {
 	if ev := next(k2b, "read"); uint(ev["message_id"].(float64)) != sent.ID {
 		t.Fatalf("read = %v", ev)
 	}
-	_ = k1a.WriteJSON(map[string]string{"type": "ping"})
-	_ = k1a.SetReadDeadline(time.Now().Add(2 * time.Second))
+	ev := next(k1a, "read")
+	if uint(ev["user_id"].(float64)) != f.ktv2.ID || uint(ev["message_id"].(float64)) != sent.ID {
+		t.Fatalf("người gửi nhận read = %v, want user_id ktv2 / message %d", ev, sent.ID)
+	}
+	// Người ngoài cuộc không biết ai đọc gì.
+	_ = outsider.WriteJSON(map[string]string{"type": "ping"})
+	_ = outsider.SetReadDeadline(time.Now().Add(2 * time.Second))
 	for {
-		_, data, err := k1a.ReadMessage()
+		_, data, err := outsider.ReadMessage()
 		if err != nil {
-			t.Fatalf("k1a: %v", err)
+			t.Fatalf("outsider: %v", err)
 		}
 		var ev map[string]interface{}
 		_ = json.Unmarshal(data, &ev)
 		if ev["type"] == "pong" {
 			break
 		}
-		if ev["type"] == "read" {
-			t.Fatal("người gửi không được nhận sự kiện đã đọc của người kia")
+		if ev["type"] == "read" || ev["type"] == "typing" {
+			t.Fatalf("người ngoài cuộc nhận %v", ev["type"])
+		}
+	}
+
+	// "Đang soạn…": ktv1 gửi khung typing qua chính WebSocket → ktv2 nhận, kèm ai
+	// đang soạn; người không ở trong cuộc gửi typing thì không ai nhận.
+	_ = k1a.WriteJSON(map[string]interface{}{"type": "typing", "conversation_id": c.ID})
+	if ev := next(k2, "typing"); uint(ev["user_id"].(float64)) != f.ktv1.ID || uint(ev["conversation_id"].(float64)) != c.ID {
+		t.Fatalf("typing = %v", ev)
+	}
+	_ = outsider.WriteJSON(map[string]interface{}{"type": "typing", "conversation_id": c.ID})
+	_ = k2.WriteJSON(map[string]string{"type": "ping"})
+	_ = k2.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		_, data, err := k2.ReadMessage()
+		if err != nil {
+			t.Fatalf("k2: %v", err)
+		}
+		var ev map[string]interface{}
+		_ = json.Unmarshal(data, &ev)
+		if ev["type"] == "pong" {
+			break
+		}
+		if ev["type"] == "typing" && uint(ev["user_id"].(float64)) == f.ops.ID {
+			t.Fatal("người ngoài cuộc gửi được 'đang soạn' vào cuộc")
+		}
+	}
+
+	// Online / offline: ktv2 đóng hết kết nối → người khác nhận presence online=false.
+	if !s.Hub().IsOnline(f.ktv2.ID) {
+		t.Fatal("ktv2 đang có kết nối mà không online")
+	}
+	k2.Close()
+	k2b.Close()
+	for {
+		ev := next(k1b, "presence")
+		if uint(ev["user_id"].(float64)) == f.ktv2.ID && ev["online"] == false {
+			break
+		}
+	}
+	p, err := s.Presence(f.ktv1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p.LastSeen[fmt.Sprint(f.ktv2.ID)]; !ok {
+		t.Fatalf("thiếu lần cuối hoạt động của ktv2: %+v", p)
+	}
+	for _, id := range p.Online {
+		if id == f.ktv2.ID {
+			t.Fatal("ktv2 đã thoát mà vẫn online")
 		}
 	}
 }

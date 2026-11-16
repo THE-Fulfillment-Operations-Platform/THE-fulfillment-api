@@ -110,24 +110,36 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 
 	authd.GET("/me", h.Me)
 
-	// Chat nội bộ: nhắn tin chữ 1-1. Không phải một màn có tick quyền — ai dùng
-	// được (CHAT_ROLES, CHAT_ALLOW_SELLER) và ai nhắn được cho ai do
+	// Chat nội bộ: 1-1 và nhóm, chữ + ảnh/file. Không phải một màn có tick quyền —
+	// ai dùng được (CHAT_ROLES, CHAT_ALLOW_SELLER) và ai nhắn được cho ai do
 	// services.ChatService quyết, người không được mở nhận 403. WebSocket nằm ngoài
 	// nhóm JWT (trình duyệt không gắn header được), mở bằng vé dùng một lần lấy từ
-	// /chat/ws-ticket.
+	// /chat/ws-ticket. File chat cũng ngoài JWT (là src của <img>), URL ký có hạn.
 	if h.ChatEnabled() {
 		api.GET("/chat/ws", h.ChatSocket(cfg.CORSAllowedOrigins))
+		api.GET("/chat/files/:id", h.ChatFile)
 		chat := authd.Group("/chat")
 		{
 			chat.GET("/config", h.ChatConfig)
 			chat.POST("/ws-ticket", h.ChatTicket)
 			chat.GET("/users", h.ChatDirectory)
+			chat.GET("/presence", h.ChatPresence)
+			chat.GET("/search", h.ChatSearch)
 			chat.GET("/conversations", h.ChatListConversations)
 			chat.POST("/conversations", h.ChatOpenDirect)
+			chat.POST("/groups", h.ChatCreateGroup)
 			chat.GET("/conversations/:id", h.ChatGetConversation)
+			chat.PATCH("/conversations/:id", h.ChatRenameGroup)
+			chat.POST("/conversations/:id/members", h.ChatAddMembers)
+			chat.DELETE("/conversations/:id/members/:userId", h.ChatRemoveMember)
+			chat.POST("/conversations/:id/pin", h.ChatPin)
 			chat.POST("/conversations/:id/read", h.ChatMarkRead)
 			chat.GET("/conversations/:id/messages", h.ChatListMessages)
 			chat.POST("/conversations/:id/messages", h.ChatSendMessage)
+			chat.POST("/conversations/:id/files", h.ChatUpload)
+			chat.PATCH("/messages/:id", h.ChatEditMessage)
+			chat.DELETE("/messages/:id", h.ChatRecallMessage)
+			chat.POST("/messages/:id/reactions", h.ChatReact)
 		}
 	}
 
