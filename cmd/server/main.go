@@ -102,6 +102,7 @@ func main() {
 	}
 	svc := services.New(repo, jwtManager, carrier, trackOpts, thumbOpts, cfg.AppBaseURL,
 		services.CarrierOptions{Box: tokenBox, NewClient: services.DefaultTHEClient})
+	svc.Chat = newChatService(cfg, repo)
 	h := handlers.New(svc)
 	router := routes.New(cfg, h, jwtManager)
 

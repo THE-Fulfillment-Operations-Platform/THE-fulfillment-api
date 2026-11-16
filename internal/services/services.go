@@ -81,6 +81,9 @@ type Services struct {
 	// Carrier is the THE integration (connection settings, shipments, labels).
 	// Always present; it does nothing until an owner turns it on in Settings.
 	Carrier *CarrierService
+	// Chat là chat nội bộ (nhắn tin 1-1). Dựng riêng ở main (cần hub WebSocket),
+	// nil trong test không đụng tới chat.
+	Chat *ChatService
 }
 
 // TrackingOptions configures the 24hTrack shipment-tracking integration. A nil

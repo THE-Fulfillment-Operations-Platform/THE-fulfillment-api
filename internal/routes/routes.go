@@ -110,6 +110,27 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 
 	authd.GET("/me", h.Me)
 
+	// Chat nội bộ: nhắn tin chữ 1-1. Không phải một màn có tick quyền — ai dùng
+	// được (CHAT_ROLES, CHAT_ALLOW_SELLER) và ai nhắn được cho ai do
+	// services.ChatService quyết, người không được mở nhận 403. WebSocket nằm ngoài
+	// nhóm JWT (trình duyệt không gắn header được), mở bằng vé dùng một lần lấy từ
+	// /chat/ws-ticket.
+	if h.ChatEnabled() {
+		api.GET("/chat/ws", h.ChatSocket(cfg.CORSAllowedOrigins))
+		chat := authd.Group("/chat")
+		{
+			chat.GET("/config", h.ChatConfig)
+			chat.POST("/ws-ticket", h.ChatTicket)
+			chat.GET("/users", h.ChatDirectory)
+			chat.GET("/conversations", h.ChatListConversations)
+			chat.POST("/conversations", h.ChatOpenDirect)
+			chat.GET("/conversations/:id", h.ChatGetConversation)
+			chat.POST("/conversations/:id/read", h.ChatMarkRead)
+			chat.GET("/conversations/:id/messages", h.ChatListMessages)
+			chat.POST("/conversations/:id/messages", h.ChatSendMessage)
+		}
+	}
+
 	// Users (admin/owner). Deliberately role-gated, not a tick: whoever manages
 	// users could otherwise tick the rest for themselves.
 	users := authd.Group("/users", middleware.RequireRoles(roleAdminOwner...))

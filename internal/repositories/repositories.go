@@ -73,6 +73,8 @@ type Repositories struct {
 	Role         *RoleRepository
 	Basket       *BasketRepository
 	Warranty     *WarrantyRepository
+	// Chat là chat nội bộ (bảng chat_*).
+	Chat *ChatRepository
 }
 
 // New builds the repository bundle from a GORM handle.
@@ -102,5 +104,6 @@ func New(db *gorm.DB) *Repositories {
 		Role:         &RoleRepository{db: db},
 		Basket:       &BasketRepository{db: db},
 		Warranty:     &WarrantyRepository{db: db},
+		Chat:         &ChatRepository{db: db},
 	}
 }

@@ -120,6 +120,13 @@ type Config struct {
 	ThumbURLTTL time.Duration
 	// ThumbSweepInterval is how often unused thumbnails are evicted from disk.
 	ThumbSweepInterval time.Duration
+
+	// Chat nội bộ (nhắn tin chữ 1-1). ChatRoles là danh sách vai trò NỘI BỘ được
+	// dùng chat, cách nhau dấu phẩy ("ALL" = mọi vai trò nội bộ); mặc định chỉ Kỹ
+	// thuật viên (Nghĩa #5370: KTV dùng thử trước). Seller vào chat chỉ khi
+	// ChatAllowSeller=true, và chỉ nhắn được với tài khoản nội bộ.
+	ChatRoles       string
+	ChatAllowSeller bool
 }
 
 // Load reads configuration from a .env file (if present) and the process
@@ -206,6 +213,9 @@ func Load() *Config {
 		ThumbMaxPx:         getEnvAsInt("THUMB_MAX_PX", 900),
 		ThumbURLTTL:        time.Duration(getEnvAsInt("THUMB_URL_TTL_HOURS", 24)) * time.Hour,
 		ThumbSweepInterval: time.Duration(getEnvAsInt("THUMB_SWEEP_INTERVAL_HOURS", 24)) * time.Hour,
+
+		ChatRoles:       getEnv("CHAT_ROLES", "TECHNICIAN"),
+		ChatAllowSeller: getEnvAsBool("CHAT_ALLOW_SELLER", false),
 	}
 
 	// Credentials are what actually make the integration work; a TRACK24H_ENABLED

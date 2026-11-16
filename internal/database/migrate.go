@@ -59,6 +59,10 @@ func AutoMigrate(db *gorm.DB) error {
 	); err != nil {
 		return fmt.Errorf("database: auto-migrate: %w", err)
 	}
+	// Chat nội bộ: chỉ bảng chat_* mới, không đụng bảng cũ.
+	if err := db.AutoMigrate(models.ChatModels()...); err != nil {
+		return fmt.Errorf("database: auto-migrate chat: %w", err)
+	}
 	if err := ensureLiveCodeUniqueIndexes(db); err != nil {
 		return err
 	}
