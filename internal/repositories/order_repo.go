@@ -634,6 +634,18 @@ func whereContains(q *gorm.DB, column, value string) *gorm.DB {
 	return q.Where("LOWER("+column+") LIKE ?", "%"+strings.ToLower(value)+"%")
 }
 
+// likeEscaper makes %, _ and the escape character itself literal in a LIKE
+// pattern used with ESCAPE '\'.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// likeContainsPattern is the "contains" pattern for LOWER(col) LIKE ? ESCAPE '\':
+// lower-cased, wildcards escaped, wrapped in %…%. Typing "a_b" must find the code
+// A_B, not every A?B. ESCAPE '\' is spelled out because SQLite (the tests) has no
+// default escape character; on Postgres it is the default anyway.
+func likeContainsPattern(value string) string {
+	return "%" + likeEscaper.Replace(strings.ToLower(value)) + "%"
+}
+
 func (r *OrderRepository) List(f OrderFilter) ([]models.Order, int64, error) {
 	var rows []models.Order
 	var total int64
@@ -686,7 +698,7 @@ type ItemFilter struct {
 	SellerID       *uint
 	StoreID        *uint
 	StoreOrderID   string // partial, case-insensitive match on the parent order's store order id
-	SKUCode        string
+	SKUCode        string // partial, case-insensitive match on the line's SKU code; % and _ literal (see baseQuery)
 	InternalCode   string // partial, case-insensitive match on the item's internal (QR) code
 	Search         string // partial, case-insensitive match on the item's code, SKU, the order's internal code or store order id (one search box)
 	HasDesignFile  bool   // only items that already have a front or back design file (design-download pick-list)
@@ -1047,8 +1059,13 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 	if f.StoreOrderID != "" {
 		q = q.Where("orders.store_order_id ILIKE ?", "%"+f.StoreOrderID+"%")
 	}
-	if f.SKUCode != "" {
-		q = q.Where("order_items.sku_code = ?", f.SKUCode)
+	// SKU is "contains", case-insensitive: "fsh" finds FSH-01 and XFSH-2 (anh Kiên
+	// 17/11: gõ 2-3 ký tự là tìm — the exact match answered "Không có item nào
+	// khớp" to anything short of the full code). Every caller of this filter gets
+	// the same match (Orders/Items list, export-as-import, design-queue facets); a
+	// full code, as the design queue's dropdown sends, still finds itself.
+	if sku := strings.TrimSpace(f.SKUCode); sku != "" {
+		q = q.Where(`LOWER(order_items.sku_code) LIKE ? ESCAPE '\'`, likeContainsPattern(sku))
 	}
 	if f.InternalCode != "" {
 		q = q.Where("order_items.internal_code ILIKE ?", "%"+f.InternalCode+"%")

@@ -531,7 +531,7 @@ paths:
       tags: [Items]
       summary: Item view (filter seller, store, sku, status, batch, date)
       parameters:
-        - { name: sku, in: query, schema: { type: string } }
+        - { name: sku, in: query, schema: { type: string }, description: "SKU có chứa chuỗi này, không phân biệt hoa thường (% và _ là chữ thường)" }
         - { name: status, in: query, schema: { type: string, enum: [PENDING, PRINTED, CUT, QC_PASSED] } }
         - { name: design_status, in: query, schema: { type: string } }
         - { name: batch_id, in: query, schema: { type: integer } }
