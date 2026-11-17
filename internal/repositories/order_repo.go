@@ -1281,19 +1281,47 @@ type MaterialBucket struct {
 	ItemCount    int64  `json:"item_count"`
 }
 
+// livePartsCoverSKUSQL is true when an item (alias oi) already has a live
+// production part — not scrapped, not deleted — for as many distinct materials
+// as its SKU maps to NOW. Such an item is fully scheduled even if some of those
+// parts sit on a material the SKU no longer uses: the SKU's materials were
+// changed after the item was batched (anh Kiên 17/11/2026: Basswood 5 ly → 3 ly
+// made 81 items, most of them long produced and shipped on 5 ly, pop up as "chưa
+// gắn batch" for 3 ly). A combo half-way through (part on A, none yet on B) has
+// fewer parts than materials, so its missing material is still offered. The Go
+// twin is services.livePartsCoverSKU — change both together.
+const livePartsCoverSKUSQL = `(SELECT COUNT(DISTINCT bp.material_id) FROM batch_items bp
+		WHERE bp.order_item_id = oi.id AND bp.deleted_at IS NULL AND bp.scrapped_at IS NULL)
+	>= (SELECT COUNT(*) FROM sku_materials sx WHERE sx.sku_id = oi.sku_id AND sx.deleted_at IS NULL)`
+
 // designReadyUnbatchedSubquery returns (order_item_id, material_id) pairs for
 // items of APPROVED orders whose (item, material) is not yet scheduled into any
 // batch. There is no "set ready" step any more (khách bỏ màn Chờ thiết kế
 // 23/10/2026): an approved, live item goes straight into the create-batch pool,
 // whatever its design_status — the production files are attached per batch.
+//
+// The pair is read from the SKU's CURRENT materials, so two guards keep a later
+// edit of the SKU's materials from reopening work that is already done or under
+// way (anh Kiên 17/11/2026, 5 ly → 3 ly):
+//   - the order is still in the workshop (seller_status PRODUCTION): a packed,
+//     handed-off, shipped or delivered product is never batched again — a
+//     re-make for the customer is a warranty order, which is a new order;
+//   - the item's live parts do not already cover the SKU (livePartsCoverSKUSQL).
+//
+// To really move a still-unstarted item to the new material, delete its old
+// batch (or take the item out of it): the part goes, and the item comes back
+// here on the new material.
 func (r *OrderItemRepository) designReadyUnbatchedSubquery() *gorm.DB {
 	return r.db.Table("order_items oi").
 		Select("oi.id AS order_item_id, oi.sku_code AS sku_code, sm.material_id AS material_id, m.code AS material_code, m.name AS material_name").
 		Joins("JOIN orders o ON o.id = oi.order_id AND o.deleted_at IS NULL").
-		Joins("JOIN sku_materials sm ON sm.sku_id = oi.sku_id").
-		Joins("JOIN materials m ON m.id = sm.material_id").
+		// deleted_at on both: the same rows Preload("SKU.Materials") gives
+		// BatchService.Create, so the pool never offers a pair Create would refuse.
+		Joins("JOIN sku_materials sm ON sm.sku_id = oi.sku_id AND sm.deleted_at IS NULL").
+		Joins("JOIN materials m ON m.id = sm.material_id AND m.deleted_at IS NULL").
 		Where("oi.deleted_at IS NULL").
 		Where("o.review_status = ?", models.ReviewApproved).
+		Where("o.seller_status = ?", models.SellerStatusProduction).
 		Where("oi.cancellation_status NOT IN ?", []models.CancellationStatus{models.CancellationSeller, models.CancellationApproved}).
 		Where("NOT EXISTS (?)",
 			r.db.Table("batch_items bi").
@@ -1301,7 +1329,8 @@ func (r *OrderItemRepository) designReadyUnbatchedSubquery() *gorm.DB {
 				// scrapped_at IS NULL: a part written off after a QC fail no longer
 				// counts as "already batched", which is what lets the item come back
 				// into the create-batch bucket to be re-made.
-				Where("bi.order_item_id = oi.id AND bi.material_id = sm.material_id AND bi.deleted_at IS NULL AND bi.scrapped_at IS NULL"))
+				Where("bi.order_item_id = oi.id AND bi.material_id = sm.material_id AND bi.deleted_at IS NULL AND bi.scrapped_at IS NULL")).
+		Where("NOT (" + livePartsCoverSKUSQL + ")")
 }
 
 // MaterialBuckets returns the count of design-ready, unbatched item parts per material.

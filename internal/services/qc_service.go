@@ -347,7 +347,9 @@ func assertProductComplete(item *models.OrderItem) error {
 	// làm lại trông như đã hoàn thiện và lọt qua cửa này.
 	live := liveParts(item)
 	best := map[uint]models.InternalStatus{}
+	liveMaterials := map[uint]bool{}
 	for _, bi := range live {
+		liveMaterials[bi.MaterialID] = true
 		if cur, ok := best[bi.MaterialID]; !ok || bi.Status.Rank() > cur.Rank() {
 			best[bi.MaterialID] = bi.Status
 		}
@@ -358,7 +360,14 @@ func assertProductComplete(item *models.OrderItem) error {
 		return ok && s.Rank() >= cutRank
 	}
 
-	if item.SKU != nil && len(item.SKU.Materials) > 0 {
+	// SKU đổi NVL sau khi sản phẩm đã vào batch (anh Kiên 17/11/2026: 5 ly → 3
+	// ly): các phần còn sống đủ số NVL của SKU nhưng có phần nằm trên NVL cũ. Hàng
+	// chờ gom batch không đưa sản phẩm này ra lại (livePartsCoverSKU), nên đòi phần
+	// "3 ly" ở đây là chặn QC mãi mãi. Chấm theo đúng các phần nó đang có, như sản
+	// phẩm không rõ BOM ở dưới.
+	remapped := livePartsCoverSKU(item.SKU, liveMaterials) && !skuMaterialsAllIn(item.SKU, liveMaterials)
+
+	if item.SKU != nil && len(item.SKU.Materials) > 0 && !remapped {
 		var pending []string
 		for _, sm := range item.SKU.Materials {
 			if done(sm.MaterialID) {
@@ -378,7 +387,8 @@ func assertProductComplete(item *models.OrderItem) error {
 		return nil
 	}
 
-	// Unknown BOM: gate on the item's own parts — all must have reached CUT.
+	// Unknown BOM, or a SKU remapped after batching: gate on the item's own parts —
+	// all must have reached CUT.
 	if len(live) == 0 {
 		return apperr.Unprocessable("Item chưa được đưa vào batch sản xuất nên chưa thể QC")
 	}

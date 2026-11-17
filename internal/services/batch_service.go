@@ -129,6 +129,17 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) ([]*models.Batch
 				skip(itemID, "đã nằm trong một batch khác của NVL này")
 				continue
 			}
+			// Same two guards as the create-batch pool (designReadyUnbatchedSubquery),
+			// so a stale screen or a hand-made request can't batch what the pool
+			// no longer offers.
+			if item.Order.SellerStatus != models.SellerStatusProduction {
+				skip(itemID, "đơn đã đóng gói / bàn giao, không gom batch lại")
+				continue
+			}
+			if livePartsCoverSKU(item.SKU, existing[itemID]) {
+				skip(itemID, "đã nằm trong batch NVL cũ của SKU (SKU đổi NVL sau khi gom) — muốn làm lại bằng NVL mới thì xoá batch cũ trước")
+				continue
+			}
 			eligible = append(eligible, item)
 		}
 		if len(eligible) == 0 {
@@ -860,6 +871,37 @@ func skuHasMaterial(sku *models.SKU, materialID uint) bool {
 		}
 	}
 	return false
+}
+
+// livePartsCoverSKU reports whether an item's live production parts (scrapped
+// ones excluded; liveMaterials = the materials they sit on) already cover its SKU:
+// as many distinct materials as the SKU maps to now. That holds for a normally
+// finished schedule, and also when the SKU's materials were edited after the
+// item was batched (anh Kiên 17/11/2026: Basswood 5 ly → 3 ly) — the item is
+// being, or was, made on the old material and needs no part on the new one. A
+// combo half-way through (part on A, none yet on B) is not covered, so B is still
+// required. SQL twin: repositories.livePartsCoverSKUSQL — change both together.
+func livePartsCoverSKU(sku *models.SKU, liveMaterials map[uint]bool) bool {
+	if sku == nil || len(sku.Materials) == 0 {
+		return false
+	}
+	return len(liveMaterials) >= len(sku.Materials)
+}
+
+// skuMaterialsAllIn reports whether every material the SKU maps to now is in the
+// given set. Together with livePartsCoverSKU it tells "fully scheduled on the
+// SKU's own materials" (true) from "scheduled on materials the SKU has since
+// dropped" (false).
+func skuMaterialsAllIn(sku *models.SKU, materials map[uint]bool) bool {
+	if sku == nil {
+		return false
+	}
+	for _, sm := range sku.Materials {
+		if !materials[sm.MaterialID] {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------- Legacy production-template export ----------
