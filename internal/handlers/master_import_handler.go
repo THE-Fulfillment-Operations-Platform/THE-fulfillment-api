@@ -91,11 +91,13 @@ func (h *Handlers) DownloadMasterExport(c *gin.Context) {
 func (h *Handlers) MasterImportCommit(c *gin.Context) {
 	var body struct {
 		ImportJobID uint `json:"import_job_id" binding:"required"`
+		// The user has seen 409 SKU_MATERIAL_CHANGE_CONFIRM and applies anyway.
+		ConfirmMaterialChange bool `json:"confirm_material_change"`
 	}
 	if !bindJSON(c, &body) {
 		return
 	}
-	res, err := h.svc.MasterImport.Commit(actor(c), body.ImportJobID)
+	res, err := h.svc.MasterImport.CommitWithConfirm(actor(c), body.ImportJobID, body.ConfirmMaterialChange)
 	if err != nil {
 		response.Fail(c, err)
 		return

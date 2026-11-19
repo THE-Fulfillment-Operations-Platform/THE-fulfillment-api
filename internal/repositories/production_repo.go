@@ -764,6 +764,47 @@ func (r *BatchRepository) ExistingActiveItemMaterial(orderItemIDs []uint) (map[u
 	return out, nil
 }
 
+// SKUProductionPart is one live production part (not scrapped, not deleted) of
+// a product that is still being made: order in the workshop (PRODUCTION), line
+// not cancelled. Read per SKU so a change of the SKU's materials can say how
+// many products it touches and on which sheets (#6380).
+type SKUProductionPart struct {
+	SKUID        uint                  `gorm:"column:sku_id"`
+	OrderItemID  uint                  `gorm:"column:order_item_id"`
+	MaterialID   uint                  `gorm:"column:material_id"`
+	MaterialCode string                `gorm:"column:material_code"`
+	MaterialName string                `gorm:"column:material_name"`
+	BatchCode    string                `gorm:"column:batch_code"`
+	Status       models.InternalStatus `gorm:"column:status"`
+}
+
+// InProductionPartsForSKUs lists, in one statement, the live parts of every
+// product of the given SKUs that has not left the workshop yet. A packed or
+// handed-off order is out on purpose: the create-batch pool never offers it
+// again (designReadyUnbatchedSubquery), so a SKU material edit cannot reopen it.
+func (r *BatchRepository) InProductionPartsForSKUs(skuIDs []uint) ([]SKUProductionPart, error) {
+	var rows []SKUProductionPart
+	if len(skuIDs) == 0 {
+		return rows, nil
+	}
+	err := r.db.Table("batch_items bi").
+		Select("oi.sku_id AS sku_id, bi.order_item_id AS order_item_id, bi.material_id AS material_id, "+
+			"m.code AS material_code, m.name AS material_name, b.code AS batch_code, bi.status AS status").
+		Joins("JOIN order_items oi ON oi.id = bi.order_item_id AND oi.deleted_at IS NULL").
+		Joins("JOIN orders o ON o.id = oi.order_id AND o.deleted_at IS NULL").
+		Joins("JOIN batches b ON b.id = bi.batch_id AND b.deleted_at IS NULL").
+		Joins("JOIN materials m ON m.id = bi.material_id").
+		Where("bi.deleted_at IS NULL AND bi.scrapped_at IS NULL").
+		Where("oi.sku_id IN ?", skuIDs).
+		Where("oi.cancellation_status NOT IN ?",
+			[]models.CancellationStatus{models.CancellationSeller, models.CancellationApproved}).
+		Where("o.seller_status = ?", models.SellerStatusProduction).
+		Where("o.review_status <> ?", models.ReviewCancelled).
+		Order("bi.id").
+		Scan(&rows).Error
+	return rows, err
+}
+
 // ---------- Batch delete ----------
 
 // StartedPartCount counts parts across the given batches that production has

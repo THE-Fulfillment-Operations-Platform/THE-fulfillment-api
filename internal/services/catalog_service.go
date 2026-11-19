@@ -272,6 +272,10 @@ type SKUInput struct {
 	// assigned later from the Master Data → Mapping screen. On update, an empty/omitted
 	// list leaves the existing material set unchanged (see UpdateSKU).
 	Materials []SKUMaterialInput `json:"materials" binding:"omitempty,dive"`
+	// ConfirmMaterialChange: the user has seen the 409 SKU_MATERIAL_CHANGE_CONFIRM
+	// warning (two materials of one kind, e.g. Basswood 3 ly + 5 ly) and saves
+	// anyway (#6380).
+	ConfirmMaterialChange bool `json:"confirm_material_change"`
 }
 
 // SKUUpdateInput is a partial-update payload for an existing SKU. Unlike SKUInput,
@@ -294,6 +298,10 @@ type SKUUpdateInput struct {
 	Materials   []SKUMaterialInput `json:"materials" binding:"omitempty,dive"`
 	// Shipping declaration: omitted = leave as is (see SKUShippingInput).
 	SKUShippingInput
+	// ConfirmMaterialChange: the user has seen the 409 SKU_MATERIAL_CHANGE_CONFIRM
+	// warning (products still in the workshop, two materials of one kind) and
+	// saves the new material set anyway (#6380).
+	ConfirmMaterialChange bool `json:"confirm_material_change"`
 }
 
 // checkSKUParent enforces the two-level parent → child tree for SKU `selfID`
@@ -327,17 +335,21 @@ func (s *CatalogService) checkSKUParent(selfID, parentID uint) error {
 }
 
 // buildMaterials validates a SKU's material set (replaced wholesale on update).
-func (s *CatalogService) buildMaterials(in []SKUMaterialInput) ([]models.SKUMaterial, error) {
+// refs names each material of the set, in input order, for the change guard.
+func (s *CatalogService) buildMaterials(in []SKUMaterialInput) (out []models.SKUMaterial, refs []MaterialRef, err error) {
 	seen := map[uint]bool{}
-	out := make([]models.SKUMaterial, 0, len(in))
+	out = make([]models.SKUMaterial, 0, len(in))
+	refs = make([]MaterialRef, 0, len(in))
 	for _, m := range in {
-		if _, err := s.repo.Material.FindByID(m.MaterialID); err != nil {
-			return nil, apperr.BadRequest("material_id does not reference an existing material")
+		mat, err := s.repo.Material.FindByID(m.MaterialID)
+		if err != nil {
+			return nil, nil, apperr.BadRequest("material_id does not reference an existing material")
 		}
 		if seen[m.MaterialID] {
-			return nil, apperr.BadRequest("duplicate material in SKU material list")
+			return nil, nil, apperr.BadRequest("duplicate material in SKU material list")
 		}
 		seen[m.MaterialID] = true
+		refs = append(refs, materialRefOf(mat))
 		qty := m.QuantityPerUnit
 		if qty < 1 {
 			qty = 1
@@ -348,7 +360,7 @@ func (s *CatalogService) buildMaterials(in []SKUMaterialInput) ([]models.SKUMate
 		}
 		out = append(out, models.SKUMaterial{MaterialID: m.MaterialID, QuantityPerUnit: qty, ProductsPerUnit: quota, Note: m.Note})
 	}
-	return out, nil
+	return out, refs, nil
 }
 
 // CreateSKU creates a SKU and its material set. A SKU with more than one material
@@ -358,9 +370,20 @@ func (s *CatalogService) CreateSKU(actor Actor, in SKUInput) (*models.SKU, error
 	if _, err := s.repo.SKU.FindByCode(in.Code); err == nil {
 		return nil, apperr.Conflict("A SKU with this code already exists")
 	}
-	mats, err := s.buildMaterials(in.Materials)
+	mats, refs, err := s.buildMaterials(in.Materials)
 	if err != nil {
 		return nil, err
+	}
+	// A new SKU has no product in production yet; the only thing worth a second
+	// look is two materials of one kind (Basswood 3 ly + 5 ly) — #6380.
+	if !in.ConfirmMaterialChange && len(refs) > 1 {
+		impacts, err := assessSKUMaterialChanges(s.repo, []skuMaterialChange{{SKUCode: in.Code, After: refs}})
+		if err != nil {
+			return nil, apperr.Internal("could not check SKU materials").Wrap(err)
+		}
+		if len(impacts) > 0 {
+			return nil, skuMaterialChangeConfirmError(impacts)
+		}
 	}
 	var parentID *uint
 	if in.ParentID != nil && *in.ParentID != 0 {
@@ -458,9 +481,29 @@ func (s *CatalogService) UpdateSKU(actor Actor, id uint, in SKUUpdateInput) (*mo
 		return nil, err
 	}
 	if len(in.Materials) > 0 {
-		mats, err := s.buildMaterials(in.Materials)
+		mats, refs, err := s.buildMaterials(in.Materials)
 		if err != nil {
 			return nil, err
+		}
+		// Changing the material SET of a SKU whose products are in the workshop,
+		// or adding a second material of the same kind, needs an explicit
+		// confirmation (#6380). Same set (quota / quantity edits) never asks.
+		if !in.ConfirmMaterialChange {
+			before := make([]MaterialRef, 0, len(sku.Materials))
+			for _, sm := range sku.Materials {
+				ref := materialRefOf(&sm.Material)
+				ref.ID = sm.MaterialID
+				before = append(before, ref)
+			}
+			impacts, err := assessSKUMaterialChanges(s.repo, []skuMaterialChange{
+				{SKUID: sku.ID, SKUCode: sku.Code, Before: before, After: refs},
+			})
+			if err != nil {
+				return nil, apperr.Internal("could not check SKU materials").Wrap(err)
+			}
+			if len(impacts) > 0 {
+				return nil, skuMaterialChangeConfirmError(impacts)
+			}
 		}
 		if err := s.repo.SKU.ReplaceMaterials(sku.ID, mats); err != nil {
 			return nil, apperr.Internal("could not update SKU materials").Wrap(err)

@@ -1494,6 +1494,17 @@ func (r *OrderItemRepository) DesignReadyItemsForMaterial(materialID uint, p Pag
 
 	var rows []models.OrderItem
 	err = r.db.Preload("Order.Seller").Preload("SKU.Materials.Material").
+		// The item's live parts (not scrapped), with batch code/status and sheet:
+		// the pool for material X only lists items with no live part on X, so any
+		// part here sits on ANOTHER material. A real combo half-way through looks
+		// like that, but so does a SKU whose materials were edited after batching
+		// (19/11/2026: 3 ly + 5 ly → 23 products already cut on 3 ly re-offered on
+		// 5 ly and batched twice). The screen labels such rows and leaves them out
+		// of "chọn tất cả" (#6380).
+		Preload("BatchItems", func(db *gorm.DB) *gorm.DB {
+			return db.Where("batch_items.scrapped_at IS NULL").Joins("Batch").Joins("Material").
+				Order("batch_items.id asc")
+		}).
 		Where("id IN ?", pageIDs).Order(finalOrder).Find(&rows).Error
 	return rows, total, err
 }

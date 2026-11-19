@@ -167,6 +167,9 @@ type MasterImportSummary struct {
 	ParentGroups int `json:"parent_groups"`
 	// ShippingSKUs: SKUs the file gives a weight / box / value / HS for.
 	ShippingSKUs int `json:"shipping_skus"`
+	// MaterialWarnings: SKUs whose material change needs a confirmation before
+	// commit (see MasterImportPreview.MaterialWarnings).
+	MaterialWarnings int `json:"material_warnings"`
 }
 
 type MasterImportApplied struct {
@@ -194,6 +197,96 @@ type MasterImportPreview struct {
 	Errors      []LegacyRowError       `json:"errors"`
 	Summary     MasterImportSummary    `json:"summary"`
 	Applied     *MasterImportApplied   `json:"applied,omitempty"`
+	// MaterialWarnings: SKUs the import would change in a way that must be
+	// confirmed (#6380) — the file names a material the SKU does not have while
+	// the import only ADDS (Basswood 5 ly onto a Basswood 3 ly SKU = combo 3+5),
+	// two materials of one kind, or products of the SKU already in production.
+	// Commit refuses with 409 SKU_MATERIAL_CHANGE_CONFIRM until confirmed.
+	MaterialWarnings []SKUMaterialImpact `json:"material_warnings,omitempty"`
+}
+
+// importSKUSet is one SKU of an import plan for the material-change guard:
+// SKUID 0 = a SKU the import creates; Before = material ids it maps now; File =
+// the materials the file names for it (ID 0 = a material the import creates).
+type importSKUSet struct {
+	SKUID   uint
+	SKUCode string
+	Before  []uint
+	File    []MaterialRef
+}
+
+// importMaterialImpacts runs the material-change guard over an import plan.
+// Only SKUs whose set actually grows are looked at, and the catalog is read
+// only when one of them already exists — an import of new SKUs, or a re-import
+// that adds nothing, costs no statement at all.
+func importMaterialImpacts(repo *repositories.Repositories, sets []importSKUSet) ([]SKUMaterialImpact, error) {
+	var need []importSKUSet
+	var beforeIDs []uint
+	for _, s := range sets {
+		if s.SKUID == 0 {
+			if len(s.File) >= 2 {
+				need = append(need, s)
+			}
+			continue
+		}
+		have := map[uint]bool{}
+		for _, id := range s.Before {
+			have[id] = true
+		}
+		adds := false
+		for _, f := range s.File {
+			if f.ID == 0 || !have[f.ID] {
+				adds = true
+				break
+			}
+		}
+		if adds {
+			need = append(need, s)
+			beforeIDs = append(beforeIDs, s.Before...)
+		}
+	}
+	if len(need) == 0 {
+		return nil, nil
+	}
+	refs, err := materialRefsByID(repo, beforeIDs)
+	if err != nil {
+		return nil, err
+	}
+	changes := make([]skuMaterialChange, 0, len(need))
+	for _, s := range need {
+		before := make([]MaterialRef, 0, len(s.Before))
+		for _, id := range s.Before {
+			ref, ok := refs[id]
+			if !ok {
+				ref = MaterialRef{ID: id}
+			}
+			before = append(before, ref)
+		}
+		after := append([]MaterialRef{}, before...)
+		seen := refSet(before)
+		for _, f := range s.File {
+			if !seen[f.key()] {
+				seen[f.key()] = true
+				after = append(after, f)
+			}
+		}
+		changes = append(changes, skuMaterialChange{
+			SKUID: s.SKUID, SKUCode: s.SKUCode, Before: before, After: after, FileSet: s.File,
+		})
+	}
+	return assessSKUMaterialChanges(repo, changes)
+}
+
+// mappingsBySKU indexes a snapshot's stored (sku, material) pairs per SKU, ids sorted.
+func (c *catalogSnapshot) mappingsBySKU() map[uint][]uint {
+	out := map[uint][]uint{}
+	for pair := range c.mappings {
+		out[pair[0]] = append(out[pair[0]], pair[1])
+	}
+	for k := range out {
+		sort.Slice(out[k], func(i, j int) bool { return out[k][i] < out[k][j] })
+	}
+	return out
 }
 
 // ---------- Parsing ----------
@@ -1034,6 +1127,36 @@ func (s *MasterImportService) analyze(rows []LegacyRow) (*MasterImportPreview, e
 	}
 	sum.ParentGroups = len(parents)
 
+	// Material-change guard (#6380): what the commit will ask to confirm, shown
+	// now so the dialog can say it before anyone clicks "Áp dụng".
+	beforeBySKU := snap.mappingsBySKU()
+	var sets []importSKUSet
+	for _, code := range accepted {
+		agg := skuMap[code]
+		if len(agg.matNames) == 0 {
+			continue
+		}
+		set := importSKUSet{SKUCode: agg.code}
+		if rec := snap.sku(code); rec != nil {
+			set.SKUID = rec.ID
+			set.Before = beforeBySKU[rec.ID]
+		}
+		for _, name := range agg.matNames {
+			if m := snap.material(name); m != nil {
+				set.File = append(set.File, materialRefOf(m))
+			} else {
+				set.File = append(set.File, MaterialRef{Code: materialCode(name), Name: name})
+			}
+		}
+		sets = append(sets, set)
+	}
+	warnings, err := importMaterialImpacts(s.repo, sets)
+	if err != nil {
+		return nil, apperr.Internal("could not read catalog").Wrap(err)
+	}
+	pv.MaterialWarnings = warnings
+	sum.MaterialWarnings = len(warnings)
+
 	pv.Summary = sum
 	return pv, nil
 }
@@ -1082,8 +1205,18 @@ func (s *MasterImportService) Preview(actor Actor, source, filename string, rows
 
 // Commit applies a PREVIEW job's stored plan: it find-or-creates the materials,
 // find-or-creates the SKUs and adds the single-material mappings. It is additive
-// and never removes an existing material from a SKU.
+// and never removes an existing material from a SKU. A plan that changes a SKU's
+// materials in a way that needs confirming is refused (409) — see
+// CommitWithConfirm.
 func (s *MasterImportService) Commit(actor Actor, jobID uint) (*MasterImportPreview, error) {
+	return s.CommitWithConfirm(actor, jobID, false)
+}
+
+// CommitWithConfirm is Commit; confirmMaterialChange = the user has seen the
+// SKU_MATERIAL_CHANGE_CONFIRM warning and applies the import anyway (#6380).
+// The guard runs again here, inside the transaction, on the catalog as it is
+// NOW — the preview may be minutes old and production may have started since.
+func (s *MasterImportService) CommitWithConfirm(actor Actor, jobID uint, confirmMaterialChange bool) (*MasterImportPreview, error) {
 	job, err := s.repo.MasterImport.FindByID(jobID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1275,6 +1408,10 @@ func (s *MasterImportService) Commit(actor Actor, jobID uint) (*MasterImportPrev
 			}
 		}
 
+		// What each existing SKU maps BEFORE this commit — read now: the loop below
+		// marks every pair it adds in snap.mappings.
+		beforeBySKU := snap.mappingsBySKU()
+
 		// ---- Mappings: only the pairs that aren't stored yet, in batches; the
 		// file's Định mức rides on new pairs and is written onto existing ones ----
 		var newMappings []models.SKUMaterial
@@ -1307,6 +1444,39 @@ func (s *MasterImportService) Commit(actor Actor, jobID uint) (*MasterImportPrev
 				SKUID: skuID, MaterialID: matID, QuantityPerUnit: 1, ProductsPerUnit: quota, Note: mappingSourceNote,
 			})
 		}
+
+		// Material-change guard (#6380), on the catalog as it is now.
+		if !confirmMaterialChange {
+			fileBySKU := map[string][]MaterialRef{}
+			for _, mp := range pv.Mappings {
+				matID := matIDByName[strings.ToLower(strings.TrimSpace(mp.MaterialName))]
+				fileBySKU[mp.SKUCode] = append(fileBySKU[mp.SKUCode],
+					MaterialRef{ID: matID, Code: mp.MaterialCode, Name: mp.MaterialName})
+			}
+			sets := make([]importSKUSet, 0, len(pv.SKUs))
+			for _, sp := range pv.SKUs {
+				file := fileBySKU[sp.Code]
+				if len(file) == 0 {
+					continue
+				}
+				set := importSKUSet{SKUCode: sp.Code, File: file}
+				// Only a SKU that existed before this commit can have products in
+				// production; a SKU created above is checked as new (SKUID 0).
+				if rec := snap.sku(sp.Code); rec != nil {
+					set.SKUID = rec.ID
+					set.Before = beforeBySKU[rec.ID]
+				}
+				sets = append(sets, set)
+			}
+			impacts, err := importMaterialImpacts(txRepo, sets)
+			if err != nil {
+				return err
+			}
+			if len(impacts) > 0 {
+				return skuMaterialChangeConfirmError(impacts)
+			}
+		}
+
 		if err := txRepo.SKU.AddMaterialsMany(newMappings, skuInsertBatch); err != nil {
 			return err
 		}

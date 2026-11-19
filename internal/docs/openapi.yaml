@@ -276,6 +276,13 @@ paths:
       description: >-
         Gửi `materials[]` là thay TOÀN BỘ material set.
 
+        Đổi BỘ NVL (thêm/bỏ NVL) khi SKU còn sản phẩm trong xưởng đã vào batch,
+        hoặc thêm hai NVL cùng loại khác độ dày (vd Basswood 3 ly + 5 ly), trả
+        409 `SKU_MATERIAL_CHANGE_CONFIRM` với `error.details.skus[]` (số sản
+        phẩm, NVL + mã batch, cặp cùng loại) — gửi lại kèm
+        `confirm_material_change: true` để lưu. POST /api/skus và
+        /api/master-data/import/commit cũng theo luật này.
+
         Mọi field đều là cập nhật từng phần: field không gửi = giữ nguyên (gửi
         chuỗi rỗng mới xoá `product_name`/`description`). `parent_id`: bỏ field
         = giữ, gửi 0 = tách khỏi SKU cha. `length_mm`/`width_mm`: bỏ = giữ, gửi
@@ -585,7 +592,15 @@ paths:
     get: { tags: [Design], summary: Đếm item design-ready chưa batch theo material, responses: { '200': { description: OK } } }
   /api/design-queue/material/{materialId}/items:
     parameters: [{ name: materialId, in: path, required: true, schema: { type: integer } }]
-    get: { tags: [Design], summary: Item design-ready chưa batch của 1 material, responses: { '200': { description: OK } } }
+    get:
+      tags: [Design]
+      summary: Item design-ready chưa batch của 1 material
+      description: >-
+        Mỗi item kèm `batch_items[]` = các phần sống (chưa ghi bỏ) của nó, có
+        `batch` (mã, trạng thái) và `material`. Item trong pool của NVL X chưa
+        có phần trên X, nên phần nào ở đây cũng nằm ở NVL KHÁC: combo đang dở,
+        hoặc SKU bị đổi NVL sau khi gom (màn Tạo batch gắn nhãn, không tự tick).
+      responses: { '200': { description: OK } }
   /api/batches:
     get:
       tags: [Batches]
@@ -600,6 +615,9 @@ paths:
         thứ tự tấm), `batch` (= batches[0], giữ cho client cũ) và
         `skipped_item_ids`. Không còn batch mẹ/con từ 24/09/2026; các batch con
         cũ đã được tách thành batch thường khi API khởi động.
+
+        Không bao giờ tạo batch rỗng: id lặp được gộp, không còn sản phẩm hợp
+        lệ sau khi lọc thì trả 422 kèm lý do từng sản phẩm, không ghi gì.
       requestBody:
         required: true
         content:

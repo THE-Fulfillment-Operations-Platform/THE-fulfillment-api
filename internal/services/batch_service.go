@@ -53,10 +53,11 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) ([]*models.Batch
 	if err != nil {
 		return nil, nil, apperr.BadRequest("material_id does not reference an existing material")
 	}
-
-	existing, err := s.repo.Batch.ExistingActiveItemMaterial(in.OrderItemIDs)
-	if err != nil {
-		return nil, nil, apperr.Internal("could not check existing batch items").Wrap(err)
+	// A repeated id would become two parts of the same (item, material, attempt)
+	// and die on the unique index as a 500; zero is no item at all.
+	in.OrderItemIDs = dedupeIDs(in.OrderItemIDs)
+	if len(in.OrderItemIDs) == 0 {
+		return nil, nil, apperr.Unprocessable("Chưa chọn sản phẩm nào để tạo batch.")
 	}
 
 	priority := models.Priority(in.Priority)
@@ -78,6 +79,14 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) ([]*models.Batch
 
 	err = s.repo.DB.Transaction(func(tx *gorm.DB) error {
 		txRepo := repositories.New(tx)
+
+		// Parts already scheduled, read INSIDE the transaction: read before it, a
+		// double click (or two people on the same pool) could both pass the check
+		// and batch the same products twice — the second run just takes attempt 2.
+		existing, err := txRepo.Batch.ExistingActiveItemMaterial(in.OrderItemIDs)
+		if err != nil {
+			return err
+		}
 
 		// Bulk-load every selected item (order + SKU materials) in one query set —
 		// the per-item checks below then run entirely in memory instead of issuing
@@ -198,6 +207,11 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) ([]*models.Batch
 		// "-1/-2" suffixes (khách chốt 24/09/2026: "bỏ lớp mẹ đi, để nó ra một
 		// batch mới cho dễ quản lý").
 		for _, group := range groups {
+			// Never a batch without a part: a header with nothing to make is what
+			// "batch rỗng 0 sản phẩm" looks like on the list (#6380).
+			if len(group) == 0 {
+				continue
+			}
 			batch := newBatch()
 			if err := txRepo.Batch.Create(batch); err != nil {
 				return err
@@ -211,6 +225,9 @@ func (s *BatchService) Create(actor Actor, in CreateBatchInput) ([]*models.Batch
 			}
 			_ = recordStatus(txRepo, models.EntityBatch, batch.ID, "", string(models.StatusPending), actor, "batch created")
 			created = append(created, batch)
+		}
+		if len(created) == 0 {
+			return apperr.Unprocessable("Không gom được sản phẩm nào vào batch.")
 		}
 		return nil
 	})

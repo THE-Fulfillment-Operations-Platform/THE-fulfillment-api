@@ -23,6 +23,9 @@ func newMasterDB(t *testing.T) *gorm.DB {
 	if err := db.AutoMigrate(
 		&models.Material{}, &models.SKU{}, &models.SKUMaterial{},
 		&models.MasterImportJob{}, &models.AuditLog{},
+		// Orders + batches: an import that changes an existing SKU's materials
+		// checks whether that SKU has products in production (#6380).
+		&models.Order{}, &models.OrderItem{}, &models.Batch{}, &models.BatchItem{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
