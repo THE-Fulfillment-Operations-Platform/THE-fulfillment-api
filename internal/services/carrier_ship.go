@@ -273,8 +273,19 @@ func (s *CarrierService) BuildParcel(c *models.CarrierConfig, o *models.Order) (
 	if us && p.Value >= 800 {
 		return nil, []string{fmt.Sprintf("Giá trị khai báo %.2f USD — THE chỉ nhận đơn đi Mỹ dưới 800 USD", p.Value)}
 	}
-	// One HS code per parcel on THE: the line worth the most speaks for it.
-	sort.SliceStable(lines, func(i, j int) bool { return lines[i].value > lines[j].value })
+	// One HS code per parcel on THE. A parcel holding anything that is not a
+	// postcard is declared as that thing (Nghĩa #6323, 19/11/2026: một đơn có cả
+	// thiệp và hàng khác): THE only buys labels by itself for postcards and leaves
+	// every other parcel Pending for its CS, so a mixed parcel declared "postcard"
+	// would get a postcard label it must not have. Among the non-postcard lines
+	// (or among postcards when that is all there is) the line worth the most
+	// speaks for the parcel.
+	sort.SliceStable(lines, func(i, j int) bool {
+		if pi, pj := isPostcardHS(lines[i].hs), isPostcardHS(lines[j].hs); pi != pj {
+			return !pi
+		}
+		return lines[i].value > lines[j].value
+	})
 	p.HSCode = lines[0].hs
 	p.Request = theapi.CreatePackageRequest{
 		OrderNumber: o.InternalCode,
@@ -1182,4 +1193,10 @@ func (s *CarrierService) SyncHeld(ctx context.Context, limit int) (int, error) {
 		got++
 	}
 	return got, nil
+}
+
+// isPostcardHS: HS 4909.00.20.00 (bưu thiếp), with or without THE's 3-digit
+// system suffix (4909002000347) — the only goods THE labels by itself for FFM.
+func isPostcardHS(hs string) bool {
+	return strings.HasPrefix(strings.TrimSpace(hs), "4909002000")
 }
