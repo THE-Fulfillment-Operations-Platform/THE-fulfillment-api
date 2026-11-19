@@ -207,6 +207,9 @@ func itemFilterFrom(c *gin.Context) repositories.ItemFilter {
 		WarrantyEligible: services.WarrantyPolicy.PressableScope(actor(c).Role),
 		HandedOver:       c.Query("handed_over") == "1" || c.Query("handed_over") == "true",
 		Packed:           c.Query("packed") == "1" || c.Query("packed") == "true",
+		// ?files=ready|missing — tách "Chờ xử lý" theo đã có file SX hay chưa (màn
+		// Đơn hàng/Sản phẩm, cùng nghĩa với ?files= của màn Batch).
+		Files:            itemFilesFilter(c.Query("files")),
 		DesignStatus:     c.Query("design_status"),
 		ReviewStatus:     reviewStatus,
 		IncludeCancelled: includeCancelled,
@@ -222,6 +225,9 @@ func itemFilterFrom(c *gin.Context) repositories.ItemFilter {
 		// (hàng chờ thiết kế, chọn hàng gom batch) không in tên seller. Màn Đơn
 		// hàng thì có cột Seller và bộ lọc theo seller nên nó tự bật.
 		WithSeller: c.Query("with_seller") == "1" || c.Query("with_seller") == "true",
+		// ?with_files=1 — kèm cờ production_files_ready ("Đã có file SX") cho từng
+		// dòng: một câu lệnh nữa, nên chỉ màn Đơn hàng/Sản phẩm bật.
+		WithFilesReady: c.Query("with_files") == "1" || c.Query("with_files") == "true",
 	}
 }
 
@@ -551,6 +557,16 @@ func (h *Handlers) CreateWarranty(c *gin.Context) {
 func warrantyFilter(v string) string {
 	switch v {
 	case "eligible", "child", "root":
+		return v
+	}
+	return ""
+}
+
+// itemFilesFilter whitelists ?files= for the item list: ready | missing.
+// Anything else means "no filter".
+func itemFilesFilter(v string) string {
+	switch v {
+	case "ready", "missing":
 		return v
 	}
 	return ""

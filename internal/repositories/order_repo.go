@@ -707,8 +707,16 @@ type ItemFilter struct {
 	// THE, shipped or delivered. It is the "Đã bàn giao" badge on the order
 	// list, which reads the order's seller status, not the item's internal
 	// status — a handed-off item still sits at QC_PASSED internally.
-	HandedOver     bool
-	Packed         bool // nhóm chip "Đã đóng gói" (seller_status PACKED)
+	HandedOver bool
+	Packed     bool // nhóm chip "Đã đóng gói" (seller_status PACKED)
+	// Files tách "Chờ xử lý" của sản phẩm đúng như màn Batch tách batch (BatchFilter.
+	// Files): "ready" = PENDING và đã có file SX (itemFilesReadyCond) — chip "Đã có
+	// file SX"; "missing" = mọi sản phẩm PENDING còn lại. Giá trị khác = không lọc.
+	// Tự kèm điều kiện PENDING, nên gửi cùng hay không cùng status=PENDING đều như nhau.
+	Files string
+	// WithFilesReady điền OrderItem.ProductionFilesReady cho các dòng của trang (1
+	// câu lệnh nữa tới DB). Chỉ màn Đơn hàng/Sản phẩm bật (?with_files=1).
+	WithFilesReady bool
 	DesignStatus   string
 	ReviewStatus   string // exact match on the parent order's review_status
 	BatchID        *uint
@@ -1038,6 +1046,53 @@ func chipActiveOrder(q *gorm.DB) *gorm.DB {
 		Where("orders.cancellation_status <> ?", models.CancellationSeller)
 }
 
+// itemFilesReadyCond là "Đã có file SX" ở cấp SẢN PHẨM, cùng nghĩa với chip "Đã có
+// file SX" của batch (filesReadyCond / batchStatusBadge ở web): file in + file cắt
+// là của TẤM — designer ghép nhiều design lên một tấm rồi gắn link PRINT + CUT vào
+// batch (batch_links) — nên sản phẩm có file SX khi:
+//   - có ít nhất một phần sản xuất còn sống (chưa xoá, chưa bị huỷ ghi bỏ ở QC);
+//   - MỌI phần còn sống nằm trong batch còn đó, chưa đóng, đã đủ link PRINT và CUT
+//     (một phần ở batch chưa có file là sản phẩm chưa sản xuất được);
+//   - các phần còn sống phủ đủ NVL hiện tại của SKU (cùng phép đếm với
+//     livePartsCoverSKUSQL): SKU 2 NVL mới gom 1 tấm thì tấm kia chưa có file.
+//
+// Không đọc cột print_file_url/cut_file_url của sản phẩm: đó là bản chép xuống cho
+// export/tem/QC, bị ghi đè khi sản phẩm nằm ở 2 batch (2 NVL) và được chép sang
+// đơn bảo hành chưa gom batch — dùng nó sẽ báo "có file" sai.
+// Không có điều kiện trạng thái: bộ lọc tự kèm PENDING (xem baseQuery.Files).
+const itemFilesReadyCond = `EXISTS (SELECT 1 FROM batch_items fp
+		WHERE fp.order_item_id = order_items.id AND fp.deleted_at IS NULL AND fp.scrapped_at IS NULL)
+	AND NOT EXISTS (SELECT 1 FROM batch_items fp
+		LEFT JOIN batches fb ON fb.id = fp.batch_id AND fb.deleted_at IS NULL AND fb.closed_at IS NULL
+		WHERE fp.order_item_id = order_items.id AND fp.deleted_at IS NULL AND fp.scrapped_at IS NULL
+		AND (fb.id IS NULL
+			OR NOT EXISTS (SELECT 1 FROM batch_links bl WHERE bl.batch_id = fb.id AND bl.kind = 'PRINT' AND bl.url <> '' AND bl.deleted_at IS NULL)
+			OR NOT EXISTS (SELECT 1 FROM batch_links bl WHERE bl.batch_id = fb.id AND bl.kind = 'CUT' AND bl.url <> '' AND bl.deleted_at IS NULL)))
+	AND (SELECT COUNT(DISTINCT fp.material_id) FROM batch_items fp
+		WHERE fp.order_item_id = order_items.id AND fp.deleted_at IS NULL AND fp.scrapped_at IS NULL)
+	>= (SELECT COUNT(*) FROM sku_materials sx WHERE sx.sku_id = order_items.sku_id AND sx.deleted_at IS NULL)`
+
+// FilesReadyIDs trả về những id trong ids đang "Đã có file SX" (itemFilesReadyCond)
+// — một câu lệnh cho cả trang, để chip trên bảng và bộ lọc dùng ĐÚNG một điều kiện.
+func (r *OrderItemRepository) FilesReadyIDs(ids []uint) (map[uint]bool, error) {
+	out := map[uint]bool{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	var got []uint
+	err := r.db.Model(&models.OrderItem{}).
+		Where("order_items.id IN ?", ids).
+		Where(itemFilesReadyCond).
+		Pluck("order_items.id", &got).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range got {
+		out[id] = true
+	}
+	return out, nil
+}
+
 func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 	q := r.db.Model(&models.OrderItem{}).
 		Joins("JOIN orders ON orders.id = order_items.order_id AND orders.deleted_at IS NULL")
@@ -1100,6 +1155,12 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 			q = q.Where("orders.seller_status = ?", models.SellerStatusProduction)
 			q = chipActiveOrder(q)
 		}
+	}
+	switch f.Files {
+	case "ready":
+		q = q.Where("order_items.internal_status = ?", models.StatusPending).Where(itemFilesReadyCond)
+	case "missing":
+		q = q.Where("order_items.internal_status = ?", models.StatusPending).Where("NOT (" + itemFilesReadyCond + ")")
 	}
 	if f.Packed {
 		// Nhóm hiện chip "Đã đóng gói": đơn PACKED, đã duyệt, chưa huỷ.

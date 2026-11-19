@@ -126,7 +126,32 @@ func (s *OrderService) ListItems(f repositories.ItemFilter) ([]models.OrderItem,
 	if err := annotateWarrantyCounts(s.repo, orders); err != nil {
 		return rows, total, err
 	}
+	if f.WithFilesReady {
+		if err := annotateProductionFilesReady(s.repo, rows); err != nil {
+			return rows, total, err
+		}
+	}
 	return rows, total, nil
+}
+
+// annotateProductionFilesReady đặt OrderItem.ProductionFilesReady ("Đã có file SX")
+// cho các dòng của trang bằng một câu lệnh — cùng điều kiện với bộ lọc ?files=.
+func annotateProductionFilesReady(repo *repositories.Repositories, rows []models.OrderItem) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	ids := make([]uint, len(rows))
+	for i := range rows {
+		ids[i] = rows[i].ID
+	}
+	ready, err := repo.OrderItem.FilesReadyIDs(ids)
+	if err != nil {
+		return err
+	}
+	for i := range rows {
+		rows[i].ProductionFilesReady = ready[rows[i].ID]
+	}
+	return nil
 }
 
 // annotateStoreOrderDup sets Order.StoreOrderDup on every order whose StoreOrderID

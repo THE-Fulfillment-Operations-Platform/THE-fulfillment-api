@@ -545,6 +545,19 @@ paths:
             Trả kèm seller của đơn (order.seller). Tắt mặc định vì đây là một
             round trip nữa tới DB; chỉ màn nào in tên seller mới bật.
           schema: { type: boolean }
+        - name: files
+          in: query
+          description: >-
+            Tách "Chờ xử lý" theo file sản xuất (tự kèm status=PENDING): ready =
+            "Đã có file SX" — mọi phần sản xuất còn sống nằm trong batch đã có đủ
+            link in + cắt và phủ đủ NVL của SKU; missing = các sản phẩm PENDING còn lại.
+          schema: { type: string, enum: [ready, missing] }
+        - name: with_files
+          in: query
+          description: >-
+            Trả kèm cờ production_files_ready trên từng dòng (cùng điều kiện với
+            files=ready). Tắt mặc định vì là một câu lệnh nữa tới DB.
+          schema: { type: boolean }
       responses: { '200': { description: OK } }
   /api/items/{id}:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]

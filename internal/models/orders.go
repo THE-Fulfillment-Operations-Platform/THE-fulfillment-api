@@ -269,6 +269,12 @@ type OrderItem struct {
 
 	Assets     []ItemAsset `json:"assets,omitempty" gorm:"foreignKey:OrderItemID"`
 	BatchItems []BatchItem `json:"batch_items,omitempty" gorm:"foreignKey:OrderItemID"`
+
+	// ProductionFilesReady is computed, never stored (no column, no migration): every
+	// live production part of the item sits in a batch that already has its print +
+	// cut links — "Đã có file SX" (repositories.itemFilesReadyCond). Filled only by
+	// the item list when asked (?with_files=1); false elsewhere.
+	ProductionFilesReady bool `json:"production_files_ready,omitempty" gorm:"-"`
 }
 
 func (OrderItem) TableName() string { return "order_items" }
