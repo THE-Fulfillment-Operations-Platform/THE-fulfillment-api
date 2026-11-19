@@ -33,9 +33,12 @@ type CarrierConfig struct {
 	// PackagingWeightG is added once per parcel on top of the products' weight
 	// (box, padding).
 	PackagingWeightG float64 `json:"packaging_weight_g" gorm:"not null;default:0"`
-	// Customs defaults, set by the carrier side (THE): the factory knows its
-	// products' weight and box, not THE's HS code table. A SKU that declares
-	// its own HS code / value overrides these. "" / 0 = no default.
+	// Customs defaults, set by the carrier side (THE). DefaultDeclaredValue still
+	// fills a SKU that declares no value (0 = no default).
+	// DefaultHSCode is NO LONGER USED to fill a SKU without an HS code (#6312,
+	// 19/11/2026): it was the postcard code, so unclassified goods shipped as
+	// postcards. The column stays for compatibility (settings screen, old
+	// clients); an order whose SKU (and parent) has no HS code is refused.
 	DefaultHSCode        string  `json:"default_hs_code" gorm:"size:20;not null;default:''"`
 	DefaultDeclaredValue float64 `json:"default_declared_value" gorm:"not null;default:0"`
 	UpdatedByID          *uint   `json:"updated_by_id"`

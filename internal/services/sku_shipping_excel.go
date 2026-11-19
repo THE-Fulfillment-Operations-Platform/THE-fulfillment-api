@@ -255,8 +255,8 @@ type SKUShippingPreviewRow struct {
 	Status  string   `json:"status"`
 	Changes []string `json:"changes,omitempty"`
 	Error   string   `json:"error,omitempty"`
-	// Missing: what the factory still has to declare for this SKU AFTER the
-	// import (weight / box), counting what it inherits from its parent.
+	// Missing: what still has to be declared for this SKU AFTER the import
+	// (weight / box / HS code), counting what it inherits from its parent.
 	Missing []string `json:"missing,omitempty"`
 }
 
@@ -390,9 +390,14 @@ func (s *CatalogService) planSKUShipping(rows []SKUShippingFileRow, present []st
 		if sk.ParentID != nil {
 			parent = state(*sk.ParentID)
 		}
-		// The factory's part only: HS code / value may come from the THE
-		// connection's defaults, set by the carrier side.
-		pr.Missing = models.EffectiveShipping(sk, parent).MissingPhysical()
+		// Weight / box, plus the HS code: since #6312 the THE connection's
+		// default no longer fills it, so a SKU (or its parent) without one
+		// cannot go to THE. The declared value may still come from the default.
+		spec := models.EffectiveShipping(sk, parent)
+		pr.Missing = spec.MissingPhysical()
+		if spec.HSCode == "" {
+			pr.Missing = append(pr.Missing, "mã HS")
+		}
 		if len(pr.Missing) > 0 {
 			out.Incomplete++
 		}

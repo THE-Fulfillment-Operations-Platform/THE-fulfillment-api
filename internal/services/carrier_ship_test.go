@@ -814,8 +814,9 @@ func TestTHE_BuildParcel(t *testing.T) {
 	}
 }
 
-// Customs data are the carrier side's: a SKU with only weight + box ships with
-// the connection's default HS code / value, and a SKU's own values win.
+// The declared value still has a default in the THE connection (a SKU's own
+// value wins). The HS code does NOT any more (#6312): the connection's default
+// HS code never fills a SKU without one — the SKU must declare it.
 func TestTHE_CustomsDefaultsFromConnection(t *testing.T) {
 	e := newTHEEnv(t)
 	owner := Actor{ID: 1, Role: models.RoleOwner}
@@ -825,23 +826,31 @@ func TestTHE_CustomsDefaultsFromConnection(t *testing.T) {
 	o := e.order(t, "100201")
 	e.db.Model(&models.OrderItem{}).Where("order_id = ?", o.ID).Update("sku_code", "PLAIN")
 
-	// No defaults yet: blocked, pointing at the THE settings, before THE is called.
+	// No default value yet: blocked, pointing at the THE settings, before THE is called.
 	res := e.send(t, o)
 	if len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0].Reason, "Kết nối THE") || e.fake.creates != 0 {
 		t.Fatalf("want a block pointing at the THE settings: %+v", res)
 	}
 
-	hs, val := "3926.40.00", 7.0
+	hs, val := "4909002000347", 7.0
 	if _, err := e.carrier.UpdateConfig(owner, CarrierConfigInput{DefaultHSCode: &hs, DefaultDeclaredValue: &val}); err != nil {
 		t.Fatal(err)
 	}
+	// The default value now fills in, the default HS code does not: still blocked.
+	res = e.send(t, o)
+	if len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0].Reason, "chưa có mã HS cho SKU PLAIN") ||
+		strings.Contains(res.Skipped[0].Reason, "giá trị khai báo") || e.fake.creates != 0 {
+		t.Fatalf("the default HS code must not stand in for the SKU's: %+v creates=%d", res, e.fake.creates)
+	}
+
+	e.db.Model(&models.SKU{}).Where("id = ?", plain.ID).Update("hs_code", "39264000")
 	res = e.send(t, o)
 	if len(res.Shipped) != 1 {
-		t.Fatalf("with defaults the order must ship: %+v", res)
+		t.Fatalf("with its own HS code + the default value the order must ship: %+v", res)
 	}
 	for _, p := range e.fake.pkgs {
 		if p.orderNumber == "SO-100201" && (p.req.HSCode != "39264000" || p.req.Value != 7) {
-			t.Fatalf("defaults not applied: hs=%s value=%v", p.req.HSCode, p.req.Value)
+			t.Fatalf("SKU HS + default value expected: hs=%s value=%v", p.req.HSCode, p.req.Value)
 		}
 	}
 

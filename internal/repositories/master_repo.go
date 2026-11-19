@@ -558,11 +558,15 @@ type SKUInfo struct {
 	ID            uint
 	MaterialCount int64
 	ProductName   string
+	// HSCode is the HS code the SKU ships with: its own, else its parent's
+	// (models.EffectiveShipping). "" = none — THE refuses such an order (#6312).
+	HSCode string
 }
 
 // InfoByCodes returns SKUInfo for every existing code in one query (LEFT JOIN
-// on the mapping table), replacing a FindByCode + CountMaterials pair per row.
-// Codes are expected pre-normalized. Missing codes are simply absent.
+// on the mapping table and the parent SKU), replacing a FindByCode +
+// CountMaterials pair per row. Codes are expected pre-normalized. Missing codes
+// are simply absent.
 func (r *SKURepository) InfoByCodes(codes []string) (map[string]SKUInfo, error) {
 	out := map[string]SKUInfo{}
 	if len(codes) == 0 {
@@ -573,20 +577,23 @@ func (r *SKURepository) InfoByCodes(codes []string) (map[string]SKUInfo, error) 
 		Code          string
 		MaterialCount int64
 		ProductName   string
+		HSCode        string
 	}
 	var rows []row
 	err := r.db.Model(&models.SKU{}).
 		Select("skus.id, skus.code, COUNT(sku_materials.id) AS material_count, "+
-			"COALESCE(NULLIF(skus.product_name, ''), skus.name) AS product_name").
+			"COALESCE(NULLIF(skus.product_name, ''), skus.name) AS product_name, "+
+			"COALESCE(NULLIF(skus.hs_code, ''), parent_sku.hs_code, '') AS hs_code").
 		Joins("LEFT JOIN sku_materials ON sku_materials.sku_id = skus.id AND sku_materials.deleted_at IS NULL").
+		Joins("LEFT JOIN skus AS parent_sku ON parent_sku.id = skus.parent_id AND parent_sku.deleted_at IS NULL").
 		Where("skus.code IN ?", codes).
-		Group("skus.id, skus.code, skus.product_name, skus.name").
+		Group("skus.id, skus.code, skus.product_name, skus.name, skus.hs_code, parent_sku.hs_code").
 		Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
 	for _, r := range rows {
-		out[r.Code] = SKUInfo{ID: r.ID, MaterialCount: r.MaterialCount, ProductName: r.ProductName}
+		out[r.Code] = SKUInfo{ID: r.ID, MaterialCount: r.MaterialCount, ProductName: r.ProductName, HSCode: r.HSCode}
 	}
 	return out, nil
 }

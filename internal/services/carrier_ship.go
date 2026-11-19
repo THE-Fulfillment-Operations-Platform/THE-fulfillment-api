@@ -231,6 +231,12 @@ func (s *CarrierService) BuildParcel(c *models.CarrierConfig, o *models.Order) (
 	if err != nil {
 		problems = append(problems, "Không đọc được thông tin vận chuyển SKU")
 	}
+	// No HS code on the SKU nor on its parent: the order does not go (#6312).
+	// One sentence for the whole order, naming every such SKU, so whoever fixes
+	// it does all of them in one pass.
+	if noHS := skusWithoutHSCode(codes, specs); len(noHS) > 0 {
+		problems = append(problems, missingHSMessage(o.InternalCode, noHS))
+	}
 	problems = append(problems, missing...)
 
 	p := &Parcel{Country: country, InternalCode: o.InternalCode}
@@ -296,11 +302,38 @@ func (s *CarrierService) BuildParcel(c *models.CarrierConfig, o *models.Order) (
 	return p, nil
 }
 
+// skusWithoutHSCode lists, in line order and once each, the SKU codes of the
+// order whose effective HS code (own, else parent's) is empty. SKUs unknown to
+// Master Data are left out: shippingSpecs already reports them.
+func skusWithoutHSCode(codes []string, specs map[string]models.ShippingSpec) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, raw := range codes {
+		code := models.NormalizeCode(raw)
+		if seen[code] {
+			continue
+		}
+		seen[code] = true
+		if spec, ok := specs[code]; ok && spec.HSCode == "" {
+			out = append(out, code)
+		}
+	}
+	return out
+}
+
+// missingHSMessage is the refusal for an order with SKUs that have no HS code.
+func missingHSMessage(orderCode string, skus []string) string {
+	return fmt.Sprintf("Đơn #%s chưa có mã HS cho SKU %s — khai mã HS ở Master Data → SKU (Vận chuyển / Import) cho SKU đó hoặc SKU cha rồi gửi lại",
+		orderCode, strings.Join(skus, ", "))
+}
+
 // shippingSpecs resolves the effective shipping declaration of each SKU code
-// (parent fallback, then the connection's customs defaults) and lists what is
-// missing, one message per SKU — pointing whoever must fix it at the right
-// screen: weight/box are the factory's (Master Data), HS code / value the
-// carrier side's (Settings → Kết nối THE).
+// (parent fallback, then the connection's default declared value) and lists
+// what is missing, one message per SKU — pointing whoever must fix it at the
+// right screen: weight/box are the factory's (Master Data), the value has a
+// default in Settings → Kết nối THE. The HS code is NOT defaulted and not
+// reported here: BuildParcel names every SKU without one in a single message
+// (skusWithoutHSCode).
 func (s *CarrierService) shippingSpecs(c *models.CarrierConfig, codes []string) (map[string]models.ShippingSpec, []string, error) {
 	skus, err := s.repo.SKU.ListByCodes(codes)
 	if err != nil {
@@ -342,20 +375,14 @@ func (s *CarrierService) shippingSpecs(c *models.CarrierConfig, codes []string) 
 		if sk.ParentID != nil {
 			parent = parents[*sk.ParentID]
 		}
-		spec := models.EffectiveShipping(sk, parent).WithDefaults(c.DefaultHSCode, c.DefaultDeclaredValue)
+		// c.DefaultHSCode is deliberately not applied (#6312): see WithDefaultValue.
+		spec := models.EffectiveShipping(sk, parent).WithDefaultValue(c.DefaultDeclaredValue)
 		out[code] = spec
 		if m := spec.MissingPhysical(); len(m) > 0 {
 			missing = append(missing, fmt.Sprintf("SKU %s chưa khai %s (Master Data → SKU → Vận chuyển)", code, strings.Join(m, ", ")))
 		}
-		var customs []string
-		if spec.HSCode == "" {
-			customs = append(customs, "mã HS")
-		}
 		if spec.DeclaredValue == nil {
-			customs = append(customs, "giá trị khai báo")
-		}
-		if len(customs) > 0 {
-			missing = append(missing, fmt.Sprintf("SKU %s chưa có %s — đặt giá trị mặc định ở Cài đặt → Kết nối THE (hoặc khai riêng cho SKU)", code, strings.Join(customs, ", ")))
+			missing = append(missing, fmt.Sprintf("SKU %s chưa có giá trị khai báo — đặt giá trị mặc định ở Cài đặt → Kết nối THE (hoặc khai riêng cho SKU)", code))
 		}
 	}
 	return out, missing, nil
@@ -657,7 +684,7 @@ func (s *CarrierService) createOnTHE(ctx context.Context, cli theAPI, sh *models
 				code = ShipErrData
 				// THE looks the code up by its OWN system code (HS code + its 3-digit id,
 				// e.g. bưu thiếp = 4909002000347), never by the plain 10-digit HS code.
-				msg = fmt.Sprintf("Mã HS %q không có trên THE — THE cần MÃ HỆ THỐNG THE (mã HS + 3 số đuôi, vd bưu thiếp 4909002000347, xem Sheet2 file mẫu THE), không phải mã HS 10 số. Sửa ở Cài đặt → Kết nối THE → Mã HS mặc định, hoặc mã HS của SKU", p.Request.HSCode)
+				msg = fmt.Sprintf("Mã HS %q không có trên THE — THE cần MÃ HỆ THỐNG THE (mã HS + 3 số đuôi, vd bưu thiếp 4909002000347, xem Sheet2 file mẫu THE), không phải mã HS 10 số. Sửa mã HS của SKU (hoặc SKU cha) ở Master Data → SKU → Vận chuyển", p.Request.HSCode)
 			}
 			_ = s.repo.Carrier.UpdateShipment(sh.ID, map[string]any{"status": models.ShipmentFailed, "error": msg})
 			sh.Status = models.ShipmentFailed

@@ -276,9 +276,10 @@ func EffectiveShipping(sku, parent *SKU) ShippingSpec {
 }
 
 // MissingPhysical lists what the FACTORY still has to declare for a SKU: the
-// packed weight and the box size — things only the workshop knows. Customs data
-// (HS code, declared value) belong to the carrier side: it sets defaults in the
-// THE connection, and a SKU only overrides them when it must differ.
+// packed weight and the box size — things only the workshop knows. The declared
+// value has a default in the THE connection (a SKU overrides it when it must
+// differ). The HS code has NO default since 19/11/2026 (#6312): every SKU — or
+// its parent — must declare its own, see Missing.
 func (s ShippingSpec) MissingPhysical() []string {
 	var out []string
 	if s.WeightG == nil {
@@ -290,12 +291,15 @@ func (s ShippingSpec) MissingPhysical() []string {
 	return out
 }
 
-// WithDefaults fills an undeclared HS code / declared value from the carrier
-// connection's defaults ("" / 0 = no default).
-func (s ShippingSpec) WithDefaults(hsCode string, value float64) ShippingSpec {
-	if s.HSCode == "" {
-		s.HSCode = hsCode
-	}
+// WithDefaultValue fills an undeclared declared value from the carrier
+// connection's default (0 = no default).
+//
+// The HS code is deliberately NOT defaulted (#6312, 19/11/2026): the old
+// connection default was the postcard code (4909002000347), so a SKU nobody had
+// classified went to THE as a postcard — wrong for customs, and THE now buys
+// the label on its own for exactly that code. A SKU without an HS code (own or
+// parent's) must stop the order instead.
+func (s ShippingSpec) WithDefaultValue(value float64) ShippingSpec {
 	if s.DeclaredValue == nil && value > 0 {
 		v := value
 		s.DeclaredValue = &v
@@ -304,7 +308,7 @@ func (s ShippingSpec) WithDefaults(hsCode string, value float64) ShippingSpec {
 }
 
 // Missing lists, in the operator's words, everything still undeclared for a
-// carrier shipment (apply WithDefaults first). Empty = complete.
+// carrier shipment (apply WithDefaultValue first). Empty = complete.
 func (s ShippingSpec) Missing() []string {
 	out := s.MissingPhysical()
 	if s.DeclaredValue == nil {

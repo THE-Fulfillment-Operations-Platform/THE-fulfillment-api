@@ -69,10 +69,15 @@ type QCResultOrder struct {
 	// THECancelled is the code of the label THE killed, when the order's latest
 	// shipment ended that way: it needs a new label before it may leave.
 	THECancelled string `json:"the_cancelled,omitempty"`
-	TotalItems   int    `json:"total_items"`
-	PassedItems  int    `json:"passed_items"`
-	ReworkItems  int    `json:"rework_items"`
-	WaitingItems int    `json:"waiting_items"`
+	// MissingHS lists the order's SKU codes that have no HS code, neither their
+	// own nor their parent's: "Tạo label THE" refuses the order until they are
+	// declared (#6312), so the ship queue flags it beforehand. Only filled for
+	// orders without a THE label yet.
+	MissingHS    []string `json:"missing_hs,omitempty"`
+	TotalItems   int      `json:"total_items"`
+	PassedItems  int      `json:"passed_items"`
+	ReworkItems  int      `json:"rework_items"`
+	WaitingItems int      `json:"waiting_items"`
 
 	Items []QCResultItem `json:"items"`
 }
@@ -153,7 +158,9 @@ func (s *QCService) buildResultOrders(ids []uint) ([]QCResultOrder, error) {
 	// One lookup for the whole page: product names live on the SKU in master data,
 	// not on the line (see models.OrderItem.ProductName). These rows come from a
 	// raw projection, so there is no SKU preload to read them off.
+	// The same lookup carries each SKU's effective HS code (flagMissingHS).
 	skuNames := map[string]string{}
+	var infos map[string]repositories.SKUInfo
 	if len(lines) > 0 {
 		seen := map[string]bool{}
 		codes := make([]string, 0, len(lines))
@@ -163,7 +170,8 @@ func (s *QCService) buildResultOrders(ids []uint) ([]QCResultOrder, error) {
 				codes = append(codes, c)
 			}
 		}
-		infos, infoErr := s.repo.SKU.InfoByCodes(codes)
+		var infoErr error
+		infos, infoErr = s.repo.SKU.InfoByCodes(codes)
 		if infoErr != nil {
 			return nil, apperr.Internal("could not load SKU names").Wrap(infoErr)
 		}
@@ -233,7 +241,37 @@ func (s *QCService) buildResultOrders(ids []uint) ([]QCResultOrder, error) {
 			o.Status = QCOrderNone
 		}
 	}
+	flagMissingHS(out, lines, infos)
 	return out, nil
+}
+
+// flagMissingHS fills MissingHS, in line order and once per SKU, on the orders
+// that still need their THE label, from the SKU lookup the page already made
+// (no extra statement). SKUs unknown to Master Data are left out: the send
+// refuses them for that reason, not for the HS code.
+func flagMissingHS(out []QCResultOrder, lines []models.OrderItem, infos map[string]repositories.SKUInfo) {
+	byOrder := map[uint]*QCResultOrder{}
+	for i := range out {
+		if out[i].THETracking == "" {
+			byOrder[out[i].OrderID] = &out[i]
+		}
+	}
+	seen := map[uint]map[string]bool{}
+	for i := range lines {
+		o := byOrder[lines[i].OrderID]
+		code := lines[i].SKUCode
+		info, known := infos[code]
+		if o == nil || !known || info.HSCode != "" {
+			continue
+		}
+		if seen[o.OrderID] == nil {
+			seen[o.OrderID] = map[string]bool{}
+		}
+		if !seen[o.OrderID][code] {
+			seen[o.OrderID][code] = true
+			o.MissingHS = append(o.MissingHS, code)
+		}
+	}
 }
 
 // OrderScanRef identifies an order by the code on its paper / QR (internal code,

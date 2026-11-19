@@ -62,6 +62,8 @@ type CarrierConfigView struct {
 	DefaultPhone     string  `json:"default_phone"`
 	PackagingWeightG float64 `json:"packaging_weight_g"`
 	// Customs defaults set by the carrier side; a SKU overrides them.
+	// DefaultHSCode is kept for compatibility only: since #6312 it never fills
+	// a SKU without an HS code (such an order is refused, see BuildParcel).
 	DefaultHSCode        string  `json:"default_hs_code"`
 	DefaultDeclaredValue float64 `json:"default_declared_value"`
 	// Ready = enabled and everything a shipment needs is configured.
@@ -82,6 +84,7 @@ type CarrierConfigInput struct {
 	PackagingWeightG *float64 `json:"packaging_weight_g"`
 	BaseURL          *string  `json:"base_url"`
 	// "" / 0 clears the default (every SKU must then declare its own).
+	// DefaultHSCode is still stored but no longer used (#6312).
 	DefaultHSCode        *string  `json:"default_hs_code"`
 	DefaultDeclaredValue *float64 `json:"default_declared_value"`
 }
