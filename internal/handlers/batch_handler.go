@@ -30,20 +30,36 @@ func (h *Handlers) CreateBatch(c *gin.Context) {
 // ListBatches lists batches with filters (material, status, priority, date).
 // GET /api/batches
 func (h *Handlers) ListBatches(c *gin.Context) {
-	p := pageFrom(c)
-	f := repositories.BatchFilter{
-		Page:       p,
+	f := batchFilterFrom(c)
+	rows, total, err := h.svc.Batch.List(f)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.List(c, rows, metaFor(f.Page, total))
+}
+
+// batchFilterFrom reads the batch list's query string (GET /api/batches).
+func batchFilterFrom(c *gin.Context) repositories.BatchFilter {
+	return repositories.BatchFilter{
+		Page:       pageFrom(c),
 		MaterialID: uintQueryPtr(c, "material_id"),
-		Status:     c.Query("status"),
-		Priority:   c.Query("priority"),
-		DateFrom:   timeQueryPtr(c, "date_from"),
-		DateTo:     timeQueryPtr(c, "date_to"),
+		// ?status= nhận một hoặc nhiều giá trị (?status=A,B hoặc ?status=A&status=B),
+		// OR với nhau: trạng thái thật hoặc token FILES_READY / FILES_MISSING /
+		// HANDED_OVER / HANDOVER_PENDING (repositories/status_filter.go). Một giá trị
+		// là trạng thái thật thì y như trước (status=PENDING = mọi batch PENDING).
+		Statuses: stringListQuery(c, "status"),
+		Priority: c.Query("priority"),
+		DateFrom: timeQueryPtr(c, "date_from"),
+		DateTo:   timeQueryPtr(c, "date_to"),
 		// ?code= — mã nội bộ đơn ("100047") hoặc mã tem item ("100047_1/1"):
 		// trả về (các) batch đang sản xuất đơn đó.
 		Code: c.Query("code"),
 		// ?seller_id= / ?store_order= — batch chứa hàng của seller đó / của đơn
 		// có mã đơn shop khớp (chứa chuỗi, không phân biệt hoa thường).
-		SellerID:   uintQueryPtr(c, "seller_id"),
+		// seller_id nhận nhiều id (?seller_id=3,7 hoặc lặp khoá): batch có hàng của
+		// BẤT KỲ seller nào trong đó.
+		SellerIDs:  uintListQuery(c, "seller_id"),
 		StoreOrder: c.Query("store_order"),
 		// ?batch= mã batch chứa chuỗi; ?q= ô tìm chung (batch / mã đơn / mã đơn shop / seller).
 		BatchCode: c.Query("batch"),
@@ -54,14 +70,9 @@ func (h *Handlers) ListBatches(c *gin.Context) {
 		// ?files=ready|missing — tách "Chờ xử lý" theo đã đủ link in + cắt hay chưa.
 		Files: c.Query("files"),
 		// ?handover=done|pending — tách "Đã QC" theo đã bàn giao hết hay chưa. Đi kèm status=QC_PASSED.
+		// files / handover là tham số kiểu cũ (lựa chọn đơn), AND với ?status=.
 		Handover: c.Query("handover"),
 	}
-	rows, total, err := h.svc.Batch.List(f)
-	if err != nil {
-		response.Fail(c, err)
-		return
-	}
-	response.List(c, rows, metaFor(p, total))
 }
 
 // GetBatch returns batch detail (items, SKU, mockup, files, status). GET /api/batches/:id

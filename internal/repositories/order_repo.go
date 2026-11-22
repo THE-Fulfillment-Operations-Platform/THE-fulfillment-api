@@ -695,7 +695,11 @@ func (r *OrderRepository) InProductionIDs(orderIDs []uint) (map[uint]bool, error
 // ItemFilter captures item-view filters (store, sku, status, batch, date).
 type ItemFilter struct {
 	Page
-	SellerID       *uint
+	SellerID *uint
+	// SellerIDs is the multi-select seller box: items of orders of ANY of these
+	// sellers. Set together with SellerID, both apply (AND), so a fixed SellerID can
+	// never be widened by the list.
+	SellerIDs      []uint
 	StoreID        *uint
 	StoreOrderID   string // partial, case-insensitive match on the parent order's store order id
 	SKUCode        string // partial, case-insensitive match on the line's SKU code; % and _ literal (see baseQuery)
@@ -703,6 +707,11 @@ type ItemFilter struct {
 	Search         string // partial, case-insensitive match on the item's code, SKU, the order's internal code or store order id (one search box)
 	HasDesignFile  bool   // only items that already have a front or back design file (design-download pick-list)
 	InternalStatus string
+	// InternalStatuses is the multi-select status box (?status=A,B): tokens ORed
+	// together — a real internal status (QC_PASSED keeps its "still in the workshop"
+	// meaning, see below), or FILES_READY / FILES_MISSING / PACKED / HANDED_OVER
+	// (see status_filter.go). Set together with InternalStatus, both apply (AND).
+	InternalStatuses []string
 	// HandedOver keeps only items whose order has left the workshop: handed to
 	// THE, shipped or delivered. It is the "Đã bàn giao" badge on the order
 	// list, which reads the order's seller status, not the item's internal
@@ -1108,6 +1117,9 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 	if f.SellerID != nil {
 		q = q.Where("orders.seller_id = ?", *f.SellerID)
 	}
+	if len(f.SellerIDs) > 0 {
+		q = q.Where("orders.seller_id IN ?", f.SellerIDs)
+	}
 	if f.StoreID != nil {
 		q = q.Where("orders.store_id = ?", *f.StoreID)
 	}
@@ -1155,6 +1167,11 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 			q = q.Where("orders.seller_status = ?", models.SellerStatusProduction)
 			q = chipActiveOrder(q)
 		}
+	}
+	// Ô Trạng thái chọn nhiều: mỗi token khớp đúng nhóm dòng của lựa chọn đơn
+	// tương ứng (InternalStatus / Files / Packed / HandedOver ở đây), OR với nhau.
+	if cond, args, ok := itemStatusCond(f.InternalStatuses); ok {
+		q = q.Where(cond, args...)
 	}
 	switch f.Files {
 	case "ready":

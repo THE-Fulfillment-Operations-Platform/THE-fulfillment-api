@@ -5,6 +5,7 @@ package handlers
 
 import (
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -94,6 +95,45 @@ func uintQueryPtr(c *gin.Context, name string) *uint {
 	}
 	u := uint(v)
 	return &u
+}
+
+// maxListQueryValues caps a multi-value filter (?seller_id=1,2,…): a filter box
+// holds a few dozen ticks at most; anything past this is dropped, not an error.
+const maxListQueryValues = 500
+
+// stringListQuery reads a multi-value filter. Both forms work and mix freely:
+// repeated keys (?status=A&status=B) and comma lists (?status=A,B). Values are
+// trimmed, blanks and duplicates dropped, order kept. nil = no filter. A single
+// ?status=A gives [A] — the same filter an old one-value client always sent.
+func stringListQuery(c *gin.Context, name string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, raw := range c.QueryArray(name) {
+		for _, part := range strings.Split(raw, ",") {
+			v := strings.TrimSpace(part)
+			if v == "" || seen[v] || len(out) >= maxListQueryValues {
+				continue
+			}
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// uintListQuery is stringListQuery for ids (?seller_id=3,7 or ?seller_id=3&seller_id=7).
+// Non-numeric values are skipped, like uintQueryPtr does for a single one; if
+// none is left the result is nil = no filter (the old single-value behaviour).
+func uintListQuery(c *gin.Context, name string) []uint {
+	var out []uint
+	for _, s := range stringListQuery(c, name) {
+		v, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			continue
+		}
+		out = append(out, uint(v))
+	}
+	return out
 }
 
 // boolQueryPtr parses an optional boolean query parameter. Absent (or

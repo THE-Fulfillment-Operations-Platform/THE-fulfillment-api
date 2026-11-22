@@ -14,10 +14,14 @@ import (
 type BatchFilter struct {
 	Page
 	MaterialID *uint
-	Status     string
-	Priority   string
-	DateFrom   *time.Time
-	DateTo     *time.Time
+	// Status is the legacy single-value status filter. Statuses is the multi-select
+	// box: tokens (a real status, or FILES_READY / FILES_MISSING / HANDED_OVER /
+	// HANDOVER_PENDING — see status_filter.go) ORed together. Both set = AND.
+	Status   string
+	Statuses []string
+	Priority string
+	DateFrom *time.Time
+	DateTo   *time.Time
 	// ExcludeClosed drops batches whose production is over because every piece they
 	// made was scrapped at QC. The production board sets it — there is no work left
 	// in such a batch — while the batch list keeps showing them (greyed, with the
@@ -30,7 +34,11 @@ type BatchFilter struct {
 	// SellerID / StoreOrder scope the list to batches that hold products of one
 	// seller, and/or of orders whose shop order id contains StoreOrder (case-
 	// insensitive) — "which batch is the order of this shop in?".
+	// SellerIDs is the multi-select form: batches holding products of ANY of these
+	// sellers. Set together with SellerID, both apply (AND) — a fixed SellerID can
+	// never be widened by the list.
 	SellerID   *uint
+	SellerIDs  []uint
 	StoreOrder string
 	// BatchCode keeps batches whose code contains it ("101602" finds "#101602").
 	BatchCode string
@@ -285,6 +293,9 @@ func (r *BatchRepository) baseQuery(f BatchFilter) *gorm.DB {
 	if f.Status != "" {
 		q = q.Where("status = ?", f.Status)
 	}
+	if cond, args, ok := batchStatusCond(f.Statuses); ok {
+		q = q.Where(cond, args...)
+	}
 	if f.Priority != "" {
 		q = q.Where("priority = ?", f.Priority)
 	}
@@ -330,13 +341,18 @@ func (r *BatchRepository) baseQuery(f BatchFilter) *gorm.DB {
 				Where("orders.internal_code = ? OR order_items.internal_code = ? OR LOWER(orders.store_order_id) LIKE ? OR LOWER(sellers.name) LIKE ?",
 					term, term, like, like))
 	}
-	if f.SellerID != nil || strings.TrimSpace(f.StoreOrder) != "" {
+	if f.SellerID != nil || len(f.SellerIDs) > 0 || strings.TrimSpace(f.StoreOrder) != "" {
 		sub := r.db.Model(&models.BatchItem{}).
 			Select("batch_items.batch_id").
 			Joins("JOIN order_items ON order_items.id = batch_items.order_item_id").
 			Joins("JOIN orders ON orders.id = order_items.order_id")
 		if f.SellerID != nil {
 			sub = sub.Where("orders.seller_id = ?", *f.SellerID)
+		}
+		if len(f.SellerIDs) > 0 {
+			// A batch holding goods of seller A and B still comes back once: the
+			// outer filter is "batches.id IN (sub)", not a join.
+			sub = sub.Where("orders.seller_id IN ?", f.SellerIDs)
 		}
 		if so := strings.TrimSpace(f.StoreOrder); so != "" {
 			sub = sub.Where("LOWER(orders.store_order_id) LIKE ?", "%"+strings.ToLower(so)+"%")

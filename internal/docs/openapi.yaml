@@ -539,13 +539,31 @@ paths:
       summary: Item view (filter seller, store, sku, status, batch, date)
       parameters:
         - { name: sku, in: query, schema: { type: string }, description: "SKU có chứa chuỗi này, không phân biệt hoa thường (% và _ là chữ thường)" }
-        - { name: status, in: query, schema: { type: string, enum: [PENDING, PRINTED, CUT, QC_PASSED] } }
+        - name: status
+          in: query
+          style: form
+          explode: true
+          description: >-
+            Một hoặc nhiều giá trị, OR với nhau (?status=A,B hoặc ?status=A&status=B).
+            Trạng thái nội bộ PENDING / PRINTED / CUT / QC_PASSED (QC_PASSED = "Đã QC":
+            chỉ dòng của đơn còn trong xưởng, đã duyệt, chưa huỷ), hoặc nhóm suy ra:
+            FILES_READY (= status=PENDING&files=ready), FILES_MISSING
+            (= status=PENDING&files=missing), PACKED (= packed=true), HANDED_OVER
+            (= handed_over=true). Một giá trị = y như trước. files / packed /
+            handed_over là tham số kiểu cũ, AND với status.
+          schema:
+            type: array
+            items: { type: string, enum: [PENDING, PRINTED, CUT, QC_PASSED, FILES_READY, FILES_MISSING, PACKED, HANDED_OVER] }
         - { name: design_status, in: query, schema: { type: string } }
         - { name: batch_id, in: query, schema: { type: integer } }
         - name: seller_id
           in: query
-          description: Chỉ lấy sản phẩm thuộc đơn của seller này.
-          schema: { type: integer }
+          style: form
+          explode: true
+          description: >-
+            Chỉ lấy sản phẩm thuộc đơn của (các) seller này — một hoặc nhiều id, OR
+            với nhau (?seller_id=3,7 hoặc ?seller_id=3&seller_id=7). Id không phải số bị bỏ qua.
+          schema: { type: array, items: { type: integer } }
         - name: with_seller
           in: query
           description: >-
@@ -605,6 +623,40 @@ paths:
     get:
       tags: [Batches]
       summary: Danh sách batch (filter material, status, priority, date)
+      parameters:
+        - name: status
+          in: query
+          style: form
+          explode: true
+          description: >-
+            Một hoặc nhiều giá trị, OR với nhau (?status=A,B hoặc ?status=A&status=B).
+            Trạng thái thật PENDING / PRINTED / CUT / QC_PASSED (mọi batch ở trạng thái
+            đó, như trước), hoặc nhãn suy ra: FILES_READY (= status=PENDING&files=ready,
+            "Đã có file SX"), FILES_MISSING (= status=PENDING&files=missing, "Chờ xử
+            lý"), HANDED_OVER (= status=QC_PASSED&handover=done, "Đã bàn giao"),
+            HANDOVER_PENDING (= status=QC_PASSED&handover=pending, "Đã QC").
+          schema:
+            type: array
+            items: { type: string, enum: [PENDING, PRINTED, CUT, QC_PASSED, FILES_READY, FILES_MISSING, HANDED_OVER, HANDOVER_PENDING] }
+        - { name: files, in: query, description: "Kiểu cũ, AND với status: ready | missing (tự kèm PENDING)", schema: { type: string, enum: [ready, missing] } }
+        - { name: handover, in: query, description: "Kiểu cũ, AND với status: done | pending (tự kèm QC_PASSED)", schema: { type: string, enum: [done, pending] } }
+        - name: seller_id
+          in: query
+          style: form
+          explode: true
+          description: >-
+            Batch có hàng của (các) seller này — một hoặc nhiều id, OR với nhau
+            (?seller_id=3,7 hoặc lặp khoá). Batch có hàng của 2 seller chỉ ra một lần.
+          schema: { type: array, items: { type: integer } }
+        - { name: material_id, in: query, schema: { type: integer } }
+        - { name: priority, in: query, schema: { type: string } }
+        - { name: code, in: query, description: "Mã nội bộ đơn / mã tem item", schema: { type: string } }
+        - { name: store_order, in: query, schema: { type: string } }
+        - { name: batch, in: query, description: "Mã batch chứa chuỗi", schema: { type: string } }
+        - { name: date_from, in: query, schema: { type: string } }
+        - { name: date_to, in: query, schema: { type: string } }
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: page_size, in: query, schema: { type: integer } }
       responses: { '200': { description: OK } }
     post:
       tags: [Batches]

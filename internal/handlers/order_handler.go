@@ -195,14 +195,21 @@ func itemFilterFrom(c *gin.Context) repositories.ItemFilter {
 	includeCancelled := c.Query("include_cancelled") == "true" ||
 		reviewStatus == string(models.ReviewCancelled)
 	return repositories.ItemFilter{
-		Page:             pageFrom(c),
-		SellerID:         uintQueryPtr(c, "seller_id"),
-		StoreID:          uintQueryPtr(c, "store_id"),
-		StoreOrderID:     strings.TrimSpace(c.Query("store_order_id")),
-		SKUCode:          c.Query("sku"),
-		InternalCode:     strings.TrimSpace(c.Query("internal_code")),
-		Search:           strings.TrimSpace(c.Query("q")),
-		InternalStatus:   c.Query("status"),
+		Page: pageFrom(c),
+		// ?seller_id= nhận nhiều id (?seller_id=3,7 hoặc lặp khoá): sản phẩm của
+		// đơn thuộc BẤT KỲ seller nào trong đó. Một id = y như trước.
+		SellerIDs:    uintListQuery(c, "seller_id"),
+		StoreID:      uintQueryPtr(c, "store_id"),
+		StoreOrderID: strings.TrimSpace(c.Query("store_order_id")),
+		SKUCode:      c.Query("sku"),
+		InternalCode: strings.TrimSpace(c.Query("internal_code")),
+		Search:       strings.TrimSpace(c.Query("q")),
+		// ?status= nhận một hoặc nhiều giá trị (?status=A,B hoặc lặp khoá), OR với
+		// nhau: trạng thái nội bộ (QC_PASSED = "Đã QC" như chip, xem baseQuery) hoặc
+		// token FILES_READY / FILES_MISSING / PACKED / HANDED_OVER
+		// (repositories/status_filter.go). Một trạng thái thật = y như trước.
+		// handed_over / packed / files bên dưới là tham số kiểu cũ, AND với ?status=.
+		InternalStatuses: stringListQuery(c, "status"),
 		Warranty:         warrantyFilter(c.Query("warranty")),
 		WarrantyEligible: services.WarrantyPolicy.PressableScope(actor(c).Role),
 		HandedOver:       c.Query("handed_over") == "1" || c.Query("handed_over") == "true",
