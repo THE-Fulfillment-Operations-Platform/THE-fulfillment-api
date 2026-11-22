@@ -414,8 +414,8 @@ paths:
         - { name: handed_over, in: query, schema: { type: boolean }, description: "true = đơn đã gửi cho THE (màn Hành trình)" }
         - { name: handed_over_from, in: query, schema: { type: string }, description: "Lọc theo thời điểm xuất xưởng (RFC3339 hoặc YYYY-MM-DD), >=" }
         - { name: handed_over_to, in: query, schema: { type: string }, description: "Cận trên NỬA MỞ (<) — client gửi đầu ngày kế tiếp" }
-        - { name: date_from, in: query, schema: { type: string } }
-        - { name: date_to, in: query, schema: { type: string } }
+        - { name: date_from, in: query, schema: { type: string }, description: "Ngày tạo đơn, >= (RFC3339; YYYY-MM-DD = 00:00 giờ VN)" }
+        - { name: date_to, in: query, schema: { type: string }, description: "Cận trên NỬA MỞ (<) của ngày tạo — client gửi đầu phút / đầu ngày kế tiếp" }
         - { name: page, in: query, schema: { type: integer } }
         - { name: page_size, in: query, schema: { type: integer } }
       responses: { '200': { description: OK } }
@@ -675,8 +675,8 @@ paths:
         - { name: code, in: query, description: "Mã nội bộ đơn / mã tem item", schema: { type: string } }
         - { name: store_order, in: query, schema: { type: string } }
         - { name: batch, in: query, description: "Mã batch chứa chuỗi", schema: { type: string } }
-        - { name: date_from, in: query, schema: { type: string } }
-        - { name: date_to, in: query, schema: { type: string } }
+        - { name: date_from, in: query, schema: { type: string }, description: "Ngày tạo batch, >= (RFC3339; YYYY-MM-DD = 00:00 giờ VN)" }
+        - { name: date_to, in: query, schema: { type: string }, description: "Cận trên NỬA MỞ (<) của ngày tạo — client gửi đầu phút / đầu ngày kế tiếp" }
         - { name: page, in: query, schema: { type: integer } }
         - { name: page_size, in: query, schema: { type: integer } }
       responses: { '200': { description: OK } }

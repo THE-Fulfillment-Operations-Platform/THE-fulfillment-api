@@ -11,19 +11,9 @@ import (
 )
 
 // formTimePtr parses an optional RFC3339 or date (YYYY-MM-DD) multipart form
-// field — the PostForm twin of timeQueryPtr.
+// field — the PostForm twin of timeQueryPtr (ngày trơn = 00:00 giờ xưởng).
 func formTimePtr(c *gin.Context, name string) *time.Time {
-	s := c.PostForm(name)
-	if s == "" {
-		return nil
-	}
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return &t
-	}
-	if t, err := time.Parse("2006-01-02", s); err == nil {
-		return &t
-	}
-	return nil
+	return parseTimeBound(c.PostForm(name))
 }
 
 // DownloadTrackingImportTemplate streams the 2-column template (OrderID, Mã vận

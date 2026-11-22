@@ -154,14 +154,22 @@ func boolQueryPtr(c *gin.Context, name string) *bool {
 
 // timeQueryPtr parses an optional RFC3339 or date (YYYY-MM-DD) query parameter.
 func timeQueryPtr(c *gin.Context, name string) *time.Time {
-	s := c.Query(name)
+	return parseTimeBound(c.Query(name))
+}
+
+// parseTimeBound đọc mốc lọc thời gian: RFC3339 (có múi giờ) lấy đúng thời điểm
+// đó; ngày trơn YYYY-MM-DD là 00:00 NGÀY ĐÓ THEO GIỜ XƯỞNG (services.AppLocation,
+// mặc định Asia/Ho_Chi_Minh) — cùng cách đọc với Open API (ParseOpenTimeBound).
+// Trước đây ngày trơn bị đọc là 00:00 UTC = 07:00 giờ VN, lọc theo ngày lệch 7
+// tiếng. Rỗng / sai định dạng = không lọc (nil), như cũ.
+func parseTimeBound(s string) *time.Time {
 	if s == "" {
 		return nil
 	}
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return &t
 	}
-	if t, err := time.Parse("2006-01-02", s); err == nil {
+	if t, err := time.ParseInLocation("2006-01-02", s, services.AppLocation()); err == nil {
 		return &t
 	}
 	return nil

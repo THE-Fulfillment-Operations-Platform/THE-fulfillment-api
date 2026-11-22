@@ -50,8 +50,10 @@ func batchFilterFrom(c *gin.Context) repositories.BatchFilter {
 		// là trạng thái thật thì y như trước (status=PENDING = mọi batch PENDING).
 		Statuses: stringListQuery(c, "status"),
 		Priority: c.Query("priority"),
-		DateFrom: timeQueryPtr(c, "date_from"),
-		DateTo:   timeQueryPtr(c, "date_to"),
+		// Nửa mở [date_from, date_to): date_to là cận trên LOẠI TRỪ (web gửi đầu
+		// phút / đầu ngày kế tiếp theo giờ máy, utils/dateRange apiInstantBefore).
+		DateFrom:   timeQueryPtr(c, "date_from"),
+		DateBefore: timeQueryPtr(c, "date_to"),
 		// ?code= — mã nội bộ đơn ("100047") hoặc mã tem item ("100047_1/1"):
 		// trả về (các) batch đang sản xuất đơn đó.
 		Code: c.Query("code"),

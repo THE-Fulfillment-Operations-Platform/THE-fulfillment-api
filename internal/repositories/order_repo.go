@@ -86,8 +86,16 @@ type OrderFilter struct {
 	// nil = don't care. This is the "đơn huỷ nhưng vẫn phải tính tiền" work list.
 	CancelBillable *bool
 	StoreOrderID   string
-	DateFrom       *time.Time
-	DateTo         *time.Time
+	// Khoảng ngày tạo đơn (orders.created_at). DateFrom: >=. Cận trên có hai kiểu:
+	//   - DateBefore: < (nửa mở [from, before)) — ?date_to của /api/orders và nút
+	//     Xuất Excel hành trình: web gửi ĐẦU phút / ĐẦU ngày KẾ TIẾP theo giờ máy,
+	//     nên mốc 00:00 ngày kế không bị đếm hai ngày, giây 59,x của phút cuối
+	//     không bị bỏ.
+	//   - DateTo: <= — Open API (created_to ngày trơn đã tự lùi 1 ns) và màn
+	//     seller, giữ nguyên như trước.
+	DateFrom   *time.Time
+	DateTo     *time.Time
+	DateBefore *time.Time
 
 	// Customer-support lookup fields. Search is the single-box form used by the CS
 	// screen: one term matched against every identifier a customer might quote —
@@ -614,6 +622,9 @@ func (r *OrderRepository) baseQuery(f OrderFilter) *gorm.DB {
 	if f.DateTo != nil {
 		q = q.Where("orders.created_at <= ?", *f.DateTo)
 	}
+	if f.DateBefore != nil {
+		q = q.Where("orders.created_at < ?", *f.DateBefore)
+	}
 	if f.SKUCode != "" {
 		q = q.Where("orders.id IN (?)",
 			r.db.Model(&models.OrderItem{}).Select("order_id").Where("sku_code = ?", f.SKUCode))
@@ -768,8 +779,12 @@ type ItemFilter struct {
 	// listed; on when the caller is deliberately looking at history (the order list
 	// filtered to "Đã huỷ"), which would otherwise come back empty.
 	IncludeCancelled bool
-	DateFrom         *time.Time
-	DateTo           *time.Time
+	// Khoảng ngày tạo sản phẩm (order_items.created_at), NỬA MỞ [DateFrom,
+	// DateBefore): >= và <. ?date_to của /api/items (và nút Xuất theo mẫu import)
+	// là cận trên LOẠI TRỪ — web gửi đầu phút / đầu ngày KẾ TIẾP (utils/dateRange
+	// apiInstantBefore).
+	DateFrom   *time.Time
+	DateBefore *time.Time
 	// Server-side sort. SortBy is whitelisted (see itemOrderClause); anything else
 	// falls back to the stable default (newest first). SortDir is asc|desc.
 	SortBy  string
@@ -1294,8 +1309,8 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 	if f.DateFrom != nil {
 		q = q.Where("order_items.created_at >= ?", *f.DateFrom)
 	}
-	if f.DateTo != nil {
-		q = q.Where("order_items.created_at <= ?", *f.DateTo)
+	if f.DateBefore != nil {
+		q = q.Where("order_items.created_at < ?", *f.DateBefore)
 	}
 	return q
 }

@@ -37,8 +37,10 @@ func orderFilterFrom(c *gin.Context) repositories.OrderFilter {
 		SKUCode:      c.Query("sku"),
 		SellerStatus: c.Query("status"),
 		StoreOrderID: c.Query("store_order_id"),
-		DateFrom:     timeQueryPtr(c, "date_from"),
-		DateTo:       timeQueryPtr(c, "date_to"),
+		// Nửa mở [date_from, date_to): date_to là cận trên LOẠI TRỪ, như
+		// handed_over_to (web gửi đầu phút / đầu ngày kế tiếp, apiInstantBefore).
+		DateFrom:   timeQueryPtr(c, "date_from"),
+		DateBefore: timeQueryPtr(c, "date_to"),
 		// Customer-support lookup: one box (?search=) or a named field when the
 		// operator knows what they are holding.
 		Search:         c.Query("search"),
@@ -230,10 +232,12 @@ func itemFilterFrom(c *gin.Context) repositories.ItemFilter {
 		BatchID:          uintQueryPtr(c, "batch_id"),
 		BatchCode:        strings.TrimSpace(c.Query("batch")),
 		MaterialID:       uintQueryPtr(c, "material_id"),
-		DateFrom:         timeQueryPtr(c, "date_from"),
-		DateTo:           timeQueryPtr(c, "date_to"),
-		SortBy:           c.Query("sort"),
-		SortDir:          c.Query("order"),
+		// Nửa mở [date_from, date_to): date_to là cận trên LOẠI TRỪ (web gửi đầu
+		// phút / đầu ngày kế tiếp theo giờ máy, utils/dateRange apiInstantBefore).
+		DateFrom:   timeQueryPtr(c, "date_from"),
+		DateBefore: timeQueryPtr(c, "date_to"),
+		SortBy:     c.Query("sort"),
+		SortDir:    c.Query("order"),
 		// ?with_seller=1 — kèm seller của đơn. Mặc định tắt vì đó là một round
 		// trip nữa tới DB ở đầu kia internet, và phần lớn màn đọc /api/items
 		// (hàng chờ thiết kế, chọn hàng gom batch) không in tên seller. Màn Đơn

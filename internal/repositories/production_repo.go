@@ -20,8 +20,10 @@ type BatchFilter struct {
 	Status   string
 	Statuses []string
 	Priority string
-	DateFrom *time.Time
-	DateTo   *time.Time
+	// Khoảng ngày tạo batch, NỬA MỞ [DateFrom, DateBefore): >= và <. ?date_to của
+	// /api/batches là cận trên LOẠI TRỪ — web gửi đầu phút / đầu ngày KẾ TIẾP.
+	DateFrom   *time.Time
+	DateBefore *time.Time
 	// ExcludeClosed drops batches whose production is over because every piece they
 	// made was scrapped at QC. The production board sets it — there is no work left
 	// in such a batch — while the batch list keeps showing them (greyed, with the
@@ -302,8 +304,8 @@ func (r *BatchRepository) baseQuery(f BatchFilter) *gorm.DB {
 	if f.DateFrom != nil {
 		q = q.Where("created_at >= ?", *f.DateFrom)
 	}
-	if f.DateTo != nil {
-		q = q.Where("created_at <= ?", *f.DateTo)
+	if f.DateBefore != nil {
+		q = q.Where("created_at < ?", *f.DateBefore)
 	}
 	if f.ExcludeClosed {
 		q = q.Where("closed_at IS NULL")
