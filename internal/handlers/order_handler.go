@@ -17,8 +17,21 @@ import (
 // ListOrders lists orders with filters (store, sku, status, date). GET /api/orders
 func (h *Handlers) ListOrders(c *gin.Context) {
 	p := pageFrom(c)
-	f := repositories.OrderFilter{
-		Page:         p,
+	f := orderFilterFrom(c)
+	f.Page = p
+	rows, total, err := h.svc.Order.ListOrders(f)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.List(c, rows, metaFor(p, total))
+}
+
+// orderFilterFrom reads the order-list query parameters (everything but the
+// page). Shared by the list and the journey Excel export, so "xuất đúng tập đơn
+// đang lọc" holds by construction: the two can never read a filter differently.
+func orderFilterFrom(c *gin.Context) repositories.OrderFilter {
+	return repositories.OrderFilter{
 		SellerID:     uintQueryPtr(c, "seller_id"),
 		StoreID:      uintQueryPtr(c, "store_id"),
 		SKUCode:      c.Query("sku"),
@@ -39,12 +52,6 @@ func (h *Handlers) ListOrders(c *gin.Context) {
 		HandedOverFrom: timeQueryPtr(c, "handed_over_from"),
 		HandedOverTo:   timeQueryPtr(c, "handed_over_to"),
 	}
-	rows, total, err := h.svc.Order.ListOrders(f)
-	if err != nil {
-		response.Fail(c, err)
-		return
-	}
-	response.List(c, rows, metaFor(p, total))
 }
 
 // GetOrder returns full order detail. GET /api/orders/:id

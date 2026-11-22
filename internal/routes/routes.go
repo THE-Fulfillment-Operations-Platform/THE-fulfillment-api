@@ -281,6 +281,10 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		orders.GET("/tracking/import/template.xlsx", trackingManage, h.DownloadTrackingImportTemplate)
 		orders.POST("/tracking/import", trackingManage, h.PreviewTrackingImport)
 		orders.POST("/tracking/import/commit", trackingManage, h.CommitTrackingImport)
+		// "Xuất Excel" of the journey board: every order matching its filter, in a
+		// layout the import above accepts back once "Mã vận đơn" is filled. Reading
+		// the board is enough — the file holds what the screen already shows.
+		orders.GET("/tracking/export.xlsx", perm(view(models.FeatJourneys)), h.DownloadJourneyExport)
 		// The shipment journey is read-only operational information — whoever
 		// can open the order may see where its parcel is.
 		orders.GET("/:id/tracking/events", orderRead, h.GetOrderTracking)

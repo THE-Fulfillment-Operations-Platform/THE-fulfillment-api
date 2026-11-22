@@ -658,6 +658,36 @@ func (r *OrderRepository) List(f OrderFilter) ([]models.Order, int64, error) {
 	return rows, total, err
 }
 
+// ListAllCapped is List without paging, for exports: every order matching f, in
+// the list's own order (newest first), with the same preloads. total is the
+// exact match count; rows is left nil when total exceeds limit, so a too-wide
+// filter costs one COUNT instead of loading thousands of orders only to refuse
+// them. f.Page is ignored.
+func (r *OrderRepository) ListAllCapped(f OrderFilter, limit int) ([]models.Order, int64, error) {
+	var total int64
+	if err := r.baseQuery(f).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	if total > int64(limit) {
+		return nil, total, nil
+	}
+	var rows []models.Order
+	// limit+1: an order created between the COUNT and this SELECT still cannot
+	// push the file past the cap unnoticed — the caller sees len(rows) > limit.
+	err := r.baseQuery(f).
+		Preload("Seller").
+		Preload("Items").
+		Order("orders.id desc").
+		Limit(limit + 1).Find(&rows).Error
+	if err != nil {
+		return nil, 0, err
+	}
+	if int64(len(rows)) > total {
+		total = int64(len(rows))
+	}
+	return rows, total, nil
+}
+
 // InProductionIDs returns, for the given orders, the set that already has work in
 // flight: any live line item past PENDING or scheduled into a batch.
 //

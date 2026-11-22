@@ -483,7 +483,29 @@ paths:
                 handed_over_from: { type: string }
                 handed_over_to: { type: string }
       responses:
-        '200': { description: "{ summary, matches[], issues[], scope_missing[] } — scope_total/scope_missing = -1 khi không gửi khoảng ngày" }
+        '200': { description: "{ summary, matches[], issues[], scope_missing[] } — scope_total/scope_missing = -1 khi không gửi khoảng ngày; summary.skipped_blank = số dòng của file Xuất Excel để trống mã (bỏ qua, không phải lỗi)" }
+  /api/orders/tracking/export.xlsx:
+    get:
+      tags: [Tracking]
+      summary: Xuất Excel màn Hành trình đơn hàng (toàn bộ đơn khớp bộ lọc, nhập lại được)
+      description: >
+        Cùng tham số lọc với GET /api/orders (has_tracking, handed_over_from,
+        handed_over_to, search…), không phân trang; luôn chỉ đơn đã bàn giao.
+        Tối đa 5000 đơn mỗi lần (vượt thì 400 kèm số đơn khớp). Cột: Mã đơn
+        shop, Mã nội bộ, Seller, Số sản phẩm, Tên người nhận, Thành phố,
+        Tỉnh/Bang, Quốc gia, Xuất xưởng (giờ VN, ô ngày giờ Excel), Mã vận đơn
+        (định dạng Text), Trạng thái, Trạng thái tracking, Chi tiết tracking,
+        Vị trí tracking, Cập nhật tracking (giờ VN). Điền cột Mã vận đơn rồi
+        tải chính file này lên POST /api/orders/tracking/import: khoá là Mã nội
+        bộ, các cột khác được bỏ qua, dòng để trống mã được bỏ qua.
+      parameters:
+        - { name: has_tracking, in: query, schema: { type: boolean } }
+        - { name: handed_over_from, in: query, schema: { type: string }, description: "RFC3339, cận dưới (gồm)" }
+        - { name: handed_over_to, in: query, schema: { type: string }, description: "RFC3339, cận trên (không gồm, nửa mở)" }
+        - { name: search, in: query, schema: { type: string } }
+      responses:
+        '200': { description: .xlsx attachment }
+        '400': { description: Bộ lọc khớp quá 5000 đơn, hoặc không có đơn nào }
   /api/orders/tracking/import/commit:
     post:
       tags: [Tracking]

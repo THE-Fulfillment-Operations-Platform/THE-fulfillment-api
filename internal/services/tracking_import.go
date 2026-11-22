@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -26,9 +27,12 @@ import (
 // numbers for one order, one number on several orders, a number already used
 // elsewhere) becomes an issue to resolve by hand instead of a guess.
 
-// MaxTrackingImportRows caps one uploaded file. Same magnitude as the order
-// import; a CS day is a few hundred parcels, so the cap only stops runaway files.
-const MaxTrackingImportRows = 1000
+// MaxTrackingImportRows caps one uploaded file (lines that carry a tracking
+// number; blank lines of a journey export are skipped before counting). A CS
+// day is a few hundred parcels, so the cap only stops runaway files. It is also
+// the journey export's cap (MaxJourneyExportRows): a file the system hands out
+// must always be accepted back — raised from 1000 when the export arrived.
+const MaxTrackingImportRows = 5000
 
 // MaxTrackingCommitBatch caps one commit call. Each assignment funnels through
 // UpdateTracking (audit + provider registration per order), so the cap bounds
@@ -67,6 +71,11 @@ const (
 	TrackingIssueConflict       = "CONFLICT"
 	TrackingIssueSharedTracking = "SHARED_TRACKING"
 	TrackingIssueTakenTracking  = "TAKEN_TRACKING"
+	// TrackingIssueExcelNumber: the cell holds a number Excel rewrote in
+	// scientific notation ("9.40011189922346E+21"). A 22-digit USPS number typed
+	// into a General-format cell becomes that, and the digits past the 15th are
+	// gone for good — attaching it would register a parcel that does not exist.
+	TrackingIssueExcelNumber = "EXCEL_NUMBER"
 )
 
 // TrackingImportMatch is a file line the matcher resolved to exactly one order.
@@ -103,6 +112,11 @@ type TrackingImportSummary struct {
 	Issues       int   `json:"issues"`
 	ScopeTotal   int64 `json:"scope_total"`
 	ScopeMissing int64 `json:"scope_missing"`
+	// SkippedBlank counts the lines of a journey export (the page's own "Xuất
+	// Excel" file) left without a tracking number — the operator filled only
+	// some rows. They are not issues and are not in TotalRows. Always 0 for any
+	// other file, where a blank number stays an EMPTY_TRACKING issue.
+	SkippedBlank int `json:"skipped_blank"`
 }
 
 // TrackingImportPreview is the full dry-run result.
@@ -158,14 +172,19 @@ func normalizeTrackingHeader(h string) string {
 	return b.String()
 }
 
-// Header aliases for the two columns. The order column accepts everything the
-// journey screen displays — the shop's order id or our internal code — because
-// the carrier file quotes whichever the CS pasted into the manifest.
+// Header aliases. The order column accepts everything the journey screen
+// displays — the shop's order id or our internal code — because the carrier
+// file quotes whichever the CS pasted into the manifest. The internal-code
+// aliases are a separate set: when a file has BOTH kinds of column (the journey
+// export does), the internal code is the key — it is unique by construction,
+// while a store order id may answer for several orders.
 var (
 	trackingOrderHeaderKeys = map[string]bool{
 		"orderid": true, "order": true, "ordercode": true, "ordernumber": true,
 		"mãđơn": true, "madon": true, "mãđơnhàng": true, "madonhang": true,
 		"mãđơnshop": true, "madonshop": true, "storeorderid": true,
+	}
+	trackingInternalHeaderKeys = map[string]bool{
 		"mãnộibộ": true, "manoibo": true, "internalcode": true,
 	}
 	trackingNumberHeaderKeys = map[string]bool{
@@ -175,8 +194,38 @@ var (
 	}
 )
 
+// TrackingImportFile is a parsed upload: the lines to match, plus what the
+// parser deliberately left out.
+type TrackingImportFile struct {
+	Rows []TrackingImportRow
+	// JourneyExport: the header carries the journey export's marker column, i.e.
+	// this is the page's own "Xuất Excel" file coming back with numbers filled in.
+	JourneyExport bool
+	// SkippedBlank: journey-export lines whose tracking cell was left empty — the
+	// operator filled only some of the exported orders. Not an error.
+	SkippedBlank int
+}
+
 // ParseTrackingCSV reads a CSV stream into tracking-import rows.
 func ParseTrackingCSV(r io.Reader) ([]TrackingImportRow, error) {
+	file, err := ParseTrackingCSVFile(r)
+	if err != nil {
+		return nil, err
+	}
+	return file.Rows, nil
+}
+
+// ParseTrackingXLSX reads the first worksheet of an .xlsx/.xlsm stream.
+func ParseTrackingXLSX(r io.Reader) ([]TrackingImportRow, error) {
+	file, err := ParseTrackingXLSXFile(r)
+	if err != nil {
+		return nil, err
+	}
+	return file.Rows, nil
+}
+
+// ParseTrackingCSVFile is ParseTrackingCSV keeping the parse metadata.
+func ParseTrackingCSVFile(r io.Reader) (*TrackingImportFile, error) {
 	reader := csv.NewReader(r)
 	reader.FieldsPerRecord = -1
 	reader.TrimLeadingSpace = true
@@ -184,11 +233,11 @@ func ParseTrackingCSV(r io.Reader) ([]TrackingImportRow, error) {
 	if err != nil {
 		return nil, apperr.BadRequest("Không đọc được file CSV: " + err.Error())
 	}
-	return trackingRowsFromRecords(records)
+	return trackingFileFromRecords(records)
 }
 
-// ParseTrackingXLSX reads the first worksheet of an .xlsx/.xlsm stream.
-func ParseTrackingXLSX(r io.Reader) ([]TrackingImportRow, error) {
+// ParseTrackingXLSXFile is ParseTrackingXLSX keeping the parse metadata.
+func ParseTrackingXLSXFile(r io.Reader) (*TrackingImportFile, error) {
 	f, err := excelize.OpenReader(r)
 	if err != nil {
 		return nil, apperr.BadRequest("Không đọc được file Excel: " + err.Error())
@@ -203,45 +252,83 @@ func ParseTrackingXLSX(r io.Reader) ([]TrackingImportRow, error) {
 	if err != nil {
 		return nil, apperr.BadRequest("Không đọc được dữ liệu Excel: " + err.Error())
 	}
-	return trackingRowsFromRecords(records)
+	return trackingFileFromRecords(records)
 }
 
-func trackingRowsFromRecords(records [][]string) ([]TrackingImportRow, error) {
+func trackingFileFromRecords(records [][]string) (*TrackingImportFile, error) {
 	if len(records) < 2 {
 		return nil, apperr.BadRequest("File phải có dòng tiêu đề và ít nhất một dòng dữ liệu")
 	}
-	orderCol, trackCol := -1, -1
+	orderCol, internalCol, trackCol := -1, -1, -1
+	journeyExport := false
 	for i, h := range records[0] {
 		key := normalizeTrackingHeader(h)
+		if key == journeyExportMarkerKey {
+			journeyExport = true
+		}
 		switch {
+		case trackingInternalHeaderKeys[key] && internalCol == -1:
+			internalCol = i
 		case trackingOrderHeaderKeys[key] && orderCol == -1:
 			orderCol = i
 		case trackingNumberHeaderKeys[key] && trackCol == -1:
 			trackCol = i
 		}
 	}
-	if orderCol == -1 || trackCol == -1 {
+	// Key column: the internal code when present, else the generic order column.
+	// The other one (if any) is the fallback for a line whose key cell is empty.
+	keyCol, fallbackCol := orderCol, -1
+	if internalCol != -1 {
+		keyCol, fallbackCol = internalCol, orderCol
+	}
+	if keyCol == -1 || trackCol == -1 {
 		return nil, apperr.BadRequest(
 			"Không nhận diện được cột OrderID / Mã vận đơn — tải file mẫu để xem đúng định dạng")
 	}
 	cell := func(rec []string, col int) string {
-		if col < len(rec) {
+		if col >= 0 && col < len(rec) {
 			return strings.TrimSpace(rec[col])
 		}
 		return ""
 	}
+	out := &TrackingImportFile{JourneyExport: journeyExport}
 	rows := make([]TrackingImportRow, 0, len(records)-1)
 	for i, rec := range records[1:] {
-		key, number := cell(rec, orderCol), cell(rec, trackCol)
+		key, number := cell(rec, keyCol), cell(rec, trackCol)
+		if key == "" {
+			key = cell(rec, fallbackCol)
+		}
 		if key == "" && number == "" {
 			continue // fully blank line — Excel files end with plenty of them
+		}
+		if journeyExport && number == "" {
+			// An exported order the operator did not fill. The bulk path never
+			// clears a number anyway, so skipping is exactly what an EMPTY_TRACKING
+			// issue would have done — minus a red alert listing hundreds of rows.
+			out.SkippedBlank++
+			continue
 		}
 		rows = append(rows, TrackingImportRow{Row: i + 1, OrderKey: key, TrackingNumber: number})
 	}
 	if len(rows) == 0 {
+		if out.SkippedBlank > 0 {
+			return nil, apperr.BadRequest("Chưa dòng nào được điền mã vận đơn — điền cột \"Mã vận đơn\" rồi tải lên lại")
+		}
 		return nil, apperr.BadRequest("File không có dòng dữ liệu nào")
 	}
-	return rows, nil
+	out.Rows = rows
+	return out, nil
+}
+
+// excelScientificRe matches a number Excel displays in scientific notation —
+// what GetRows (and a CSV saved by Excel) yields for a long digit string typed
+// into a General-format cell, e.g. "9.40011189922346E+21". Deliberately narrow
+// (one leading digit, explicit "E+"): Excel always writes the sign, and no
+// carrier's number contains a '+', so a real tracking number cannot match.
+var excelScientificRe = regexp.MustCompile(`^[0-9]([.,][0-9]+)?[eE]\+[0-9]+$`)
+
+func looksLikeExcelScientific(v string) bool {
+	return excelScientificRe.MatchString(strings.TrimSpace(v))
 }
 
 // ---------- template ----------
@@ -324,6 +411,11 @@ func (s *OrderService) PreviewTrackingImport(actor Actor, rows []TrackingImportR
 		}
 		if row.TrackingNumber == "" {
 			issue(row, TrackingIssueEmptyTracking, "Thiếu mã vận đơn")
+			continue
+		}
+		if looksLikeExcelScientific(row.TrackingNumber) {
+			issue(row, TrackingIssueExcelNumber,
+				"Excel đã đổi mã vận đơn thành số mũ nên mất chữ số — định dạng ô là Text (hoặc gõ dấu ' trước mã) rồi dán lại mã")
 			continue
 		}
 		// Internal code first — it is unique by construction. A store order id is a

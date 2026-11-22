@@ -52,25 +52,41 @@ func (h *Handlers) PreviewTrackingImport(c *gin.Context) {
 	}
 	defer f.Close()
 
-	var rows []services.TrackingImportRow
+	var file *services.TrackingImportFile
 	var err error
 	if src == "XLSX" {
-		rows, err = services.ParseTrackingXLSX(f)
+		file, err = services.ParseTrackingXLSXFile(f)
 	} else {
-		rows, err = services.ParseTrackingCSV(f)
+		file, err = services.ParseTrackingCSVFile(f)
 	}
 	if err != nil {
 		response.Fail(c, err)
 		return
 	}
 
-	preview, err := h.svc.Order.PreviewTrackingImport(actor(c), rows,
+	preview, err := h.svc.Order.PreviewTrackingImport(actor(c), file.Rows,
 		formTimePtr(c, "handed_over_from"), formTimePtr(c, "handed_over_to"))
 	if err != nil {
 		response.Fail(c, err)
 		return
 	}
+	preview.Summary.SkippedBlank = file.SkippedBlank
 	response.OK(c, preview)
+}
+
+// DownloadJourneyExport streams every handed-over order matching the journey
+// screen's filter as .xlsx — the same query parameters as GET /api/orders
+// (has_tracking, handed_over_from/to, search…), without paging. The file is
+// re-importable through POST /api/orders/tracking/import once the "Mã vận đơn"
+// column is filled. GET /api/orders/tracking/export.xlsx
+func (h *Handlers) DownloadJourneyExport(c *gin.Context) {
+	data, filename, err := h.svc.Order.JourneyExportXLSX(orderFilterFrom(c))
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
+	c.Data(http.StatusOK, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", data)
 }
 
 // CommitTrackingImport applies the assignments the operator confirmed in the
