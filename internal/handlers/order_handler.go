@@ -229,9 +229,12 @@ func itemFilterFrom(c *gin.Context) repositories.ItemFilter {
 		DesignStatus:     c.Query("design_status"),
 		ReviewStatus:     reviewStatus,
 		IncludeCancelled: includeCancelled,
-		BatchID:          uintQueryPtr(c, "batch_id"),
-		BatchCode:        strings.TrimSpace(c.Query("batch")),
-		MaterialID:       uintQueryPtr(c, "material_id"),
+		// ?batch= = MÃ batch người dùng thấy (#102909 / 102909), khớp đúng mã — ô
+		// Batch ID của màn Đơn hàng gửi tham số này. ?batch_id= = id nội bộ (1909),
+		// giữ cho tương thích và cho cú gõ rõ "id 1909" ở ô đó.
+		BatchID:    uintQueryPtr(c, "batch_id"),
+		BatchCode:  strings.TrimSpace(c.Query("batch")),
+		MaterialID: uintQueryPtr(c, "material_id"),
 		// Nửa mở [date_from, date_to): date_to là cận trên LOẠI TRỪ (web gửi đầu
 		// phút / đầu ngày kế tiếp theo giờ máy, utils/dateRange apiInstantBefore).
 		DateFrom:   timeQueryPtr(c, "date_from"),

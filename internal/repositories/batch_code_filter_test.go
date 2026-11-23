@@ -191,7 +191,15 @@ func TestBatchListBatchCodeAndQ(t *testing.T) {
 		}
 	}
 	one(ids(BatchFilter{BatchCode: "#B-100021"}), first, "BatchCode with #? code is #B-…")
-	one(ids(BatchFilter{BatchCode: "b-100022"}), second, "BatchCode contains, case-insensitive")
+	one(ids(BatchFilter{BatchCode: "b-100022"}), second, "BatchCode without #, case-insensitive")
+	one(ids(BatchFilter{BatchCode: " ##B-100022 "}), second, "BatchCode trimmed, leading #s dropped")
+	// Ô Batch ID khớp ĐÚNG mã từ 23/11/2026: một phần mã không còn ra batch (gõ
+	// "1909" từng ra #101909 — batch khác hẳn — xem batch_code_match.go).
+	for _, part := range []string{"100022", "B-1000", "#B"} {
+		if got := ids(BatchFilter{BatchCode: part}); len(got) != 0 {
+			t.Errorf("BatchCode=%q (một phần mã): got %v, want none", part, got)
+		}
+	}
 	for _, q := range []string{"#B-100022", "100022", "100022_1/1", "so-100022", "hồng", "HOA HỒNG"} {
 		one(ids(BatchFilter{Q: q}), second, "Q="+q)
 	}

@@ -577,7 +577,14 @@ paths:
             type: array
             items: { type: string, enum: [PENDING, PRINTED, CUT, QC_PASSED, FILES_READY, FILES_MISSING, PACKED, HANDED_OVER] }
         - { name: design_status, in: query, schema: { type: string } }
-        - { name: batch_id, in: query, schema: { type: integer } }
+        - name: batch
+          in: query
+          description: >-
+            MÃ batch người dùng thấy (batches.code), có hoặc không dấu # ("102909" =
+            "#102909"), không phân biệt hoa thường. Khớp ĐÚNG mã, không khớp chuỗi
+            con: "1909" không ra #101909 (từ 23/11/2026).
+          schema: { type: string }
+        - { name: batch_id, in: query, description: "Id NỘI BỘ của batch (vd 1909 — mã #102909). Giữ cho tương thích.", schema: { type: integer } }
         - name: seller_id
           in: query
           style: form
@@ -605,6 +612,13 @@ paths:
             Trả kèm cờ production_files_ready trên từng dòng (cùng điều kiện với
             files=ready). Tắt mặc định vì là một câu lệnh nữa tới DB.
           schema: { type: boolean }
+      description: >-
+        Mỗi dòng kèm `batch_items[]` (các phần sản xuất, gồm cả phần đã huỷ có
+        `scrapped_at`); mỗi phần có `batch_id` (id nội bộ, để dựng link
+        /batches/{id}), `batch_code` (mã người dùng thấy, vd "#102909" — từ
+        23/11/2026) và `batch` (giữ cho client cũ). Hiển thị luôn dùng
+        `batch_code`, không bao giờ "#" + batch_id. Chi tiết item và chi tiết đơn
+        cũng có `batch_code`.
       responses: { '200': { description: OK } }
   /api/items/{id}:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
@@ -674,7 +688,7 @@ paths:
         - { name: priority, in: query, schema: { type: string } }
         - { name: code, in: query, description: "Mã nội bộ đơn / mã tem item", schema: { type: string } }
         - { name: store_order, in: query, schema: { type: string } }
-        - { name: batch, in: query, description: "Mã batch chứa chuỗi", schema: { type: string } }
+        - { name: batch, in: query, description: "ĐÚNG mã batch, có/không dấu #, không phân biệt hoa thường (\"102909\" = \"#102909\"; từ 23/11/2026 không còn khớp chuỗi con — tìm một phần mã dùng q)", schema: { type: string } }
         - { name: date_from, in: query, schema: { type: string }, description: "Ngày tạo batch, >= (RFC3339; YYYY-MM-DD = 00:00 giờ VN)" }
         - { name: date_to, in: query, schema: { type: string }, description: "Cận trên NỬA MỞ (<) của ngày tạo — client gửi đầu phút / đầu ngày kế tiếp" }
         - { name: page, in: query, schema: { type: integer } }

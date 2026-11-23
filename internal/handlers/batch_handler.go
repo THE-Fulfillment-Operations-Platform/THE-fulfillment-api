@@ -63,7 +63,9 @@ func batchFilterFrom(c *gin.Context) repositories.BatchFilter {
 		// BẤT KỲ seller nào trong đó.
 		SellerIDs:  uintListQuery(c, "seller_id"),
 		StoreOrder: c.Query("store_order"),
-		// ?batch= mã batch chứa chuỗi; ?q= ô tìm chung (batch / mã đơn / mã đơn shop / seller).
+		// ?batch= ĐÚNG mã batch, có/không dấu # (từ 23/11 không còn khớp chuỗi con,
+		// repositories/batch_code_match.go); ?q= ô tìm chung (batch / mã đơn / mã
+		// đơn shop / seller), vẫn khớp chuỗi con.
 		BatchCode: c.Query("batch"),
 		Q:         c.Query("q"),
 		// ?open=1 — chỉ batch còn việc (bảng sản xuất dùng), bỏ batch đã đóng vì

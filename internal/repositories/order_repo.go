@@ -769,8 +769,12 @@ type ItemFilter struct {
 	WithFilesReady bool
 	DesignStatus   string
 	ReviewStatus   string // exact match on the parent order's review_status
-	BatchID        *uint
-	BatchCode      string // partial, case-insensitive batch code (e.g. #101001)
+	// BatchID lọc theo id NỘI BỘ của batch (?batch_id=1909). Giữ cho tương thích;
+	// màn Đơn hàng chỉ gửi nó khi người dùng gõ rõ "id 1909" vào ô Batch ID.
+	BatchID *uint
+	// BatchCode lọc theo MÃ batch người dùng thấy (?batch=#102909 hoặc 102909):
+	// khớp đúng mã, có/không dấu #, không phân biệt hoa thường (batch_code_match.go).
+	BatchCode      string
 	MaterialID     *uint  // items whose SKU includes this material (design queue "gom theo NVL")
 	IDs            []uint // restrict to specific item ids (e.g. selected rows for a ZIP export)
 	NeedsDesign    bool   // design queue: design not ready
@@ -1286,12 +1290,13 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 		q = q.Where("order_items.id IN (?)",
 			r.db.Model(&models.BatchItem{}).Select("order_item_id").Where("batch_id = ?", *f.BatchID))
 	}
-	if f.BatchCode != "" {
+	if key := batchCodeKey(f.BatchCode); key != "" {
+		// Đúng mã batch (xem batch_code_match.go), không còn ILIKE '%…%'.
 		q = q.Where("order_items.id IN (?)",
 			r.db.Model(&models.BatchItem{}).
 				Select("batch_items.order_item_id").
 				Joins("JOIN batches ON batches.id = batch_items.batch_id AND batches.deleted_at IS NULL").
-				Where("batches.code ILIKE ?", "%"+f.BatchCode+"%"))
+				Where(batchCodeEqualsSQL, key))
 	}
 	if f.MaterialID != nil {
 		// "Gom theo NVL": keep items whose SKU is mapped to this material, so the

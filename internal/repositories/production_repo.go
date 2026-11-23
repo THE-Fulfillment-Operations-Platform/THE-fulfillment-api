@@ -42,7 +42,10 @@ type BatchFilter struct {
 	SellerID   *uint
 	SellerIDs  []uint
 	StoreOrder string
-	// BatchCode keeps batches whose code contains it ("101602" finds "#101602").
+	// BatchCode keeps the batch whose code IS it, with or without the leading
+	// "#", case-insensitive ("101602" and "#101602" find "#101602"; "1602" finds
+	// nothing). Exact since 23/11/2026 — see batch_code_match.go. Partial search
+	// by code stays in Q.
 	BatchCode string
 	// Q is the one search box of the production board: a batch code, an order's
 	// internal code or item tem code, a shop order id, or a seller name — any of
@@ -329,8 +332,9 @@ func (r *BatchRepository) baseQuery(f BatchFilter) *gorm.DB {
 			Joins("JOIN orders ON orders.id = order_items.order_id").
 			Where("orders.internal_code = ? OR order_items.internal_code = ?", code, code))
 	}
-	if bc := strings.TrimSpace(f.BatchCode); bc != "" {
-		q = q.Where("LOWER(batches.code) LIKE ?", "%"+strings.ToLower(strings.TrimPrefix(bc, "#"))+"%")
+	if key := batchCodeKey(f.BatchCode); key != "" {
+		// Đúng mã batch (xem batch_code_match.go): "1909" không còn ra #101909.
+		q = q.Where(batchCodeEqualsSQL, key)
 	}
 	if term := strings.TrimSpace(f.Q); term != "" {
 		like := "%" + strings.ToLower(strings.TrimPrefix(term, "#")) + "%"

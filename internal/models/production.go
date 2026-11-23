@@ -4,6 +4,8 @@ import (
 	"math/big"
 	"sort"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // Batch is a production order grouped by a single material. A combo item that
@@ -122,6 +124,26 @@ type BatchItem struct {
 	// tiết/Excel điền qua NumberBatchItems. Cùng thứ tự với tem QR (tem in theo
 	// thứ tự phần trong batch, mỗi cái một tem). 0 = không có tem/không đánh số (phần đã huỷ ghi bỏ hoặc đơn đã huỷ).
 	Sequence int `json:"sequence" gorm:"-"`
+
+	// BatchCode là mã batch người dùng thấy (batches.code, vd "#102909"), KHÔNG
+	// phải batch_id (số nội bộ, vd 1909). Không lưu DB: AfterFind chép từ Batch
+	// mỗi khi câu truy vấn có nạp Batch (Joins/Preload), nên mọi API trả
+	// batch_items kèm batch (danh sách /api/items, chi tiết sản phẩm, chi tiết đơn)
+	// đều có sẵn mà không thêm câu lệnh nào. Rỗng (và bị bỏ khỏi JSON) khi Batch
+	// không được nạp — như các phần trong chính màn chi tiết batch. Trước khi có
+	// trường này, màn Đơn hàng rơi về "#"+batch_id và in "#1909", trùng dáng một
+	// mã batch KHÁC hẳn (#101909) (Nghĩa 23/11/2026).
+	BatchCode string `json:"batch_code,omitempty" gorm:"-"`
+}
+
+// AfterFind điền BatchCode từ Batch đã nạp (xem BatchCode). GORM gọi hook này
+// sau khi đã nạp xong cả Joins lẫn Preload lồng (Items.BatchItems.Batch), nên
+// Batch có mặt ở đây nếu câu truy vấn có xin.
+func (b *BatchItem) AfterFind(*gorm.DB) error {
+	if b.Batch != nil {
+		b.BatchCode = b.Batch.Code
+	}
+	return nil
 }
 
 // Labelled là MỘT quy tắc duy nhất cho "phần này có tem / có STT": chưa bị ghi bỏ

@@ -91,7 +91,12 @@ func TestItemList_LeanByDefault(t *testing.T) {
 		t.Fatalf("BatchItems not loaded: %d", len(rows[0].BatchItems))
 	}
 	if rows[0].BatchItems[0].Batch == nil || rows[0].BatchItems[0].Material == nil {
-		t.Error("batch/material not loaded — the NVL and Batch columns read them")
+		t.Fatal("batch/material not loaded — the NVL and Batch columns read them")
+	}
+	// batch_code (mã người dùng thấy) đi kèm mà không thêm câu lệnh nào: chép từ
+	// Batch đã JOIN sẵn (BatchItem.AfterFind) — wantLean ở trên vẫn là 4.
+	if got, want := rows[0].BatchItems[0].BatchCode, rows[0].BatchItems[0].Batch.Code; got == "" || got != want {
+		t.Errorf("BatchCode = %q, want batches.code %q", got, want)
 	}
 	// What it does NOT read must be absent.
 	if rows[0].SKU != nil {
