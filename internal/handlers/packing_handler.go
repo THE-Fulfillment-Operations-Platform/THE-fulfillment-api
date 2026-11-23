@@ -117,3 +117,20 @@ func (h *Handlers) MarkHandoffShipped(c *gin.Context) {
 	}
 	response.OK(c, handoff)
 }
+
+// LabelScanOrder resolves a scanned order / product code for "Quét in label".
+// Read-only: it never changes the order. POST /api/orders/label-scan
+func (h *Handlers) LabelScanOrder(c *gin.Context) {
+	var in struct {
+		Code string `json:"code" binding:"required"`
+	}
+	if !bindJSON(c, &in) {
+		return
+	}
+	res, err := h.svc.Packing.LabelScan(actor(c), in.Code)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, res)
+}

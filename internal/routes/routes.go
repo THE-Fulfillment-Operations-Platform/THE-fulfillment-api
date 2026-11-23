@@ -274,6 +274,9 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		// parcel, it ships); ship-to-carrier is the bulk fallback by order ids.
 		orders.POST("/ship-to-carrier", shipManage, h.ShipOrdersToCarrier)
 		orders.POST("/ship-scan", shipManage, h.ShipScannedOrder)
+		// "Quét in label": scan an order / product tem, get the order + label state.
+		// Read-only (prints through GET /:id/label/external), so reading is enough.
+		orders.POST("/label-scan", orderRead, h.LabelScanOrder)
 		orders.PATCH("/:id/tracking", trackingManage, h.UpdateOrderTracking)
 		// Bulk tracking assignment from the CS Excel: template → preview (dry run,
 		// nothing written) → commit (only the confirmed assignments). Same guard as
