@@ -60,8 +60,8 @@ func TestTrackingImport_TemplateRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("template does not parse with our own parser: %v", err)
 	}
-	if len(rows) != 2 {
-		t.Fatalf("expected the 2 sample rows, got %d", len(rows))
+	if len(rows) != 3 {
+		t.Fatalf("expected the 3 sample rows, got %d", len(rows))
 	}
 	if rows[0].OrderKey == "" || rows[0].TrackingNumber == "" {
 		t.Fatalf("sample row came back empty: %+v", rows[0])

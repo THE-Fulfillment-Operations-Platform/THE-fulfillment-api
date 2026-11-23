@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"golang.org/x/text/unicode/norm"
 
 	"the-fulfillment/backend/internal/apperr"
+	"the-fulfillment/backend/internal/models"
 	"the-fulfillment/backend/internal/repositories"
 )
 
@@ -51,7 +53,14 @@ type TrackingImportRow struct {
 	Row            int    `json:"row"`
 	OrderKey       string `json:"order_key"`
 	TrackingNumber string `json:"tracking_number"`
+	// LabelURL: link to a label bought outside (https://file.gkelogistics.com/…
+	// pdf) for the same order. Optional — a line may carry the tracking number,
+	// the label link, or both (see ExternalLabelURL on the order).
+	LabelURL string `json:"label_url,omitempty"`
 }
+
+// MaxExternalLabelURLLen mirrors orders.external_label_url (size:500).
+const MaxExternalLabelURLLen = 500
 
 // Match actions. UNCHANGED lines are shown but never committed; OVERWRITE lines
 // are committed only when the operator explicitly opts in on the client.
@@ -59,6 +68,9 @@ const (
 	TrackingActionAssign    = "ASSIGN"
 	TrackingActionOverwrite = "OVERWRITE"
 	TrackingActionUnchanged = "UNCHANGED"
+	// TrackingActionNone: the line carries only a label link — nothing to do for
+	// the tracking number (the label side has its own LabelAction).
+	TrackingActionNone = "NONE"
 )
 
 // Issue codes. The client groups by these; Reason is the operator-facing text.
@@ -76,6 +88,10 @@ const (
 	// into a General-format cell becomes that, and the digits past the 15th are
 	// gone for good — attaching it would register a parcel that does not exist.
 	TrackingIssueExcelNumber = "EXCEL_NUMBER"
+	// TrackingIssueBadLabel: the "Link label" cell is not a usable http(s) URL.
+	TrackingIssueBadLabel = "BAD_LABEL"
+	// TrackingIssueSharedLabel: one label link on several different orders.
+	TrackingIssueSharedLabel = "SHARED_LABEL"
 )
 
 // TrackingImportMatch is a file line the matcher resolved to exactly one order.
@@ -88,6 +104,11 @@ type TrackingImportMatch struct {
 	TrackingNumber  string `json:"tracking_number"`
 	CurrentTracking string `json:"current_tracking,omitempty"`
 	Action          string `json:"action"`
+	// Label side (external label link). LabelAction is empty when the line has no
+	// link; otherwise ASSIGN / OVERWRITE / UNCHANGED, like the tracking number.
+	LabelURL     string `json:"label_url,omitempty"`
+	CurrentLabel string `json:"current_label,omitempty"`
+	LabelAction  string `json:"label_action,omitempty"`
 }
 
 // TrackingImportIssue is a file line that will NOT be applied, with the reason.
@@ -105,10 +126,18 @@ type TrackingImportIssue struct {
 // that the file does or does not cover. Both are -1 when no range was sent,
 // meaning "not computed", which the client renders differently from 0.
 type TrackingImportSummary struct {
-	TotalRows    int   `json:"total_rows"`
-	Assign       int   `json:"assign"`
-	Overwrite    int   `json:"overwrite"`
-	Unchanged    int   `json:"unchanged"`
+	TotalRows int `json:"total_rows"`
+	Assign    int `json:"assign"`
+	Overwrite int `json:"overwrite"`
+	Unchanged int `json:"unchanged"`
+	// Label counters, over the lines that carry a link: ASSIGN = new label,
+	// OVERWRITE = the order already has a different one, UNCHANGED = same link.
+	LabelAssign    int `json:"label_assign"`
+	LabelOverwrite int `json:"label_overwrite"`
+	LabelUnchanged int `json:"label_unchanged"`
+	// MergedRows: extra lines of an order already covered by an earlier line (a
+	// label shared by several product lines) — folded in, not an issue.
+	MergedRows   int   `json:"merged_rows"`
 	Issues       int   `json:"issues"`
 	ScopeTotal   int64 `json:"scope_total"`
 	ScopeMissing int64 `json:"scope_missing"`
@@ -129,8 +158,10 @@ type TrackingImportPreview struct {
 
 // TrackingAssignment is one confirmed (order, number) pair sent back on commit.
 type TrackingAssignment struct {
-	OrderID        uint   `json:"order_id" binding:"required"`
-	TrackingNumber string `json:"tracking_number" binding:"required"`
+	OrderID uint `json:"order_id" binding:"required"`
+	// TrackingNumber and LabelURL are each optional but at least one is needed.
+	TrackingNumber string `json:"tracking_number"`
+	LabelURL       string `json:"label_url"`
 }
 
 // TrackingImportCommitInput carries the assignments the operator confirmed —
@@ -186,6 +217,13 @@ var (
 	}
 	trackingInternalHeaderKeys = map[string]bool{
 		"mãnộibộ": true, "manoibo": true, "internalcode": true,
+	}
+	// The label-link column: where the customer pastes the PDF link of a label
+	// bought at an outside carrier.
+	trackingLabelHeaderKeys = map[string]bool{
+		"linklabel": true, "labelurl": true, "label": true, "labellink": true,
+		"urllabel": true, "linkpdf": true, "pdflabel": true, "labelpdf": true,
+		"linknhãn": true, "linknhan": true,
 	}
 	trackingNumberHeaderKeys = map[string]bool{
 		"tracking": true, "trackingnumber": true, "trackingcode": true, "trackingid": true,
@@ -252,14 +290,52 @@ func ParseTrackingXLSXFile(r io.Reader) (*TrackingImportFile, error) {
 	if err != nil {
 		return nil, apperr.BadRequest("Không đọc được dữ liệu Excel: " + err.Error())
 	}
+	resolveLabelHyperlinks(f, sheets[0], records)
 	return trackingFileFromRecords(records)
+}
+
+// resolveLabelHyperlinks: a link pasted into Excel is often shown as a word
+// ("Label", "Xem") with the URL hidden behind the cell's hyperlink. GetRows only
+// returns the shown text, so for the label column the real target is read back
+// from the cell and put in its place.
+func resolveLabelHyperlinks(f *excelize.File, sheet string, records [][]string) {
+	if len(records) < 2 {
+		return
+	}
+	labelCol := -1
+	for i, h := range records[0] {
+		if trackingLabelHeaderKeys[normalizeTrackingHeader(h)] {
+			labelCol = i
+			break
+		}
+	}
+	if labelCol < 0 {
+		return
+	}
+	for r := 1; r < len(records); r++ {
+		rec := records[r]
+		if labelCol >= len(rec) {
+			continue
+		}
+		shown := strings.TrimSpace(rec[labelCol])
+		if shown == "" || strings.HasPrefix(strings.ToLower(shown), "http") {
+			continue
+		}
+		name, err := excelize.CoordinatesToCellName(labelCol+1, r+1)
+		if err != nil {
+			continue
+		}
+		if ok, target, err := f.GetCellHyperLink(sheet, name); err == nil && ok && target != "" {
+			rec[labelCol] = target
+		}
+	}
 }
 
 func trackingFileFromRecords(records [][]string) (*TrackingImportFile, error) {
 	if len(records) < 2 {
 		return nil, apperr.BadRequest("File phải có dòng tiêu đề và ít nhất một dòng dữ liệu")
 	}
-	orderCol, internalCol, trackCol := -1, -1, -1
+	orderCol, internalCol, trackCol, labelCol := -1, -1, -1, -1
 	journeyExport := false
 	for i, h := range records[0] {
 		key := normalizeTrackingHeader(h)
@@ -273,6 +349,8 @@ func trackingFileFromRecords(records [][]string) (*TrackingImportFile, error) {
 			orderCol = i
 		case trackingNumberHeaderKeys[key] && trackCol == -1:
 			trackCol = i
+		case trackingLabelHeaderKeys[key] && labelCol == -1:
+			labelCol = i
 		}
 	}
 	// Key column: the internal code when present, else the generic order column.
@@ -281,9 +359,11 @@ func trackingFileFromRecords(records [][]string) (*TrackingImportFile, error) {
 	if internalCol != -1 {
 		keyCol, fallbackCol = internalCol, orderCol
 	}
-	if keyCol == -1 || trackCol == -1 {
+	// The label link is an alternative payload: a file may carry tracking numbers,
+	// label links, or both. At least one of the two columns must exist.
+	if keyCol == -1 || (trackCol == -1 && labelCol == -1) {
 		return nil, apperr.BadRequest(
-			"Không nhận diện được cột OrderID / Mã vận đơn — tải file mẫu để xem đúng định dạng")
+			"Không nhận diện được cột OrderID và cột Mã vận đơn / Link label — tải file mẫu để xem đúng định dạng")
 	}
 	cell := func(rec []string, col int) string {
 		if col >= 0 && col < len(rec) {
@@ -294,21 +374,21 @@ func trackingFileFromRecords(records [][]string) (*TrackingImportFile, error) {
 	out := &TrackingImportFile{JourneyExport: journeyExport}
 	rows := make([]TrackingImportRow, 0, len(records)-1)
 	for i, rec := range records[1:] {
-		key, number := cell(rec, keyCol), cell(rec, trackCol)
+		key, number, label := cell(rec, keyCol), cell(rec, trackCol), cell(rec, labelCol)
 		if key == "" {
 			key = cell(rec, fallbackCol)
 		}
-		if key == "" && number == "" {
+		if key == "" && number == "" && label == "" {
 			continue // fully blank line — Excel files end with plenty of them
 		}
-		if journeyExport && number == "" {
+		if journeyExport && number == "" && label == "" {
 			// An exported order the operator did not fill. The bulk path never
 			// clears a number anyway, so skipping is exactly what an EMPTY_TRACKING
 			// issue would have done — minus a red alert listing hundreds of rows.
 			out.SkippedBlank++
 			continue
 		}
-		rows = append(rows, TrackingImportRow{Row: i + 1, OrderKey: key, TrackingNumber: number})
+		rows = append(rows, TrackingImportRow{Row: i + 1, OrderKey: key, TrackingNumber: number, LabelURL: label})
 	}
 	if len(rows) == 0 {
 		if out.SkippedBlank > 0 {
@@ -331,18 +411,48 @@ func looksLikeExcelScientific(v string) bool {
 	return excelScientificRe.MatchString(strings.TrimSpace(v))
 }
 
+// normalizeExternalLabelURL checks the "Link label" cell: an http(s) URL with a
+// host, no spaces or control characters, no credentials, at most 500 bytes (the
+// column size). It returns the trimmed URL, or the operator-facing reason. Syntax
+// only — the server fetches it later through the SSRF-guarded client, so the
+// preview needs no network (and no DNS) to judge a file.
+func normalizeExternalLabelURL(v string) (string, string) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", ""
+	}
+	if len(v) > MaxExternalLabelURLLen {
+		return "", fmt.Sprintf("Link label quá dài (tối đa %d ký tự)", MaxExternalLabelURLLen)
+	}
+	for _, r := range v {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return "", "Link label có khoảng trắng hoặc ký tự lạ — dán lại đúng link"
+		}
+	}
+	u, err := url.Parse(v)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return "", "Link label không hợp lệ — phải bắt đầu bằng http:// hoặc https://"
+	}
+	if u.User != nil {
+		return "", "Link label không được chứa tài khoản/mật khẩu"
+	}
+	return v, ""
+}
+
 // ---------- template ----------
 
-// TrackingImportTemplateXLSX renders the 2-column template CS downloads. The
-// sample rows show both accepted identifiers: a shop order id and an internal
-// code.
+// TrackingImportTemplateXLSX renders the template CS downloads: order id, tracking
+// number (optional when the line only brings a label) and the label link (optional
+// too). The sample rows show both accepted identifiers — a shop order id and an
+// internal code — and a label shared by two product lines of one order.
 func (s *OrderService) TrackingImportTemplateXLSX() ([]byte, string, error) {
 	grid := [][]string{
-		{"OrderID", "Mã vận đơn"},
-		{"4141801137", "92612903029511573030094547"},
-		{"100111", "YT2521521266065831"},
+		{"OrderID", "Mã vận đơn", "Link label"},
+		{"4141801137", "92612903029511573030094547", "https://file.gkelogistics.com/labels/4141801137.pdf"},
+		{"100111", "", "https://file.gkelogistics.com/labels/100111.pdf"},
+		{"100111", "", "https://file.gkelogistics.com/labels/100111.pdf"},
 	}
-	data, err := buildTemplateXLSX("Gắn mã vận đơn", grid, []float64{24, 36})
+	data, err := buildTemplateXLSX("Gắn mã vận đơn và label", grid, []float64{24, 36, 60})
 	if err != nil {
 		return nil, "", err
 	}
@@ -409,14 +519,22 @@ func (s *OrderService) PreviewTrackingImport(actor Actor, rows []TrackingImportR
 			issue(row, TrackingIssueEmptyOrder, "Thiếu mã đơn")
 			continue
 		}
-		if row.TrackingNumber == "" {
-			issue(row, TrackingIssueEmptyTracking, "Thiếu mã vận đơn")
+		if row.TrackingNumber == "" && row.LabelURL == "" {
+			issue(row, TrackingIssueEmptyTracking, "Thiếu mã vận đơn (hoặc link label)")
 			continue
 		}
-		if looksLikeExcelScientific(row.TrackingNumber) {
+		if row.TrackingNumber != "" && looksLikeExcelScientific(row.TrackingNumber) {
 			issue(row, TrackingIssueExcelNumber,
 				"Excel đã đổi mã vận đơn thành số mũ nên mất chữ số — định dạng ô là Text (hoặc gõ dấu ' trước mã) rồi dán lại mã")
 			continue
+		}
+		if row.LabelURL != "" {
+			clean, reason := normalizeExternalLabelURL(row.LabelURL)
+			if reason != "" {
+				issue(row, TrackingIssueBadLabel, reason)
+				continue
+			}
+			row.LabelURL = clean
 		}
 		// Internal code first — it is unique by construction. A store order id is a
 		// repeatable label, so several orders answering to it is a real possibility
@@ -436,31 +554,25 @@ func (s *OrderService) PreviewTrackingImport(actor Actor, rows []TrackingImportR
 				continue
 			}
 		}
-		m := TrackingImportMatch{
+		// Actions are decided after the one-order-several-lines merge below.
+		matches = append(matches, TrackingImportMatch{
 			Row: row.Row, OrderID: ref.ID, InternalCode: ref.InternalCode,
 			StoreOrderID: ref.StoreOrderID, ShippingName: ref.ShippingName,
-			TrackingNumber: row.TrackingNumber,
-		}
-		switch current := strings.TrimSpace(ref.TrackingNumber); {
-		case current == "":
-			m.Action = TrackingActionAssign
-		case strings.EqualFold(current, row.TrackingNumber):
-			m.Action = TrackingActionUnchanged
-			m.CurrentTracking = current
-		default:
-			m.Action = TrackingActionOverwrite
-			m.CurrentTracking = current
-		}
-		matches = append(matches, m)
+			TrackingNumber: row.TrackingNumber, LabelURL: row.LabelURL,
+		})
 	}
 
 	// Cross-line safety passes. Each drops the affected lines from the matches
 	// and files an issue instead — the bulk path never guesses.
 	drop := map[int]bool{}
+	mergedRows := 0
 
-	// (a) One order, several lines. Same number repeated → keep the first, mark
-	// the rest as duplicates. Different numbers → nobody knows which is right,
-	// drop them all.
+	// (a) One order, several lines. A label shared by several product lines of
+	// one order (or a tracking number repeated on each) is normal: the lines are
+	// folded into the first one and what each contributes is kept (line 1 holds
+	// the number, line 2 the link → one assignment with both). Two DIFFERENT
+	// numbers, or two DIFFERENT links, for one order: nobody knows which is right,
+	// all its lines are dropped.
 	byOrder := map[uint][]int{}
 	for i, m := range matches {
 		byOrder[m.OrderID] = append(byOrder[m.OrderID], i)
@@ -469,22 +581,74 @@ func (s *OrderService) PreviewTrackingImport(actor Actor, rows []TrackingImportR
 		if len(idxs) < 2 {
 			continue
 		}
-		numbers := map[string]bool{}
+		numbers, labels := map[string]bool{}, map[string]bool{}
 		for _, i := range idxs {
-			numbers[strings.ToUpper(matches[i].TrackingNumber)] = true
+			if n := matches[i].TrackingNumber; n != "" {
+				numbers[strings.ToUpper(n)] = true
+			}
+			if l := matches[i].LabelURL; l != "" {
+				labels[l] = true
+			}
 		}
-		if len(numbers) > 1 {
+		if len(numbers) > 1 || len(labels) > 1 {
+			reason := "File chứa nhiều mã vận đơn khác nhau cho cùng một đơn — hệ thống không tự chọn"
+			if len(numbers) <= 1 {
+				reason = "File chứa nhiều link label khác nhau cho cùng một đơn — hệ thống không tự chọn"
+			}
 			for _, i := range idxs {
 				drop[i] = true
-				issue(TrackingImportRow{Row: matches[i].Row, OrderKey: matches[i].InternalCode, TrackingNumber: matches[i].TrackingNumber},
-					TrackingIssueConflict, "File chứa nhiều mã vận đơn khác nhau cho cùng một đơn — hệ thống không tự chọn")
+				issue(TrackingImportRow{Row: matches[i].Row, OrderKey: matches[i].InternalCode,
+					TrackingNumber: matches[i].TrackingNumber}, TrackingIssueConflict, reason)
 			}
-		} else {
-			for _, i := range idxs[1:] {
-				drop[i] = true
-				issue(TrackingImportRow{Row: matches[i].Row, OrderKey: matches[i].InternalCode, TrackingNumber: matches[i].TrackingNumber},
-					TrackingIssueDuplicate, fmt.Sprintf("Trùng với dòng %d — chỉ gắn một lần", matches[idxs[0]].Row))
+			continue
+		}
+		first := idxs[0]
+		for _, i := range idxs[1:] {
+			drop[i] = true
+			if matches[first].TrackingNumber == "" {
+				matches[first].TrackingNumber = matches[i].TrackingNumber
 			}
+			if matches[first].LabelURL == "" {
+				matches[first].LabelURL = matches[i].LabelURL
+			}
+			if matches[i].LabelURL != "" || matches[i].TrackingNumber == "" {
+				mergedRows++ // shared label line: folded in silently
+				continue
+			}
+			issue(TrackingImportRow{Row: matches[i].Row, OrderKey: matches[i].InternalCode, TrackingNumber: matches[i].TrackingNumber},
+				TrackingIssueDuplicate, fmt.Sprintf("Trùng với dòng %d — chỉ gắn một lần", matches[first].Row))
+		}
+	}
+
+	// Actions, per side, against what the order holds now.
+	for i := range matches {
+		if drop[i] {
+			continue
+		}
+		m := &matches[i]
+		ref := refByID[m.OrderID]
+		switch current := strings.TrimSpace(ref.TrackingNumber); {
+		case m.TrackingNumber == "":
+			m.Action = TrackingActionNone
+		case current == "":
+			m.Action = TrackingActionAssign
+		case strings.EqualFold(current, m.TrackingNumber):
+			m.Action = TrackingActionUnchanged
+			m.CurrentTracking = current
+		default:
+			m.Action = TrackingActionOverwrite
+			m.CurrentTracking = current
+		}
+		switch current := strings.TrimSpace(ref.ExternalLabelURL); {
+		case m.LabelURL == "":
+		case current == "":
+			m.LabelAction = TrackingActionAssign
+		case current == m.LabelURL:
+			m.LabelAction = TrackingActionUnchanged
+			m.CurrentLabel = current
+		default:
+			m.LabelAction = TrackingActionOverwrite
+			m.CurrentLabel = current
 		}
 	}
 
@@ -493,7 +657,7 @@ func (s *OrderService) PreviewTrackingImport(actor Actor, rows []TrackingImportR
 	// is almost always a copy-paste slip in the file.
 	byNumber := map[string][]int{}
 	for i, m := range matches {
-		if !drop[i] {
+		if !drop[i] && m.TrackingNumber != "" {
 			byNumber[strings.ToUpper(m.TrackingNumber)] = append(byNumber[strings.ToUpper(m.TrackingNumber)], i)
 		}
 	}
@@ -512,12 +676,41 @@ func (s *OrderService) PreviewTrackingImport(actor Actor, rows []TrackingImportR
 		}
 	}
 
+	// (b2) One label link on several different orders: a label is one parcel, so
+	// the same PDF on two orders means a row was pasted wrong.
+	byLabel := map[string][]int{}
+	for i, m := range matches {
+		if !drop[i] && m.LabelURL != "" {
+			byLabel[m.LabelURL] = append(byLabel[m.LabelURL], i)
+		}
+	}
+	for _, idxs := range byLabel {
+		orderIDs := map[uint]bool{}
+		for _, i := range idxs {
+			orderIDs[matches[i].OrderID] = true
+		}
+		if len(orderIDs) < 2 {
+			continue
+		}
+		for _, i := range idxs {
+			m := &matches[i]
+			if m.TrackingNumber == "" {
+				drop[i] = true
+			} else {
+				// The tracking number on the line is still good; only the link is.
+				m.LabelURL, m.LabelAction, m.CurrentLabel = "", "", ""
+			}
+			issue(TrackingImportRow{Row: m.Row, OrderKey: m.InternalCode, TrackingNumber: m.TrackingNumber},
+				TrackingIssueSharedLabel, fmt.Sprintf("Link label này xuất hiện ở %d đơn khác nhau trong file — thường là dán nhầm", len(orderIDs)))
+		}
+	}
+
 	// (c) A number already attached to a DIFFERENT order in the system: assigning
 	// it here would give two orders one parcel. The single-order screen may still
 	// do it deliberately; the bulk path flags it.
 	remainingNumbers := make([]string, 0, len(matches))
 	for i, m := range matches {
-		if !drop[i] && m.Action != TrackingActionUnchanged {
+		if !drop[i] && m.TrackingNumber != "" && m.Action != TrackingActionUnchanged {
 			remainingNumbers = append(remainingNumbers, m.TrackingNumber)
 		}
 	}
@@ -530,7 +723,7 @@ func (s *OrderService) PreviewTrackingImport(actor Actor, rows []TrackingImportR
 		takenBy[strings.ToUpper(ref.TrackingNumber)] = ref
 	}
 	for i, m := range matches {
-		if drop[i] || m.Action == TrackingActionUnchanged {
+		if drop[i] || m.TrackingNumber == "" || m.Action == TrackingActionUnchanged {
 			continue
 		}
 		if owner, ok := takenBy[strings.ToUpper(m.TrackingNumber)]; ok && owner.ID != m.OrderID {
@@ -551,6 +744,7 @@ func (s *OrderService) PreviewTrackingImport(actor Actor, rows []TrackingImportR
 
 	summary := TrackingImportSummary{
 		TotalRows: len(rows), Issues: len(issues), ScopeTotal: -1, ScopeMissing: -1,
+		MergedRows: mergedRows,
 	}
 	covered := map[uint]bool{}
 	for _, m := range matches {
@@ -560,8 +754,16 @@ func (s *OrderService) PreviewTrackingImport(actor Actor, rows []TrackingImportR
 			summary.Assign++
 		case TrackingActionOverwrite:
 			summary.Overwrite++
-		default:
+		case TrackingActionUnchanged:
 			summary.Unchanged++
+		}
+		switch m.LabelAction {
+		case TrackingActionAssign:
+			summary.LabelAssign++
+		case TrackingActionOverwrite:
+			summary.LabelOverwrite++
+		case TrackingActionUnchanged:
+			summary.LabelUnchanged++
 		}
 	}
 
@@ -634,8 +836,13 @@ func (s *OrderService) CommitTrackingImport(actor Actor, in TrackingImportCommit
 	seen := map[uint]bool{}
 	for _, a := range in.Assignments {
 		number := strings.TrimSpace(a.TrackingNumber)
-		if a.OrderID == 0 || number == "" {
-			res.Failed = append(res.Failed, TrackingCommitFailure{OrderID: a.OrderID, Reason: "Thiếu order_id hoặc mã vận đơn"})
+		label, labelReason := normalizeExternalLabelURL(a.LabelURL)
+		if a.OrderID == 0 || (number == "" && label == "" && labelReason == "") {
+			res.Failed = append(res.Failed, TrackingCommitFailure{OrderID: a.OrderID, Reason: "Thiếu order_id hoặc mã vận đơn / link label"})
+			continue
+		}
+		if labelReason != "" {
+			res.Failed = append(res.Failed, TrackingCommitFailure{OrderID: a.OrderID, Reason: labelReason})
 			continue
 		}
 		if seen[a.OrderID] {
@@ -643,17 +850,47 @@ func (s *OrderService) CommitTrackingImport(actor Actor, in TrackingImportCommit
 			continue
 		}
 		seen[a.OrderID] = true
-		if _, err := s.UpdateTracking(actor, a.OrderID, UpdateTrackingInput{TrackingNumber: &number}); err != nil {
+		failure := func(err error) {
 			reason := "Không cập nhật được"
 			if ae, ok := apperr.As(err); ok {
 				reason = ae.Message
 			}
 			res.Failed = append(res.Failed, TrackingCommitFailure{OrderID: a.OrderID, Reason: reason})
-			continue
+		}
+		if number != "" {
+			if _, err := s.UpdateTracking(actor, a.OrderID, UpdateTrackingInput{TrackingNumber: &number}); err != nil {
+				failure(err)
+				continue
+			}
+		}
+		if label != "" {
+			if err := s.setExternalLabel(actor, a.OrderID, label); err != nil {
+				failure(err)
+				continue
+			}
 		}
 		res.Updated++
 	}
 	s.audit.Log(actor, "ORDER_TRACKING_BULK_IMPORT", "order", nil,
-		fmt.Sprintf("Gắn mã vận đơn từ file: %d cập nhật, %d lỗi", res.Updated, len(res.Failed)), nil)
+		fmt.Sprintf("Gắn mã vận đơn / label từ file: %d cập nhật, %d lỗi", res.Updated, len(res.Failed)), nil)
 	return res, nil
+}
+
+// setExternalLabel stores the outside label link on the order, with an audit
+// entry holding the old and new link. It touches nothing else — no tracking
+// state, no provider call: the link is only a print source for the warehouse.
+func (s *OrderService) setExternalLabel(actor Actor, orderID uint, label string) error {
+	order, err := s.GetOrder(orderID)
+	if err != nil {
+		return err
+	}
+	if order.ExternalLabelURL == label {
+		return nil
+	}
+	if err := s.repo.Order.UpdateTracking(order.ID, map[string]interface{}{"external_label_url": label}); err != nil {
+		return apperr.Internal("could not save external label").Wrap(err)
+	}
+	s.audit.Log(actor, "ORDER_EXTERNAL_LABEL_SET", "order", &order.ID,
+		"Gắn label ngoài cho "+order.InternalCode, models.JSONMap{"external_label_url": []string{order.ExternalLabelURL, label}})
+	return nil
 }

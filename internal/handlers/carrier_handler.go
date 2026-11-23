@@ -102,6 +102,24 @@ func (h *Handlers) OrderTHELabel(c *gin.Context) {
 	c.Data(http.StatusOK, ctype, f.Data)
 }
 
+// OrderExternalLabel streams the outside label (link from the Excel import) of an
+// order, downloaded by the server so the browser can print it.
+// GET /api/orders/:id/label/external
+func (h *Handlers) OrderExternalLabel(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	f, err := h.svc.Order.ExternalLabel(c.Request.Context(), actor(c), id)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	c.Header("Content-Disposition", `inline; filename="`+f.Filename+`"`)
+	c.Header("Cache-Control", "private, max-age=300")
+	c.Data(http.StatusOK, f.ContentType, f.Data)
+}
+
 // POST /api/orders/:id/the/check
 func (h *Handlers) CheckOrderOnTHE(c *gin.Context) {
 	id, ok := uintParam(c, "id")

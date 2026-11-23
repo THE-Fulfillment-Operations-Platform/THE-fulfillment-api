@@ -254,17 +254,18 @@ func (r *OrderRepository) StampHandedOverAt(orderID uint, at time.Time) error {
 // assign / overwrite. Loading full orders (six preloads each) for a
 // thousand-row file would answer the same questions a hundred times slower.
 type OrderCodeRef struct {
-	ID             uint                `json:"id"`
-	InternalCode   string              `json:"internal_code"`
-	StoreOrderID   string              `json:"store_order_id"`
-	ShippingName   string              `json:"shipping_name"`
-	TrackingNumber string              `json:"tracking_number"`
-	SellerStatus   models.SellerStatus `json:"seller_status"`
-	HandedOverAt   *time.Time          `json:"handed_over_at"`
+	ID               uint                `json:"id"`
+	InternalCode     string              `json:"internal_code"`
+	StoreOrderID     string              `json:"store_order_id"`
+	ShippingName     string              `json:"shipping_name"`
+	TrackingNumber   string              `json:"tracking_number"`
+	ExternalLabelURL string              `json:"external_label_url"`
+	SellerStatus     models.SellerStatus `json:"seller_status"`
+	HandedOverAt     *time.Time          `json:"handed_over_at"`
 }
 
 const orderCodeRefColumns = "orders.id, orders.internal_code, orders.store_order_id, " +
-	"orders.shipping_name, orders.tracking_number, orders.seller_status, orders.handed_over_at"
+	"orders.shipping_name, orders.tracking_number, orders.external_label_url, orders.seller_status, orders.handed_over_at"
 
 func (r *OrderRepository) refsWhere(cond string, args ...interface{}) ([]OrderCodeRef, error) {
 	var rows []OrderCodeRef

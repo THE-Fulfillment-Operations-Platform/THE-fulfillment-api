@@ -127,6 +127,10 @@ type Order struct {
 	// TrackingURL is the internal deep link into the tracking provider. It is
 	// never included in a seller-facing response for the same reason: the page it
 	// opens names the transport partner.
+	// ExternalLabelURL: link to a shipping label bought outside FFM (e.g. a PDF at
+	// the seller's own carrier). The warehouse prints it from the ship-queue
+	// screen; nothing else reads it. Set by the Excel import ("Link label").
+	ExternalLabelURL  string         `json:"external_label_url" gorm:"size:500"`
 	TrackingNumber    string         `json:"tracking_number" gorm:"size:120;index"`
 	TrackingStatus    TrackingStatus `json:"tracking_status" gorm:"size:20;not null;default:'NONE'"`
 	TrackingURL       string         `json:"tracking_url" gorm:"size:500"`

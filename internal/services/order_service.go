@@ -3,6 +3,7 @@ package services
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -24,6 +25,9 @@ type OrderService struct {
 	// the cancels the order's THE shipment when FFM cancels / deletes the order.
 	// Nil only in tests that never touch THE.
 	the *CarrierService
+	// extLabelClient downloads outside labels (ExternalLabel). Nil = the
+	// SSRF-guarded client; tests inject one that may reach a local server.
+	extLabelClient *http.Client
 }
 
 // ---------- Orders ----------

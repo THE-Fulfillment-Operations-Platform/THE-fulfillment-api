@@ -69,6 +69,9 @@ type QCResultOrder struct {
 	// THECancelled is the code of the label THE killed, when the order's latest
 	// shipment ended that way: it needs a new label before it may leave.
 	THECancelled string `json:"the_cancelled,omitempty"`
+	// ExternalLabelURL: label bought outside FFM, imported from Excel (empty = none).
+	// The ship queue prints it through GET /orders/:id/label/external.
+	ExternalLabelURL string `json:"external_label_url,omitempty"`
 	// MissingHS lists the order's SKU codes that have no HS code, neither their
 	// own nor their parent's: "Tạo label THE" refuses the order until they are
 	// declared (#6312), so the ship queue flags it beforehand. Only filled for
@@ -144,7 +147,7 @@ func (s *QCService) buildResultOrders(ids []uint) ([]QCResultOrder, error) {
 			SellerName: sellerName, OrderDate: o.OrderDate, DailySeq: o.DailySeq,
 			CreatedAt: o.CreatedAt, Items: []QCResultItem{},
 			SellerStatus: o.SellerStatus, HandedOver: o.SellerStatus.HandedOver(),
-			TrackingNumber: o.TrackingNumber,
+			TrackingNumber: o.TrackingNumber, ExternalLabelURL: o.ExternalLabelURL,
 		}
 		// NONE is our "nothing recorded" placeholder, not a shipment state — leave
 		// it out so the screen can tell "no parcel yet" from "waiting first scan".
