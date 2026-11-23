@@ -110,7 +110,10 @@ type QCScanResult struct {
 
 // QCScanBatch is one production part of the item.
 type QCScanBatch struct {
-	BatchItemID  uint                  `json:"batch_item_id"`
+	BatchItemID uint `json:"batch_item_id"`
+	// BatchID là id nội bộ của batch — chỉ để web dựng link /batches/:id (route
+	// theo id). Hiển thị luôn là BatchCode (#102909), không bao giờ là id.
+	BatchID      uint                  `json:"batch_id"`
 	BatchCode    string                `json:"batch_code"`
 	MaterialCode string                `json:"material_code"`
 	Status       models.InternalStatus `json:"status"`
@@ -167,7 +170,7 @@ func (s *QCService) scanResult(item *models.OrderItem) *QCScanResult {
 	res.MaterialDescription = itemMaterialDescriptions(item)
 	for _, bi := range item.BatchItems {
 		b := QCScanBatch{
-			BatchItemID: bi.ID, Status: bi.Status, Attempt: bi.Attempt,
+			BatchItemID: bi.ID, BatchID: bi.BatchID, Status: bi.Status, Attempt: bi.Attempt,
 			Scrapped: bi.Scrapped(), ScrapReason: bi.ScrapReason,
 		}
 		if bi.Batch != nil {

@@ -72,6 +72,11 @@ func TestQCScan_FlagsScrappedParts(t *testing.T) {
 		if p.Attempt != 2 || p.BatchCode != newBatch.Code || p.Status != models.StatusCut {
 			t.Fatalf("phần làm lại phải là lần 2 ở batch mới, đã cắt, got %+v", p)
 		}
+		// batch_id để màn QC dựng link /batches/:id (route theo id) — trước đây web
+		// lấy mã bỏ dấu # làm id (/batches/101777) và mở nhầm/không thấy batch.
+		if p.BatchID != newBatch.ID {
+			t.Fatalf("phần làm lại phải mang batch_id %d, got %d", newBatch.ID, p.BatchID)
+		}
 	}
 	if scrapped != 1 || live != 1 {
 		t.Fatalf("want đúng 1 phần huỷ và 1 phần sống, got huỷ=%d sống=%d", scrapped, live)
