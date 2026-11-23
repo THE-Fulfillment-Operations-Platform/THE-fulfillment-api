@@ -58,6 +58,8 @@ func (s *OrderService) ExternalLabel(ctx context.Context, actor Actor, orderID u
 		return nil, apperr.BadRequest("Link label không hợp lệ")
 	}
 	req.Header.Set("Accept", "application/pdf,image/*;q=0.9,*/*;q=0.5")
+	// Some carriers' file hosts refuse the bare Go client; say who is asking.
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; FFM-LabelPrint/1.0)")
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, apperr.BadRequest("Không tải được label từ link đã nhập (hết hạn / chặn / chậm quá " +

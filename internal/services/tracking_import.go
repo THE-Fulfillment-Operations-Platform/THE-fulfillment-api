@@ -116,6 +116,7 @@ type TrackingImportIssue struct {
 	Row            int    `json:"row"`
 	OrderKey       string `json:"order_key"`
 	TrackingNumber string `json:"tracking_number,omitempty"`
+	LabelURL       string `json:"label_url,omitempty"`
 	Code           string `json:"code"`
 	Reason         string `json:"reason"`
 }
@@ -510,7 +511,7 @@ func (s *OrderService) PreviewTrackingImport(actor Actor, rows []TrackingImportR
 	issue := func(row TrackingImportRow, code, reason string) {
 		issues = append(issues, TrackingImportIssue{
 			Row: row.Row, OrderKey: row.OrderKey, TrackingNumber: row.TrackingNumber,
-			Code: code, Reason: reason,
+			LabelURL: row.LabelURL, Code: code, Reason: reason,
 		})
 	}
 
@@ -598,7 +599,7 @@ func (s *OrderService) PreviewTrackingImport(actor Actor, rows []TrackingImportR
 			for _, i := range idxs {
 				drop[i] = true
 				issue(TrackingImportRow{Row: matches[i].Row, OrderKey: matches[i].InternalCode,
-					TrackingNumber: matches[i].TrackingNumber}, TrackingIssueConflict, reason)
+					TrackingNumber: matches[i].TrackingNumber, LabelURL: matches[i].LabelURL}, TrackingIssueConflict, reason)
 			}
 			continue
 		}
@@ -615,7 +616,7 @@ func (s *OrderService) PreviewTrackingImport(actor Actor, rows []TrackingImportR
 				mergedRows++ // shared label line: folded in silently
 				continue
 			}
-			issue(TrackingImportRow{Row: matches[i].Row, OrderKey: matches[i].InternalCode, TrackingNumber: matches[i].TrackingNumber},
+			issue(TrackingImportRow{Row: matches[i].Row, OrderKey: matches[i].InternalCode, TrackingNumber: matches[i].TrackingNumber, LabelURL: matches[i].LabelURL},
 				TrackingIssueDuplicate, fmt.Sprintf("Trùng với dòng %d — chỉ gắn một lần", matches[first].Row))
 		}
 	}
@@ -671,7 +672,7 @@ func (s *OrderService) PreviewTrackingImport(actor Actor, rows []TrackingImportR
 		}
 		for _, i := range idxs {
 			drop[i] = true
-			issue(TrackingImportRow{Row: matches[i].Row, OrderKey: matches[i].InternalCode, TrackingNumber: matches[i].TrackingNumber},
+			issue(TrackingImportRow{Row: matches[i].Row, OrderKey: matches[i].InternalCode, TrackingNumber: matches[i].TrackingNumber, LabelURL: matches[i].LabelURL},
 				TrackingIssueSharedTracking, fmt.Sprintf("Mã vận đơn này xuất hiện ở %d đơn khác nhau trong file — thường là dán nhầm", len(orderIDs)))
 		}
 	}
@@ -694,14 +695,14 @@ func (s *OrderService) PreviewTrackingImport(actor Actor, rows []TrackingImportR
 		}
 		for _, i := range idxs {
 			m := &matches[i]
+			issue(TrackingImportRow{Row: m.Row, OrderKey: m.InternalCode, TrackingNumber: m.TrackingNumber, LabelURL: m.LabelURL},
+				TrackingIssueSharedLabel, fmt.Sprintf("Link label này xuất hiện ở %d đơn khác nhau trong file — thường là dán nhầm", len(orderIDs)))
 			if m.TrackingNumber == "" {
 				drop[i] = true
 			} else {
 				// The tracking number on the line is still good; only the link is.
 				m.LabelURL, m.LabelAction, m.CurrentLabel = "", "", ""
 			}
-			issue(TrackingImportRow{Row: m.Row, OrderKey: m.InternalCode, TrackingNumber: m.TrackingNumber},
-				TrackingIssueSharedLabel, fmt.Sprintf("Link label này xuất hiện ở %d đơn khác nhau trong file — thường là dán nhầm", len(orderIDs)))
 		}
 	}
 
@@ -728,7 +729,7 @@ func (s *OrderService) PreviewTrackingImport(actor Actor, rows []TrackingImportR
 		}
 		if owner, ok := takenBy[strings.ToUpper(m.TrackingNumber)]; ok && owner.ID != m.OrderID {
 			drop[i] = true
-			issue(TrackingImportRow{Row: m.Row, OrderKey: m.InternalCode, TrackingNumber: m.TrackingNumber},
+			issue(TrackingImportRow{Row: m.Row, OrderKey: m.InternalCode, TrackingNumber: m.TrackingNumber, LabelURL: m.LabelURL},
 				TrackingIssueTakenTracking, fmt.Sprintf("Mã vận đơn này đã gắn cho đơn khác (mã nội bộ %s)", owner.InternalCode))
 		}
 	}
