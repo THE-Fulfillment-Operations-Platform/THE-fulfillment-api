@@ -292,6 +292,9 @@ func (s *CarrierService) PreflightTHE(ctx context.Context, actor Actor, orderIDs
 		po := PreflightOrder{OrderID: id, InternalCode: o.InternalCode}
 		if reason := shipBlockReason(o); reason != "" {
 			po.Reason = reason
+		} else if strings.TrimSpace(o.ExternalLabelURL) != "" {
+			// Preflight is the label step: same refusal the send itself gives.
+			po.Reason = externalLabelBlockReason
 		} else if reason := basketBlockReason(s.repo, id); reason != "" {
 			po.Reason = reason
 		} else if live, _ := s.repo.Carrier.LiveShipment(id); live != nil && live.Status == models.ShipmentLabeled {

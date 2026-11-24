@@ -302,6 +302,8 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		orders.GET("/:id/the/label", orderRead, h.OrderTHELabel)
 		// Label bought outside (link from the Excel import): downloaded server-side.
 		orders.GET("/:id/label/external", orderRead, h.OrderExternalLabel)
+		// Needs the link gone (to switch to a THE label): same guard as editing the order.
+		orders.DELETE("/:id/label/external", ordersManage, h.ClearOrderExternalLabel)
 		// Ask THE now: drops a label THE has cancelled (read-only otherwise).
 		orders.POST("/:id/the/check", orderRead, h.CheckOrderOnTHE)
 		orders.POST("/:id/the/cancel", adminOwner, h.CancelOrderTHEShipment)

@@ -120,6 +120,19 @@ func (h *Handlers) OrderExternalLabel(c *gin.Context) {
 	c.Data(http.StatusOK, f.ContentType, f.Data)
 }
 
+// DELETE /api/orders/:id/label/external — drop the outside label link.
+func (h *Handlers) ClearOrderExternalLabel(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	if err := h.svc.Order.ClearExternalLabel(actor(c), id); err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, gin.H{"external_label_url": ""})
+}
+
 // POST /api/orders/:id/the/check
 func (h *Handlers) CheckOrderOnTHE(c *gin.Context) {
 	id, ok := uintParam(c, "id")

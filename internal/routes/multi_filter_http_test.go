@@ -36,6 +36,7 @@ type multiHarness struct {
 	router http.Handler
 	db     *gorm.DB
 	tokens map[models.Role]string
+	jwt    *auth.Manager
 }
 
 func newMultiHarness(t *testing.T) *multiHarness {
@@ -61,6 +62,7 @@ func newMultiHarness(t *testing.T) *multiHarness {
 		t:      t,
 		router: New(&config.Config{MaxBodyBytes: 1 << 20}, handlers.New(svc), jwt),
 		db:     db,
+		jwt:    jwt,
 		tokens: map[models.Role]string{},
 	}
 	for _, r := range []models.Role{models.RoleOps, models.RoleTechnician} {

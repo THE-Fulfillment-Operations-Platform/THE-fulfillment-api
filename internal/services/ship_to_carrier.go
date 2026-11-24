@@ -442,6 +442,8 @@ func (s *PackingService) orderByScanCode(code string) (*models.Order, error) {
 // to the carrier yet. Empty string means it can.
 func shipBlockReason(o *models.Order) string { return shipBlockReasonFor(o, false) }
 
+const externalLabelBlockReason = "Đơn đã có label mua ngoài (nhập từ Excel) — in bằng Quét in label; muốn dùng label THE thì gỡ link label ngoài ở chi tiết đơn trước"
+
 // shipBlockReasonFor is shipBlockReason; forLabel = the send only creates the THE
 // label, so an order that already left the warehouse (XK) is still fine.
 func shipBlockReasonFor(o *models.Order, forLabel bool) string {
@@ -453,6 +455,11 @@ func shipBlockReasonFor(o *models.Order, forLabel bool) string {
 	}
 	if o.SellerStatus.HandedOver() && !forLabel {
 		return "Đơn đã gửi cho THE rồi"
+	}
+	// Label bought outside already covers the parcel: a THE label would be a
+	// second paid label for one box. Export (XK) is not a label, so it stays open.
+	if forLabel && strings.TrimSpace(o.ExternalLabelURL) != "" {
+		return externalLabelBlockReason
 	}
 	live := activeOrderItems(o.Items)
 	if len(live) == 0 {

@@ -895,3 +895,24 @@ func (s *OrderService) setExternalLabel(actor Actor, orderID uint, label string)
 		"Gắn label ngoài cho "+order.InternalCode, models.JSONMap{"external_label_url": []string{order.ExternalLabelURL, label}})
 	return nil
 }
+
+// ClearExternalLabel removes the outside label link so the order can get a THE
+// label instead. Same audit action as setting it (old link -> empty).
+func (s *OrderService) ClearExternalLabel(actor Actor, orderID uint) error {
+	if !canManageOrders(actor) {
+		return apperr.Forbidden("Bạn không có quyền gỡ link label")
+	}
+	order, err := s.GetOrder(orderID)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(order.ExternalLabelURL) == "" {
+		return apperr.NotFound("Đơn này không có link label ngoài")
+	}
+	if err := s.repo.Order.UpdateTracking(order.ID, map[string]interface{}{"external_label_url": ""}); err != nil {
+		return apperr.Internal("could not clear external label").Wrap(err)
+	}
+	s.audit.Log(actor, "ORDER_EXTERNAL_LABEL_SET", "order", &order.ID,
+		"Gỡ label ngoài của "+order.InternalCode, models.JSONMap{"external_label_url": []string{order.ExternalLabelURL, ""}})
+	return nil
+}
