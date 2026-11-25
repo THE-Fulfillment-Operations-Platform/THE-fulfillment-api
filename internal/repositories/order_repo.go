@@ -874,7 +874,12 @@ func itemOrderClause(sortBy, sortDir string) string {
 
 type OrderItemRepository struct{ db *gorm.DB }
 
-func (r *OrderItemRepository) Update(i *models.OrderItem) error { return r.db.Save(i).Error }
+// Update saves the line WITHOUT its SKU association: a line loaded with
+// Preload("SKU") still carries the old SKU, and GORM would write that SKU's id
+// back over a sku_id the caller just changed (sku_code new, sku_id old).
+func (r *OrderItemRepository) Update(i *models.OrderItem) error {
+	return r.db.Omit("SKU").Save(i).Error
+}
 
 func (r *OrderItemRepository) FindByID(id uint) (*models.OrderItem, error) {
 	var it models.OrderItem
