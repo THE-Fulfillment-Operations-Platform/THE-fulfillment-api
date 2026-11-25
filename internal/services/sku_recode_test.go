@@ -190,3 +190,27 @@ func TestTHE_BuildParcelAfterSKURecode(t *testing.T) {
 		t.Fatalf("HS code lost after rename: %q", p.HSCode)
 	}
 }
+
+// sku_code names a live SKU but sku_id points at another product: the code
+// wins (it is what the line was imported as); sku_id's weight/HS must not leak in.
+func TestTHE_BuildParcelCodeWinsOverStaleSkuID(t *testing.T) {
+	e := newTHEEnv(t)
+	byCode := &models.SKU{Code: "WD-6L", Name: "6L", ShipWeightG: fptr(610), ShipLengthCM: fptr(10),
+		ShipWidthCM: fptr(10), ShipHeightCM: fptr(1), DeclaredValue: fptr(5), HSCode: "44209000"}
+	stale := &models.SKU{Code: "WD-5L", Name: "5L", ShipWeightG: fptr(540), ShipLengthCM: fptr(10),
+		ShipWidthCM: fptr(10), ShipHeightCM: fptr(1), DeclaredValue: fptr(5), HSCode: "95030000"}
+	e.db.Create(byCode)
+	e.db.Create(stale)
+	o := e.order(t, "100778")
+	e.db.Model(&models.OrderItem{}).Where("order_id = ?", o.ID).
+		Updates(map[string]any{"sku_code": "WD-6L", "sku_id": stale.ID})
+	full, _ := e.carrier.repo.Order.FindByID(o.ID)
+	c, _, _ := e.carrier.activeTHE()
+	p, problems := e.carrier.BuildParcel(c, full)
+	if len(problems) > 0 || p == nil {
+		t.Fatalf("problems: %v", problems)
+	}
+	if p.HSCode != "44209000" || p.WeightG != 610+c.PackagingWeightG {
+		t.Fatalf("must use the SKU named by sku_code: hs=%s weight=%v", p.HSCode, p.WeightG)
+	}
+}

@@ -1202,16 +1202,31 @@ func isPostcardHS(hs string) bool {
 	return strings.HasPrefix(strings.TrimSpace(hs), "4909002000")
 }
 
-// currentSKUCodes returns, for each line in order, the code its SKU has NOW
-// (looked up by sku_id). order_items.sku_code is only the text captured at
-// import and drifts when a SKU is renamed; lines without a live SKU row keep
-// that captured text, so they still read "not in Master Data" as before.
+// currentSKUCodes returns, for each line in order, the code to look its SKU up
+// by. order_items.sku_code is the product the line was imported as, so it wins
+// whenever a live SKU still carries that code (sku_id can be a stale link to a
+// different product: other weight, other HS code). Only when no live SKU has
+// that code any more (the SKU was renamed) does the line follow sku_id to the
+// SKU's current code. Lines with neither keep the captured text, so they still
+// read "not in Master Data".
 func currentSKUCodes(repo *repositories.Repositories, items []models.OrderItem) []string {
 	out := make([]string, len(items))
-	var ids []uint
+	var codes []string
 	for i, it := range items {
 		out[i] = it.SKUCode
-		if it.SKUID != nil {
+		codes = append(codes, it.SKUCode)
+	}
+	live := map[string]bool{}
+	if rows, err := repo.SKU.ListByCodes(codes); err == nil {
+		for _, r := range rows {
+			live[models.NormalizeCode(r.Code)] = true
+		}
+	} else {
+		return out
+	}
+	var ids []uint
+	for _, it := range items {
+		if it.SKUID != nil && !live[models.NormalizeCode(it.SKUCode)] {
 			ids = append(ids, *it.SKUID)
 		}
 	}
@@ -1227,7 +1242,7 @@ func currentSKUCodes(repo *repositories.Repositories, items []models.OrderItem) 
 		byID[r.ID] = r.Code
 	}
 	for i, it := range items {
-		if it.SKUID != nil {
+		if it.SKUID != nil && !live[models.NormalizeCode(it.SKUCode)] {
 			if c, ok := byID[*it.SKUID]; ok {
 				out[i] = c
 			}

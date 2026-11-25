@@ -174,7 +174,7 @@ func TestQCResults_StaysOffTheRowByRowPath(t *testing.T) {
 		t.Fatalf("số câu lệnh tăng theo dữ liệu: 5 đơn → %d, 30 đơn → %d", small, big)
 	}
 	// Và phải là một nhúm, không phải hàng chục.
-	if big > 12 {
+	if big > 14 { // 14: +2 câu cố định để tra SKU theo mã rồi theo sku_id (đổi mã SKU)
 		t.Fatalf("một trang tốn %d câu lệnh — quá nhiều cho một màn đọc", big)
 	}
 }
