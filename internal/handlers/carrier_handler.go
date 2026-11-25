@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"the-fulfillment/backend/internal/models"
 	"the-fulfillment/backend/internal/response"
 	"the-fulfillment/backend/internal/services"
 )
@@ -44,6 +45,25 @@ func (h *Handlers) UpdateCarrierConfig(c *gin.Context) {
 // POST /api/carrier/the/check — read-only: wallet + services.
 func (h *Handlers) CheckCarrierConnection(c *gin.Context) {
 	res, err := h.svc.Carrier.CheckConnection(c.Request.Context(), actor(c))
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, res)
+}
+
+// POST /api/carrier/the/service-rules/preview { service_rules?, service_code? }
+// — read-only: which kind of goods and THE service every material and SKU of
+// Master Data falls in under the table being edited (or the saved one).
+func (h *Handlers) PreviewCarrierServiceRules(c *gin.Context) {
+	var in struct {
+		ServiceRules *models.THEServiceRules `json:"service_rules"`
+		ServiceCode  string                  `json:"service_code"`
+	}
+	if !bindJSON(c, &in) {
+		return
+	}
+	res, err := h.svc.Carrier.PreviewServiceRules(actor(c), in.ServiceRules, in.ServiceCode)
 	if err != nil {
 		response.Fail(c, err)
 		return

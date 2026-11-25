@@ -95,6 +95,9 @@ type Parcel struct {
 	HSCode       string  `json:"hs_code"`
 	Units        int     `json:"units"`
 	Country      string  `json:"country"`
+	// Service is the THE service the parcel ships with, picked from what it
+	// holds (Settings → Kết nối THE, #7783), with the reason in words.
+	Service models.THEServicePick `json:"service"`
 }
 
 // ShipmentOutcome is what one order got on THE.
@@ -104,6 +107,8 @@ type ShipmentOutcome struct {
 	LastMileTracking string   `json:"last_mile_tracking,omitempty"`
 	Cost             *float64 `json:"cost,omitempty"`
 	HasLabel         bool     `json:"has_label"`
+	// ServiceCode is the THE service the shipment was created with.
+	ServiceCode string `json:"service_code,omitempty"`
 	// Reused: the order already had a paid shipment; nothing was sent to THE.
 	Reused bool `json:"reused,omitempty"`
 }
@@ -241,6 +246,20 @@ func (s *CarrierService) BuildParcel(c *models.CarrierConfig, o *models.Order) (
 	problems = append(problems, missing...)
 
 	p := &Parcel{Country: country, InternalCode: o.InternalCode}
+	// Which THE line: from the kinds of goods in the parcel (#7783).
+	if len(codes) > 0 {
+		pick, problem, err := s.pickService(c, codes)
+		switch {
+		case err != nil:
+			problems = append(problems, "Không đọc được loại hàng của SKU để chọn dịch vụ THE")
+		case problem != "":
+			problems = append(problems, problem)
+		case pick.ServiceCode == "":
+			problems = append(problems, "Chưa chọn dịch vụ THE (Cài đặt → Kết nối THE)")
+		default:
+			p.Service = pick
+		}
+	}
 	type line struct {
 		value float64
 		hs    string
@@ -304,7 +323,7 @@ func (s *CarrierService) BuildParcel(c *models.CarrierConfig, o *models.Order) (
 		Length:      p.LengthCM,
 		Width:       p.WidthCM,
 		Height:      p.HeightCM,
-		ServiceCode: c.ServiceCode,
+		ServiceCode: p.Service.ServiceCode,
 		// FFM checks US addresses itself (checkAddress) before creating; THE's
 		// own asynchronous check is stricter than USPS (line 1 must match the
 		// cleansed line letter for letter) and makes delivery fail "Invalid
@@ -582,7 +601,7 @@ func (s *CarrierService) ShipOrderOnTHE(ctx context.Context, actor Actor, c *mod
 		hash = requestHash(parcel.Request)
 		live = &models.CarrierShipment{
 			OrderID: o.ID, Provider: models.CarrierProviderTHE, Status: models.ShipmentCreating,
-			OrderNumber: number, ServiceCode: c.ServiceCode, RequestHash: hash,
+			OrderNumber: number, ServiceCode: parcel.Service.ServiceCode, RequestHash: hash,
 			WeightG: parcel.WeightG, LengthCM: parcel.LengthCM, WidthCM: parcel.WidthCM, HeightCM: parcel.HeightCM,
 			DeclaredValue: parcel.Value, HSCode: parcel.HSCode, CreatedByID: actor.IDPtr(),
 		}
@@ -599,8 +618,8 @@ func (s *CarrierService) ShipOrderOnTHE(ctx context.Context, actor Actor, c *mod
 		// create. Safe either way — creating costs nothing and THE returns the
 		// pending package it already has for this order number.
 		if live.RequestHash != hash {
-			_ = s.repo.Carrier.UpdateShipment(live.ID, map[string]any{"request_hash": hash})
-			live.RequestHash = hash
+			_ = s.repo.Carrier.UpdateShipment(live.ID, map[string]any{"request_hash": hash, "service_code": parcel.Service.ServiceCode})
+			live.RequestHash, live.ServiceCode = hash, parcel.Service.ServiceCode
 		}
 		if err := s.createOnTHE(ctx, cli, live, parcel); err != nil {
 			return nil, err
@@ -645,7 +664,7 @@ func (s *CarrierService) FollowUp(ctx context.Context, cli theAPI, orderID uint,
 func outcomeOf(sh *models.CarrierShipment, reused bool) *ShipmentOutcome {
 	return &ShipmentOutcome{
 		ShipmentID: sh.ID, TrackingCode: sh.TrackingCode, LastMileTracking: sh.LastMileTracking,
-		Cost: sh.Cost, HasLabel: sh.TrackingCode != "", Reused: reused,
+		Cost: sh.Cost, HasLabel: sh.TrackingCode != "", Reused: reused, ServiceCode: sh.ServiceCode,
 	}
 }
 

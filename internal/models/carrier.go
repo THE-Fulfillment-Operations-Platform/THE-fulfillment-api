@@ -41,7 +41,18 @@ type CarrierConfig struct {
 	// clients); an order whose SKU (and parent) has no HS code is refused.
 	DefaultHSCode        string  `json:"default_hs_code" gorm:"size:20;not null;default:''"`
 	DefaultDeclaredValue float64 `json:"default_declared_value" gorm:"not null;default:0"`
-	UpdatedByID          *uint   `json:"updated_by_id"`
+	// ServiceRules picks the THE service of each parcel from what it holds
+	// (THEServiceRules, #7783): thiệp → PCU, mica / gỗ → SPU by default. NULL =
+	// never saved = the defaults. ServiceCode above stays the connection's own
+	// service: used for goods of no kind, or for everything when Auto is off.
+	ServiceRules JSONB `json:"-"`
+	UpdatedByID  *uint `json:"updated_by_id"`
+}
+
+// Rules returns the service rules in force (the defaults when none was saved)
+// and whether they were saved.
+func (c *CarrierConfig) Rules() (THEServiceRules, bool) {
+	return ParseTHEServiceRules(c.ServiceRules)
 }
 
 func (CarrierConfig) TableName() string { return "carrier_configs" }

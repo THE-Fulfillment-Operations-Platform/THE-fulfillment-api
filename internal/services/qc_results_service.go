@@ -76,11 +76,16 @@ type QCResultOrder struct {
 	// own nor their parent's: "Tạo label THE" refuses the order until they are
 	// declared (#6312), so the ship queue flags it beforehand. Only filled for
 	// orders without a THE label yet.
-	MissingHS    []string `json:"missing_hs,omitempty"`
-	TotalItems   int      `json:"total_items"`
-	PassedItems  int      `json:"passed_items"`
-	ReworkItems  int      `json:"rework_items"`
-	WaitingItems int      `json:"waiting_items"`
+	MissingHS []string `json:"missing_hs,omitempty"`
+	// THEService is the THE service "Tạo label THE" would pick for the order
+	// from its kinds of goods (#7783), with the reason; only filled while the
+	// THE connection is on and the order has no THE label yet.
+	THEService       string `json:"the_service,omitempty"`
+	THEServiceReason string `json:"the_service_reason,omitempty"`
+	TotalItems       int    `json:"total_items"`
+	PassedItems      int    `json:"passed_items"`
+	ReworkItems      int    `json:"rework_items"`
+	WaitingItems     int    `json:"waiting_items"`
 
 	Items []QCResultItem `json:"items"`
 }
@@ -253,7 +258,66 @@ func (s *QCService) buildResultOrders(ids []uint) ([]QCResultOrder, error) {
 		curLines[i].SKUCode = curCodes[i]
 	}
 	flagMissingHS(out, curLines, infos)
+	flagTHEService(s.repo, out, curLines)
 	return out, nil
+}
+
+// flagTHEService fills THEService on the orders still waiting for their THE
+// label, the way BuildParcel will pick it. Display only: any failure leaves it
+// empty rather than hiding the QC results.
+func flagTHEService(repo *repositories.Repositories, out []QCResultOrder, lines []models.OrderItem) {
+	cfg, err := repo.Carrier.Config(models.CarrierProviderTHE)
+	if err != nil || cfg == nil || !cfg.Enabled {
+		return
+	}
+	rules, _ := cfg.Rules()
+	byOrder := map[uint]*QCResultOrder{}
+	for i := range out {
+		if out[i].THETracking == "" {
+			byOrder[out[i].OrderID] = &out[i]
+		}
+	}
+	var codes []string
+	for i := range lines {
+		if byOrder[lines[i].OrderID] != nil {
+			codes = append(codes, lines[i].SKUCode)
+		}
+	}
+	if len(codes) == 0 {
+		return
+	}
+	goods := map[string]skuGoods{}
+	if rules.Auto {
+		if goods, err = goodsOfSKUs(repo, rules, codes); err != nil {
+			return
+		}
+	}
+	perOrder := map[uint][]models.THEGoodsLine{}
+	var ids []uint
+	for i := range lines {
+		id := lines[i].OrderID
+		if byOrder[id] == nil {
+			continue
+		}
+		code := models.NormalizeCode(lines[i].SKUCode)
+		g, ok := goods[code]
+		if !ok {
+			g = skuGoods{Group: -1}
+		}
+		if _, seen := perOrder[id]; !seen {
+			ids = append(ids, id)
+		}
+		perOrder[id] = append(perOrder[id], models.THEGoodsLine{SKUCode: code, Group: g.Group, Materials: g.Materials})
+	}
+	for _, id := range ids {
+		pick, problem := rules.Pick(cfg.ServiceCode, perOrder[id])
+		o := byOrder[id]
+		if problem != "" {
+			o.THEServiceReason = problem
+			continue
+		}
+		o.THEService, o.THEServiceReason = pick.ServiceCode, pick.Reason
+	}
 }
 
 // flagMissingHS fills MissingHS, in line order and once per SKU, on the orders

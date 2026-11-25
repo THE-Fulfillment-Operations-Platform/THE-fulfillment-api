@@ -308,6 +308,13 @@ func (r *MaterialRepository) ListByNamesInsensitive(names []string) ([]models.Ma
 // idChunk caps how many ids ride in one IN (...) list.
 const idChunk = 500
 
+// All returns every live material in code order (a few dozen rows).
+func (r *MaterialRepository) All() ([]models.Material, error) {
+	var rows []models.Material
+	err := r.db.Order("code asc").Find(&rows).Error
+	return rows, err
+}
+
 // ListByIDs returns the materials with these ids, in one query per chunk.
 func (r *MaterialRepository) ListByIDs(ids []uint) ([]models.Material, error) {
 	var out []models.Material

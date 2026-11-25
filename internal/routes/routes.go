@@ -317,6 +317,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 		carrier.GET("/config", h.GetCarrierConfig)
 		carrier.PUT("/config", h.UpdateCarrierConfig)
 		carrier.POST("/check", h.CheckCarrierConnection)
+		carrier.POST("/service-rules/preview", h.PreviewCarrierServiceRules)
 	}
 
 	// Run one provider pass by hand instead of waiting for the scheduler.

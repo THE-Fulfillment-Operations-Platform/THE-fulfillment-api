@@ -339,11 +339,13 @@ func TestTHE_SendCreatesPaysAndHandsOff(t *testing.T) {
 	if fresh.TrackingNumber != e.fake.lastMile {
 		t.Fatalf("the last-mile number must land on the order, got %q", fresh.TrackingNumber)
 	}
-	// The request THE got: internal code as order number, the SKU's data.
+	// The request THE got: internal code as order number, the SKU's data. The
+	// service is picked from the goods (#7783): SKU-1 has no material but HS 4420
+	// (wooden articles) → kind "Gỗ" → Standard Plus US, not the connection's own.
 	for _, p := range e.fake.pkgs {
 		r := p.req
 		if r.OrderNumber != "SO-100001" || r.Weight != 150 || r.HSCode != "44209000" || r.StateCode != "CA" ||
-			r.CountryCode != "US" || r.ServiceCode != "EXPRESS" || !r.IgnoreAddressCheck {
+			r.CountryCode != "US" || r.ServiceCode != "SPU" || !r.IgnoreAddressCheck {
 			t.Fatalf("request sent to THE: %+v", r)
 		}
 	}

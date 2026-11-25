@@ -66,6 +66,10 @@ type CarrierConfigView struct {
 	// a SKU without an HS code (such an order is refused, see BuildParcel).
 	DefaultHSCode        string  `json:"default_hs_code"`
 	DefaultDeclaredValue float64 `json:"default_declared_value"`
+	// ServiceRules: which THE service each kind of goods ships with (#7783).
+	// ServiceRulesSaved false = nobody saved a table yet, the defaults apply.
+	ServiceRules      models.THEServiceRules `json:"service_rules"`
+	ServiceRulesSaved bool                   `json:"service_rules_saved"`
 	// Ready = enabled and everything a shipment needs is configured.
 	Ready bool `json:"ready"`
 	// Problem says, in the operator's words, why it is not ready.
@@ -87,6 +91,10 @@ type CarrierConfigInput struct {
 	// DefaultHSCode is still stored but no longer used (#6312).
 	DefaultHSCode        *string  `json:"default_hs_code"`
 	DefaultDeclaredValue *float64 `json:"default_declared_value"`
+	// ServiceRules replaces the whole "loại hàng → dịch vụ" table; nil = keep.
+	ServiceRules *models.THEServiceRules `json:"service_rules"`
+	// ResetServiceRules drops the saved table: the defaults apply again.
+	ResetServiceRules bool `json:"reset_service_rules"`
 }
 
 func canManageCarrier(a Actor) bool {
@@ -123,6 +131,7 @@ func (s *CarrierService) view(c *models.CarrierConfig) *CarrierConfigView {
 		ServiceCode: c.ServiceCode, DefaultPhone: c.DefaultPhone, PackagingWeightG: c.PackagingWeightG,
 		DefaultHSCode: c.DefaultHSCode, DefaultDeclaredValue: c.DefaultDeclaredValue,
 	}
+	v.ServiceRules, v.ServiceRulesSaved = c.Rules()
 	if v.BaseURL == "" {
 		v.BaseURL = theapi.DefaultBaseURL
 	}
@@ -222,6 +231,22 @@ func (s *CarrierService) UpdateConfig(actor Actor, in CarrierConfigInput) (*Carr
 		}
 		c.DefaultDeclaredValue = math.Round(v*100) / 100
 		changes["default_declared_value"] = c.DefaultDeclaredValue
+	}
+	if in.ResetServiceRules {
+		c.ServiceRules = nil
+		changes["service_rules"] = "reset to defaults"
+	}
+	if in.ServiceRules != nil {
+		rules, err := in.ServiceRules.Clean()
+		if err != nil {
+			return nil, apperr.BadRequest(err.Error())
+		}
+		raw, err := models.ToJSONB(rules)
+		if err != nil {
+			return nil, apperr.Internal("could not store service rules").Wrap(err)
+		}
+		c.ServiceRules = raw
+		changes["service_rules"] = rules
 	}
 	if in.BaseURL != nil {
 		u := strings.TrimRight(strings.TrimSpace(*in.BaseURL), "/")

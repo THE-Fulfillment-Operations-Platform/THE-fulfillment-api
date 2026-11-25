@@ -84,6 +84,13 @@ func (s *CarrierService) Label(ctx context.Context, actor Actor, orderID uint) (
 		defer cancel()
 		data, ctype, err := cli.FetchLabel(cctx, full.TrackingCode)
 		if err != nil {
+			// Lines through JD (Standard Plus US…) get their label from the carrier a
+			// minute or two after the paid step: THE answers "invalid tracking
+			// number" until then. Say so instead of a bare refusal.
+			if full.LabeledAt != nil && time.Since(*full.LabeledAt) < 30*time.Minute {
+				return nil, apperr.BadRequest("THE chưa có file label cho " + full.TrackingCode +
+					" (line " + nonEmpty(full.ServiceCode, "THE") + " ra label sau 1–3 phút kể từ lúc chốt đơn) — đợi rồi in lại")
+			}
 			return nil, apperr.BadRequest("Chưa lấy được label từ THE: " + theErrorMessage(err))
 		}
 		full.Label, full.LabelType = data, ctype
