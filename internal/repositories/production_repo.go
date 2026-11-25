@@ -204,6 +204,9 @@ func (r *BatchRepository) FindByID(id uint) (*models.Batch, error) {
 	if err := r.attachPairQuotas([]*models.Batch{&b}); err != nil {
 		return nil, err
 	}
+	if sellers, err := r.SellersByBatch([]uint{b.ID}); err == nil {
+		b.Sellers = sellers[b.ID]
+	}
 	b.FillMaterialUnits(&b.Material)
 	return &b, nil
 }
@@ -404,12 +407,53 @@ func (r *BatchRepository) List(f BatchFilter) ([]models.Batch, int64, error) {
 	if err != nil {
 		return rows, total, err
 	}
+	sellers, err := r.SellersByBatch(ids)
+	if err != nil {
+		return rows, total, err
+	}
 	for i := range rows {
+		rows[i].Sellers = sellers[rows[i].ID]
 		rows[i].ScrappedCount = scrapped[rows[i].ID]
 		rows[i].HandedOver = handed[rows[i].ID]
 		rows[i].FillMaterialUnits(&rows[i].Material)
 	}
 	return rows, total, nil
+}
+
+// SellersByBatch trả các seller có hàng (còn sống) trong từng batch: MỘT câu
+// SELECT DISTINCT cho cả trang, không N+1. Mỗi batch luôn có slice (rỗng nếu
+// đơn không gắn seller) để JSON ra [] chứ không null.
+func (r *BatchRepository) SellersByBatch(batchIDs []uint) (map[uint][]models.BatchSeller, error) {
+	out := map[uint][]models.BatchSeller{}
+	for _, id := range batchIDs {
+		out[id] = []models.BatchSeller{}
+	}
+	if len(batchIDs) == 0 {
+		return out, nil
+	}
+	type row struct {
+		BatchID uint
+		ID      uint
+		Code    string
+		Name    string
+	}
+	var rows []row
+	err := r.db.Model(&models.BatchItem{}).
+		Select("DISTINCT batch_items.batch_id AS batch_id, sellers.id AS id, sellers.code AS code, sellers.name AS name").
+		Joins("JOIN order_items ON order_items.id = batch_items.order_item_id").
+		Joins("JOIN orders ON orders.id = order_items.order_id").
+		Joins("JOIN sellers ON sellers.id = orders.seller_id").
+		Where("batch_items.batch_id IN ? AND batch_items.scrapped_at IS NULL", batchIDs).
+		Where("order_items.cancellation_status NOT IN ?", []models.CancellationStatus{models.CancellationSeller, models.CancellationApproved}).
+		Order("batch_items.batch_id, sellers.name, sellers.id").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, x := range rows {
+		out[x.BatchID] = append(out[x.BatchID], models.BatchSeller{ID: x.ID, Code: x.Code, Name: x.Name})
+	}
+	return out, nil
 }
 
 // handedOverIDs returns which of the given batches are fully handed over (see

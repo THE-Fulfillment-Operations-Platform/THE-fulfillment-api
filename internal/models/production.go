@@ -47,6 +47,10 @@ type Batch struct {
 	// any part has no quota — the list then shows "—" instead of a number nobody
 	// can vouch for. Not stored; list/detail queries fill it.
 	MaterialUnits *int `json:"material_units" gorm:"-"`
+	// Sellers: các seller có hàng trong batch (bỏ trùng, xếp theo tên). Không lưu;
+	// danh sách/chi tiết điền bằng MỘT câu SELECT gom theo batch. Phần đã huỷ ở QC
+	// và đơn seller đã huỷ không tính.
+	Sellers []BatchSeller `json:"sellers" gorm:"-"`
 
 	// One batch = one sheet of one material, flat. The parent/child ("batch
 	// mẹ – con") layer of 18–24/09/2026 is gone at the customer's request
@@ -54,6 +58,13 @@ type Batch struct {
 	// (parent_batch_id, is_parent, sequence, child_count) still exist in the
 	// database — AutoMigrate never drops one — but nothing reads or writes them;
 	// database.flattenParentBatches detached the old children once.
+}
+
+// BatchSeller là tên gọn của một seller hiện cạnh batch.
+type BatchSeller struct {
+	ID   uint   `json:"id"`
+	Code string `json:"code"`
+	Name string `json:"name"`
 }
 
 func (Batch) TableName() string { return "batches" }
