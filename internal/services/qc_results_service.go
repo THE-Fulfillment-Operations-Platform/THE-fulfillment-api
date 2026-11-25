@@ -162,13 +162,16 @@ func (s *QCService) buildResultOrders(ids []uint) ([]QCResultOrder, error) {
 	// not on the line (see models.OrderItem.ProductName). These rows come from a
 	// raw projection, so there is no SKU preload to read them off.
 	// The same lookup carries each SKU's effective HS code (flagMissingHS).
+	// Looked up by the code each SKU has NOW (by sku_id): the line keeps the code it
+	// was imported with, which stops matching once the SKU is renamed.
+	curCodes := currentSKUCodes(s.repo, lines)
 	skuNames := map[string]string{}
 	var infos map[string]repositories.SKUInfo
 	if len(lines) > 0 {
 		seen := map[string]bool{}
 		codes := make([]string, 0, len(lines))
 		for i := range lines {
-			if c := lines[i].SKUCode; c != "" && !seen[c] {
+			if c := curCodes[i]; c != "" && !seen[c] {
 				seen[c] = true
 				codes = append(codes, c)
 			}
@@ -191,7 +194,7 @@ func (s *QCService) buildResultOrders(ids []uint) ([]QCResultOrder, error) {
 		}
 		item := QCResultItem{
 			ItemID: line.ID, InternalCode: line.InternalCode, SKUCode: line.SKUCode,
-			ProductName: skuNames[line.SKUCode], Quantity: line.Quantity,
+			ProductName: skuNames[curCodes[i]], Quantity: line.Quantity,
 			InternalStatus: line.InternalStatus, ReworkCount: line.ReworkCount,
 			MockupURL: line.MockupURL,
 		}
@@ -244,7 +247,12 @@ func (s *QCService) buildResultOrders(ids []uint) ([]QCResultOrder, error) {
 			o.Status = QCOrderNone
 		}
 	}
-	flagMissingHS(out, lines, infos)
+	curLines := make([]models.OrderItem, len(lines))
+	copy(curLines, lines)
+	for i := range curLines {
+		curLines[i].SKUCode = curCodes[i]
+	}
+	flagMissingHS(out, curLines, infos)
 	return out, nil
 }
 

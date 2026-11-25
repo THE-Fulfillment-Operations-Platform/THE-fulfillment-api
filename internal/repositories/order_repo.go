@@ -628,7 +628,7 @@ func (r *OrderRepository) baseQuery(f OrderFilter) *gorm.DB {
 	}
 	if f.SKUCode != "" {
 		q = q.Where("orders.id IN (?)",
-			r.db.Model(&models.OrderItem{}).Select("order_id").Where("sku_code = ?", f.SKUCode))
+			r.db.Model(&models.OrderItem{}).Select("order_id").Where("sku_code = ? OR sku_id IN (SELECT id FROM skus WHERE code = ? AND deleted_at IS NULL)", f.SKUCode, f.SKUCode))
 	}
 	return q
 }
@@ -1182,7 +1182,10 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 	// the same match (Orders/Items list, export-as-import, design-queue facets); a
 	// full code, as the design queue's dropdown sends, still finds itself.
 	if sku := strings.TrimSpace(f.SKUCode); sku != "" {
-		q = q.Where(`LOWER(order_items.sku_code) LIKE ? ESCAPE '\'`, likeContainsPattern(sku))
+		// Also matches by the code the line's SKU has now (sku_id): order_items.sku_code is
+		// the text captured at import and stays behind when a SKU is renamed.
+		pat := likeContainsPattern(sku)
+		q = q.Where(`(LOWER(order_items.sku_code) LIKE ? ESCAPE '\' OR order_items.sku_id IN (SELECT id FROM skus WHERE LOWER(code) LIKE ? ESCAPE '\' AND deleted_at IS NULL))`, pat, pat)
 	}
 	if f.InternalCode != "" {
 		q = q.Where("order_items.internal_code ILIKE ?", "%"+f.InternalCode+"%")
@@ -1197,6 +1200,7 @@ func (r *OrderItemRepository) baseQuery(f ItemFilter) *gorm.DB {
 		like := "%" + strings.ToLower(f.Search) + "%"
 		q = q.Where(r.db.Where("LOWER(order_items.internal_code) LIKE ?", like).
 			Or("LOWER(order_items.sku_code) LIKE ?", like).
+			Or("order_items.sku_id IN (SELECT id FROM skus WHERE LOWER(code) LIKE ? AND deleted_at IS NULL)", like).
 			Or("LOWER(orders.internal_code) LIKE ?", like).
 			Or("LOWER(orders.store_order_id) LIKE ?", like))
 	}

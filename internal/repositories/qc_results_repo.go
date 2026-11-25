@@ -92,7 +92,7 @@ func (r *OrderRepository) qcResultBase(f QCResultFilter) *gorm.DB {
 		// the paper in front of them (mã đơn, store order id, mã tem sản phẩm, SKU).
 		itemHit := r.db.Table("order_items oi").Select("1").
 			Where("oi.order_id = orders.id").
-			Where("LOWER(oi.internal_code) LIKE ? OR LOWER(oi.sku_code) LIKE ?", like, like)
+			Where("(LOWER(oi.internal_code) LIKE ? OR LOWER(oi.sku_code) LIKE ? OR oi.sku_id IN (SELECT id FROM skus WHERE LOWER(code) LIKE ? AND deleted_at IS NULL))", like, like, like)
 		q = q.Where(
 			r.db.Where("LOWER(orders.internal_code) LIKE ?", like).
 				Or("LOWER(orders.store_order_id) LIKE ?", like).

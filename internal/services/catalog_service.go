@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 
 	"gorm.io/gorm"
 
@@ -288,6 +289,11 @@ type SKUInput struct {
 // to blank the product name and description on every save. ParentID, LengthMM and
 // WidthMM: omitted keeps the stored value, ≤0 clears.
 type SKUUpdateInput struct {
+	// Code renames the SKU. Omitted or equal to the current code (after
+	// normalising) = keep as is; one that normalises to nothing is rejected.
+	// Orders point at the SKU by id, so a rename never touches order lines
+	// (their sku_code stays the text captured at import).
+	Code        *string            `json:"code"`
 	Name        string             `json:"name"`
 	ProductName *string            `json:"product_name"`
 	Description *string            `json:"description"`
@@ -444,6 +450,26 @@ func (s *CatalogService) UpdateSKU(actor Actor, id uint, in SKUUpdateInput) (*mo
 	if err != nil {
 		return nil, err
 	}
+	oldCode := sku.Code
+	if in.Code != nil {
+		newCode := models.NormalizeCode(*in.Code)
+		if newCode == "" {
+			return nil, apperr.BadRequest("Mã SKU không được để trống")
+		}
+		if newCode != sku.Code {
+			if len(newCode) > 48 {
+				return nil, apperr.BadRequest("Mã SKU tối đa 48 ký tự")
+			}
+			// Soft-deleted rows don't reserve a code (partial unique index), and
+			// FindByCode skips them, so only a live SKU can clash.
+			if other, err := s.repo.SKU.FindByCode(newCode); err == nil && other.ID != sku.ID {
+				return nil, apperr.Conflict("Mã SKU " + newCode + " đã có SKU khác dùng")
+			} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, apperr.Internal("lookup failed").Wrap(err)
+			}
+			sku.Code = newCode
+		}
+	}
 	if in.Name != "" {
 		sku.Name = in.Name
 	}
@@ -512,10 +538,17 @@ func (s *CatalogService) UpdateSKU(actor Actor, id uint, in SKUUpdateInput) (*mo
 	}
 	sku.Materials = nil // avoid double-write of the association on Save
 	if err := s.repo.SKU.Save(sku); err != nil {
+		// Two renames racing to the same code: the unique index catches the loser.
+		if sku.Code != oldCode && isUniqueViolation(err) {
+			return nil, apperr.Conflict("Mã SKU " + sku.Code + " đã có SKU khác dùng")
+		}
 		return nil, apperr.Internal("could not update SKU").Wrap(err)
 	}
 	full, _ := s.repo.SKU.FindByID(sku.ID)
 	s.audit.Log(actor, "SKU_UPDATE", "sku", &sku.ID, "Updated SKU "+sku.Code, nil)
+	if sku.Code != oldCode {
+		s.audit.Log(actor, "SKU_RECODE", "sku", &sku.ID, "Renamed SKU "+oldCode+" -> "+sku.Code, nil)
+	}
 	return full, nil
 }
 
@@ -679,4 +712,14 @@ func (s *CatalogService) SetSKUsActive(actor Actor, ids []uint, active bool) (in
 	s.audit.Log(actor, "SKU_SET_ACTIVE_BULK", "sku", nil,
 		fmt.Sprintf("Set %d SKUs %s", n, state), nil)
 	return n, nil
+}
+
+// isUniqueViolation reports a unique-constraint failure from Postgres (23505)
+// or sqlite (tests) without importing a driver package.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := strings.ToLower(err.Error())
+	return strings.Contains(m, "23505") || strings.Contains(m, "duplicate key") || strings.Contains(m, "unique constraint")
 }

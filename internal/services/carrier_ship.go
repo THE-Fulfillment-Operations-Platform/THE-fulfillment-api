@@ -17,6 +17,7 @@ import (
 
 	"the-fulfillment/backend/internal/apperr"
 	"the-fulfillment/backend/internal/models"
+	"the-fulfillment/backend/internal/repositories"
 	"the-fulfillment/backend/internal/shipping/theapi"
 )
 
@@ -223,10 +224,10 @@ func (s *CarrierService) BuildParcel(c *models.CarrierConfig, o *models.Order) (
 	if len(live) == 0 {
 		problems = append(problems, "Đơn không còn sản phẩm nào")
 	}
-	codes := make([]string, 0, len(live))
-	for _, it := range live {
-		codes = append(codes, it.SKUCode)
-	}
+	// Current codes, resolved by sku_id: a SKU renamed since the order was
+	// imported must still find its weight, box and HS code (the line keeps the
+	// code it was imported with).
+	codes := currentSKUCodes(s.repo, live)
 	specs, missing, err := s.shippingSpecs(c, codes)
 	if err != nil {
 		problems = append(problems, "Không đọc được thông tin vận chuyển SKU")
@@ -245,8 +246,8 @@ func (s *CarrierService) BuildParcel(c *models.CarrierConfig, o *models.Order) (
 		hs    string
 	}
 	var lines []line
-	for _, it := range live {
-		spec, ok := specs[models.NormalizeCode(it.SKUCode)]
+	for i, it := range live {
+		spec, ok := specs[models.NormalizeCode(codes[i])]
 		if !ok || len(spec.Missing()) > 0 {
 			continue
 		}
@@ -1199,4 +1200,38 @@ func (s *CarrierService) SyncHeld(ctx context.Context, limit int) (int, error) {
 // system suffix (4909002000347) — the only goods THE labels by itself for FFM.
 func isPostcardHS(hs string) bool {
 	return strings.HasPrefix(strings.TrimSpace(hs), "4909002000")
+}
+
+// currentSKUCodes returns, for each line in order, the code its SKU has NOW
+// (looked up by sku_id). order_items.sku_code is only the text captured at
+// import and drifts when a SKU is renamed; lines without a live SKU row keep
+// that captured text, so they still read "not in Master Data" as before.
+func currentSKUCodes(repo *repositories.Repositories, items []models.OrderItem) []string {
+	out := make([]string, len(items))
+	var ids []uint
+	for i, it := range items {
+		out[i] = it.SKUCode
+		if it.SKUID != nil {
+			ids = append(ids, *it.SKUID)
+		}
+	}
+	if len(ids) == 0 {
+		return out
+	}
+	rows, err := repo.SKU.ListByIDs(dedupeIDs(ids))
+	if err != nil {
+		return out
+	}
+	byID := make(map[uint]string, len(rows))
+	for _, r := range rows {
+		byID[r.ID] = r.Code
+	}
+	for i, it := range items {
+		if it.SKUID != nil {
+			if c, ok := byID[*it.SKUID]; ok {
+				out[i] = c
+			}
+		}
+	}
+	return out
 }
