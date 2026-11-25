@@ -426,6 +426,15 @@ paths:
   /api/orders/{id}:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
     get: { tags: [Orders], summary: Chi tiết đơn (items, batch, timeline), responses: { '200': { description: OK } } }
+  /api/orders/{id}/timeline:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    get:
+      tags: [Orders]
+      summary: Giờ hoàn thành từng khâu của đơn (import, duyệt, vào batch, in, cắt, QC, xuất kho) + người làm
+      description: >-
+        Quyền đọc đơn như chi tiết đơn. steps[] có key, at (null nếu chưa xong), by_id, by_name.
+        Đã in / cắt / QC = lần ĐẦU mỗi item còn sống đạt trạng thái, lấy item cuối cùng.
+      responses: { '200': { description: OK }, '404': { description: Không có đơn } }
   /api/seller/orders/{id}/tracking/events:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
     get:
@@ -814,6 +823,12 @@ paths:
   /api/batches/{id}:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
     get: { tags: [Batches], summary: Batch detail (item, SKU, mockup, file, status), responses: { '200': { description: OK } } }
+  /api/batches/{id}/timeline:
+    parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+    get:
+      tags: [Batches]
+      summary: Tiến độ batch - tạo / đã in / đã cắt / QC xong lúc nào, ai bấm (lần đầu đạt mỗi trạng thái)
+      responses: { '200': { description: OK }, '404': { description: Không có batch } }
     delete:
       tags: [Batches]
       summary: Xoá batch chưa sản xuất, trả sản phẩm về hàng chờ gom batch
@@ -1164,4 +1179,15 @@ paths:
     parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
     get: { tags: [Seller View], summary: Seller xem chi tiết đơn (sanitized), responses: { '200': { description: OK } } }
   /api/audit-logs:
-    get: { tags: [Audit], summary: Audit log (ADMIN/OWNER), responses: { '200': { description: OK } } }
+    get:
+      tags: [Audit]
+      summary: Audit log (ADMIN/OWNER), tìm phía server
+      parameters:
+        - { name: order, in: query, description: "Mã đơn (internal code, store order id hoặc mã item): ra dòng của đơn, item và phần batch của đơn", schema: { type: string } }
+        - { name: batch, in: query, description: "Mã batch, '#103000' hoặc '103000'", schema: { type: string } }
+        - { name: actor, in: query, description: Một phần email hoặc tên người làm, schema: { type: string } }
+        - { name: date_from, in: query, description: "Từ (gồm), YYYY-MM-DD giờ xưởng hoặc RFC3339", schema: { type: string } }
+        - { name: date_to, in: query, description: "Đến (LOẠI TRỪ)", schema: { type: string } }
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: page_size, in: query, schema: { type: integer } }
+      responses: { '200': { description: OK } }

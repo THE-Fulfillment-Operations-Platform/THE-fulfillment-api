@@ -100,6 +100,7 @@ var routeCases = []routeCase{
 	// orders "manage" tick); the narrower "who may press it"
 	// (WarrantyPolicy.AllowedRoles) is checked in the service. Here the roles outside
 	// that list get 403 from that check; the allowed ones reach the (nil) service.
+	{"GET", "/api/orders/1/timeline", oOrderRead, nil},
 	{"GET", "/api/orders/1/warranty-info", oOrderRead, nil},
 	{"GET", "/api/orders/1/warranties", oOrderRead, nil},
 	{"POST", "/api/orders/1/warranty", oWarranty, nil}, // route gate = read orders; the service narrows to WarrantyPolicy.AllowedRoles
@@ -135,6 +136,7 @@ var routeCases = []routeCase{
 
 	{"GET", "/api/batches", oInternal, nil},
 	{"GET", "/api/batches/1", oInternal, nil},
+	{"GET", "/api/batches/1/timeline", oInternal, nil},
 	{"GET", "/api/batches/1/assets.zip", oInternal, nil},
 	{"POST", "/api/batches", oDesignOps, nil},
 	{"POST", "/api/batches/auto", oDesignOps, nil},

@@ -80,6 +80,21 @@ func batchFilterFrom(c *gin.Context) repositories.BatchFilter {
 }
 
 // GetBatch returns batch detail (items, SKU, mockup, files, status). GET /api/batches/:id
+// BatchTimeline returns when the batch was created / printed / cut / QC'd and by whom.
+// GET /api/batches/:id/timeline
+func (h *Handlers) BatchTimeline(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	t, err := h.svc.Batch.BatchTimeline(id)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, t)
+}
+
 func (h *Handlers) GetBatch(c *gin.Context) {
 	id, ok := uintParam(c, "id")
 	if !ok {

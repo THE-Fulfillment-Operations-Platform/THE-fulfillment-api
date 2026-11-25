@@ -359,6 +359,8 @@ func ensurePerformanceIndexes(db *gorm.DB) error {
 		// Journey screen "xuất xưởng theo ngày": handed_over_at range scans. Partial
 		// on NOT NULL — orders still in the factory have no date and are never asked.
 		`CREATE INDEX IF NOT EXISTS idx_orders_handed_over_at ON orders (handed_over_at DESC) WHERE deleted_at IS NULL AND handed_over_at IS NOT NULL`,
+		// Nhật ký hoạt động lọc theo khoảng ngày (date_from / date_to).
+		`CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs (created_at)`,
 		// Item list filtered by internal_status (design/QC/packing views).
 		`CREATE INDEX IF NOT EXISTS idx_order_items_status_page ON order_items (internal_status, id DESC) WHERE deleted_at IS NULL`,
 		// Item cancellation-request queue: status filter + ORDER BY requested_at.

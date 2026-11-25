@@ -3,8 +3,11 @@ package services
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
+	"time"
 
+	"the-fulfillment/backend/internal/apperr"
 	"the-fulfillment/backend/internal/models"
 	"the-fulfillment/backend/internal/repositories"
 )
@@ -111,4 +114,46 @@ func (s *AuditService) Drain(ctx context.Context) {
 // List returns audit entries (admin/owner only at the handler layer).
 func (s *AuditService) List(page repositories.Page) ([]models.AuditLog, int64, error) {
 	return s.repo.Audit.List(page.Normalize())
+}
+
+// AuditSearch is what the audit screen can ask for, all optional and ANDed.
+type AuditSearch struct {
+	Page   repositories.Page
+	Order  string     // internal code, store order id, or an item code of the order
+	Batch  string     // "#103000" or "103000"
+	Actor  string     // part of the actor's e-mail or name
+	From   *time.Time // inclusive
+	Before *time.Time // exclusive
+}
+
+// Search runs the filtered, server-paged audit query. A typed order/batch code
+// is resolved to entity ids first (indexed lookups), so the audit_logs read is
+// an index scan on (entity_type, entity_id) rather than a text scan: typing an
+// order code brings back the order's own lines AND its items' and batch parts'.
+func (s *AuditService) Search(in AuditSearch) ([]models.AuditLog, int64, error) {
+	f := repositories.AuditFilter{
+		Page:   in.Page.Normalize(),
+		Actor:  in.Actor,
+		From:   in.From,
+		Before: in.Before,
+	}
+	if strings.TrimSpace(in.Order) != "" {
+		scopes, err := s.repo.Audit.ResolveOrderScopes(in.Order)
+		if err != nil {
+			return nil, 0, apperr.Internal("audit order lookup failed").Wrap(err)
+		}
+		f.Groups = append(f.Groups, scopes)
+	}
+	if strings.TrimSpace(in.Batch) != "" {
+		scopes, err := s.repo.Audit.ResolveBatchScopes(in.Batch)
+		if err != nil {
+			return nil, 0, apperr.Internal("audit batch lookup failed").Wrap(err)
+		}
+		f.Groups = append(f.Groups, scopes)
+	}
+	rows, total, err := s.repo.Audit.Search(f)
+	if err != nil {
+		return nil, 0, apperr.Internal("audit search failed").Wrap(err)
+	}
+	return rows, total, nil
 }

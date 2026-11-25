@@ -156,7 +156,16 @@ func (h *Handlers) BulkDeleteNotes(c *gin.Context) {
 // ListAuditLogs lists audit entries (admin/owner). GET /api/audit-logs
 func (h *Handlers) ListAuditLogs(c *gin.Context) {
 	p := pageFrom(c)
-	rows, total, err := h.svc.Audit.List(p)
+	// Tìm phía server (mã đơn / mã batch / người làm / khoảng ngày). date_to là
+	// cận trên LOẠI TRỪ, như danh sách đơn: web gửi đầu ngày kế tiếp.
+	rows, total, err := h.svc.Audit.Search(services.AuditSearch{
+		Page:   p,
+		Order:  c.Query("order"),
+		Batch:  c.Query("batch"),
+		Actor:  c.Query("actor"),
+		From:   timeQueryPtr(c, "date_from"),
+		Before: timeQueryPtr(c, "date_to"),
+	})
 	if err != nil {
 		response.Fail(c, err)
 		return

@@ -999,3 +999,36 @@ func (r *QCRepository) ListForItem(orderItemID uint) ([]models.QCRecord, error) 
 	err := r.db.Where("order_item_id = ?", orderItemID).Order("id desc").Find(&rows).Error
 	return rows, err
 }
+
+// ListByEntities returns the history rows of the given entities, oldest first.
+// Served by idx_status_hist_entity (entity_type, entity_id).
+func (r *StatusHistoryRepository) ListByEntities(entityType models.EntityType, ids []uint) ([]models.StatusHistory, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var rows []models.StatusHistory
+	err := r.db.Where("entity_type = ? AND entity_id IN ?", entityType, ids).Order("id asc").Find(&rows).Error
+	return rows, err
+}
+
+// BatchPartsOfItems lists every non-deleted batch part (scrapped ones too: the
+// moment a product first entered a batch does not change when a part is later
+// scrapped) of the given order items. Only the columns the timeline reads.
+func (r *BatchRepository) BatchPartsOfItems(itemIDs []uint) ([]models.BatchItem, error) {
+	if len(itemIDs) == 0 {
+		return nil, nil
+	}
+	var rows []models.BatchItem
+	err := r.db.Select("id", "batch_id", "order_item_id", "created_at").
+		Where("order_item_id IN ?", itemIDs).Order("id asc").Find(&rows).Error
+	return rows, err
+}
+
+// FindBare loads a batch row alone (no items, links or material).
+func (r *BatchRepository) FindBare(id uint) (*models.Batch, error) {
+	var b models.Batch
+	if err := r.db.First(&b, id).Error; err != nil {
+		return nil, err
+	}
+	return &b, nil
+}

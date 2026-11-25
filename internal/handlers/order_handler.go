@@ -70,6 +70,21 @@ func (h *Handlers) GetOrder(c *gin.Context) {
 	response.OK(c, o)
 }
 
+// OrderTimeline returns when each stage of the order finished and who did it.
+// GET /api/orders/:id/timeline
+func (h *Handlers) OrderTimeline(c *gin.Context) {
+	id, ok := uintParam(c, "id")
+	if !ok {
+		return
+	}
+	t, err := h.svc.Order.OrderTimeline(id)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, t)
+}
+
 // CreateOrderDirect manually creates a single order (convenience/TODO path).
 // POST /api/orders
 func (h *Handlers) CreateOrderDirect(c *gin.Context) {

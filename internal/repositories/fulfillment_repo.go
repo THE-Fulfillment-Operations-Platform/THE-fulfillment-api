@@ -1,6 +1,7 @@
 package repositories
 
 import (
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -249,12 +250,133 @@ type AuditRepository struct{ db *gorm.DB }
 
 func (r *AuditRepository) Create(a *models.AuditLog) error { return r.db.Create(a).Error }
 
+// AuditScope is one "entity type + ids" clause of an audit search.
+type AuditScope struct {
+	Type string
+	IDs  []uint
+}
+
+// AuditFilter narrows the audit trail server-side. Groups are ANDed; the scopes
+// inside one group are ORed ("this order, or its items, or their batch parts").
+// A group with no scopes matches nothing: the code was typed but resolved to no
+// entity, and an empty answer is the honest one (not "everything").
+type AuditFilter struct {
+	Page
+	Groups [][]AuditScope
+	Actor  string     // substring of the actor's e-mail or full name
+	From   *time.Time // created_at >= From
+	Before *time.Time // created_at <  Before (exclusive, same as the order list)
+}
+
+// escapeLike makes user text literal inside a LIKE pattern (escape char '\').
+func escapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
+func (r *AuditRepository) query(f AuditFilter) *gorm.DB {
+	q := r.db.Model(&models.AuditLog{})
+	for _, group := range f.Groups {
+		var conds []string
+		var args []interface{}
+		for _, sc := range group {
+			if len(sc.IDs) == 0 {
+				continue
+			}
+			conds = append(conds, "(entity_type = ? AND entity_id IN ?)")
+			args = append(args, sc.Type, sc.IDs)
+		}
+		if len(conds) == 0 {
+			return q.Where("1 = 0")
+		}
+		q = q.Where("("+strings.Join(conds, " OR ")+")", args...)
+	}
+	if a := strings.ToLower(strings.TrimSpace(f.Actor)); a != "" {
+		like := "%" + escapeLike(a) + "%"
+		q = q.Where(`(LOWER(actor_email) LIKE ? ESCAPE '\' OR actor_id IN (SELECT id FROM users WHERE LOWER(full_name) LIKE ? ESCAPE '\'))`, like, like)
+	}
+	if f.From != nil {
+		q = q.Where("created_at >= ?", *f.From)
+	}
+	if f.Before != nil {
+		q = q.Where("created_at < ?", *f.Before)
+	}
+	return q
+}
+
 func (r *AuditRepository) List(p Page) ([]models.AuditLog, int64, error) {
+	return r.Search(AuditFilter{Page: p})
+}
+
+// Search lists audit rows newest first. Every filter is a WHERE on an indexed
+// column (entity_type/entity_id, actor_id, created_at) — never a table load.
+func (r *AuditRepository) Search(f AuditFilter) ([]models.AuditLog, int64, error) {
 	var rows []models.AuditLog
 	var total int64
-	r.db.Model(&models.AuditLog{}).Count(&total)
-	err := r.db.Order("id desc").Limit(p.PageSize).Offset(p.Offset()).Find(&rows).Error
+	if err := r.query(f).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	err := r.query(f).Order("id desc").Limit(f.PageSize).Offset(f.Offset()).Find(&rows).Error
 	return rows, total, err
+}
+
+// resolveLimit bounds how many entities one typed code may expand to (a store
+// order id can be shared by several orders; this keeps the IN lists small).
+const resolveLimit = 200
+
+// ResolveOrderScopes turns an order code (internal code, store order id, or the
+// code of one of its items) into the audit scopes for that order, its items and
+// their batch parts. Soft-deleted rows are included: ORDER_DELETE lines belong
+// to exactly those orders.
+func (r *AuditRepository) ResolveOrderScopes(code string) ([]AuditScope, error) {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return nil, nil
+	}
+	var orderIDs []uint
+	if err := r.db.Unscoped().Model(&models.Order{}).
+		Where("internal_code = ? OR store_order_id = ? OR id IN (SELECT order_id FROM order_items WHERE internal_code = ?)", code, code, code).
+		Limit(resolveLimit).Pluck("id", &orderIDs).Error; err != nil {
+		return nil, err
+	}
+	if len(orderIDs) == 0 {
+		return nil, nil
+	}
+	var itemIDs []uint
+	if err := r.db.Unscoped().Model(&models.OrderItem{}).Where("order_id IN ?", orderIDs).Pluck("id", &itemIDs).Error; err != nil {
+		return nil, err
+	}
+	scopes := []AuditScope{{Type: "order", IDs: orderIDs}, {Type: "order_item", IDs: itemIDs}}
+	if len(itemIDs) > 0 {
+		var biIDs []uint
+		if err := r.db.Unscoped().Model(&models.BatchItem{}).Where("order_item_id IN ?", itemIDs).Pluck("id", &biIDs).Error; err != nil {
+			return nil, err
+		}
+		scopes = append(scopes, AuditScope{Type: "batch_item", IDs: biIDs})
+	}
+	return scopes, nil
+}
+
+// ResolveBatchScopes turns "#103000" / "103000" into the audit scopes of that
+// batch and its parts.
+func (r *AuditRepository) ResolveBatchScopes(code string) ([]AuditScope, error) {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return nil, nil
+	}
+	bare := strings.TrimLeft(code, "# ")
+	var batchIDs []uint
+	if err := r.db.Unscoped().Model(&models.Batch{}).
+		Where("code IN ?", []string{"#" + bare, bare, code}).Limit(resolveLimit).Pluck("id", &batchIDs).Error; err != nil {
+		return nil, err
+	}
+	if len(batchIDs) == 0 {
+		return nil, nil
+	}
+	var biIDs []uint
+	if err := r.db.Unscoped().Model(&models.BatchItem{}).Where("batch_id IN ?", batchIDs).Pluck("id", &biIDs).Error; err != nil {
+		return nil, err
+	}
+	return []AuditScope{{Type: "batch", IDs: batchIDs}, {Type: "batch_item", IDs: biIDs}}, nil
 }
 
 // ---------- Sidebar action counts ----------

@@ -1690,3 +1690,20 @@ func (r *OrderRepository) PurgeOrders(ids []uint) (remainingBatchIDs []uint, err
 	})
 	return remainingBatchIDs, err
 }
+
+// FindBare loads the order row alone — no seller, items or batch parts.
+func (r *OrderRepository) FindBare(id uint) (*models.Order, error) {
+	var o models.Order
+	if err := r.db.First(&o, id).Error; err != nil {
+		return nil, err
+	}
+	return &o, nil
+}
+
+// ItemsOfOrder loads an order's line items alone (no SKU, no batch parts).
+func (r *OrderItemRepository) ItemsOfOrder(orderID uint) ([]models.OrderItem, error) {
+	var rows []models.OrderItem
+	err := r.db.Select("id", "order_id", "cancellation_status", "internal_status").
+		Where("order_id = ?", orderID).Order("line_no asc, id asc").Find(&rows).Error
+	return rows, err
+}

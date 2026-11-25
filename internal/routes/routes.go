@@ -250,6 +250,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	{
 		orders.GET("", orderRead, h.ListOrders)
 		orders.GET("/:id", orderRead, h.GetOrder)
+		orders.GET("/:id/timeline", orderRead, h.OrderTimeline)
 		orders.POST("", perm(manage(models.FeatImport), manage(models.FeatOrders)), h.CreateOrderDirect)
 		orders.GET("/import/template.xlsx", importManage, h.DownloadOrderImportTemplate)
 		// Items in the import-template layout (re-importable). Technician only —
@@ -411,6 +412,7 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	{
 		batches.GET("", perm(view(models.FeatBatches), view(models.FeatProduction), view(models.FeatDashboard)), h.ListBatches)
 		batches.GET("/:id", batchRead, h.GetBatch)
+		batches.GET("/:id/timeline", batchRead, h.BatchTimeline)
 		batches.GET("/:id/production-template.xlsx", batchRead, h.ExportProductionTemplate)
 		batches.GET("/:id/assets.zip", batchRead, h.DownloadBatchAssetsZip)
 		batches.POST("", batchManage, h.CreateBatch)
