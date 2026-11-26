@@ -42,6 +42,10 @@ type BatchFilter struct {
 	SellerID   *uint
 	SellerIDs  []uint
 	StoreOrder string
+	// SKU keeps the batches that CONTAIN a line whose SKU code includes this text,
+	// case-insensitive ("wood-01" finds WOOD-01-A). Wildcards typed by the user
+	// (% and _) match themselves. Works on the sku_code stored on the order line.
+	SKU string
 	// BatchCode keeps the batch whose code IS it, with or without the leading
 	// "#", case-insensitive ("101602" and "#101602" find "#101602"; "1602" finds
 	// nothing). Exact since 23/11/2026 — see batch_code_match.go. Partial search
@@ -350,7 +354,7 @@ func (r *BatchRepository) baseQuery(f BatchFilter) *gorm.DB {
 				Where("orders.internal_code = ? OR order_items.internal_code = ? OR LOWER(orders.store_order_id) LIKE ? OR LOWER(sellers.name) LIKE ?",
 					term, term, like, like))
 	}
-	if f.SellerID != nil || len(f.SellerIDs) > 0 || strings.TrimSpace(f.StoreOrder) != "" {
+	if f.SellerID != nil || len(f.SellerIDs) > 0 || strings.TrimSpace(f.StoreOrder) != "" || strings.TrimSpace(f.SKU) != "" {
 		sub := r.db.Model(&models.BatchItem{}).
 			Select("batch_items.batch_id").
 			Joins("JOIN order_items ON order_items.id = batch_items.order_item_id").
@@ -365,6 +369,9 @@ func (r *BatchRepository) baseQuery(f BatchFilter) *gorm.DB {
 		}
 		if so := strings.TrimSpace(f.StoreOrder); so != "" {
 			sub = sub.Where("LOWER(orders.store_order_id) LIKE ?", "%"+strings.ToLower(so)+"%")
+		}
+		if sku := strings.TrimSpace(f.SKU); sku != "" {
+			sub = sub.Where(`LOWER(order_items.sku_code) LIKE ? ESCAPE '\'`, "%"+likeEscape(strings.ToLower(sku))+"%")
 		}
 		q = q.Where("batches.id IN (?)", sub)
 	}
@@ -1075,4 +1082,10 @@ func (r *BatchRepository) FindBare(id uint) (*models.Batch, error) {
 		return nil, err
 	}
 	return &b, nil
+}
+
+// likeEscape makes %, _ and \ in user text match themselves inside a LIKE
+// pattern that declares ESCAPE '\'.
+func likeEscape(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }

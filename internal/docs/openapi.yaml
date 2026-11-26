@@ -697,6 +697,8 @@ paths:
         - { name: priority, in: query, schema: { type: string } }
         - { name: code, in: query, description: "Mã nội bộ đơn / mã tem item", schema: { type: string } }
         - { name: store_order, in: query, schema: { type: string } }
+        - { name: sku, in: query, description: "Batch CHỨA dòng có mã SKU chứa chuỗi này (không phân biệt hoa thường; % và _ khớp đúng ký tự đó)", schema: { type: string } }
+        - { name: open, in: query, description: "1/true: bỏ batch đã đóng (huỷ hết ở QC) — Bảng sản xuất dùng", schema: { type: string } }
         - { name: batch, in: query, description: "ĐÚNG mã batch, có/không dấu #, không phân biệt hoa thường (\"102909\" = \"#102909\"; từ 23/11/2026 không còn khớp chuỗi con — tìm một phần mã dùng q)", schema: { type: string } }
         - { name: date_from, in: query, schema: { type: string }, description: "Ngày tạo batch, >= (RFC3339; YYYY-MM-DD = 00:00 giờ VN)" }
         - { name: date_to, in: query, schema: { type: string }, description: "Cận trên NỬA MỞ (<) của ngày tạo — client gửi đầu phút / đầu ngày kế tiếp" }

@@ -63,6 +63,8 @@ func batchFilterFrom(c *gin.Context) repositories.BatchFilter {
 		// BẤT KỲ seller nào trong đó.
 		SellerIDs:  uintListQuery(c, "seller_id"),
 		StoreOrder: c.Query("store_order"),
+		// ?sku= — batch CHỨA dòng có mã SKU chứa chuỗi này (không phân biệt hoa thường).
+		SKU: c.Query("sku"),
 		// ?batch= ĐÚNG mã batch, có/không dấu # (từ 23/11 không còn khớp chuỗi con,
 		// repositories/batch_code_match.go); ?q= ô tìm chung (batch / mã đơn / mã
 		// đơn shop / seller), vẫn khớp chuỗi con.
