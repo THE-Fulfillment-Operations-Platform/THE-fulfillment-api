@@ -311,8 +311,11 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	}
 
 	// Connection to THE's customer API (token, service, fallback phone). The
-	// token is the factory's wallet: owner / admin only.
-	carrier := authd.Group("/carrier/the", adminOwner)
+	// token is the factory's wallet and the setup is a developer's job: only
+	// TECHNICIAN may read or change it (403 for everyone else, OWNER included).
+	// Shipping a label reads the same config inside the server, so it is
+	// unaffected by this guard.
+	carrier := authd.Group("/carrier/the", middleware.RequireRoles(models.RoleTechnician))
 	{
 		carrier.GET("/config", h.GetCarrierConfig)
 		carrier.PUT("/config", h.UpdateCarrierConfig)

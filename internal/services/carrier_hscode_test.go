@@ -20,7 +20,7 @@ func hsEnv(t *testing.T) *theEnv {
 	t.Helper()
 	e := newTHEEnv(t)
 	hs := "4909002000347"
-	if _, err := e.carrier.UpdateConfig(Actor{ID: 1, Role: models.RoleOwner}, CarrierConfigInput{DefaultHSCode: &hs}); err != nil {
+	if _, err := e.carrier.UpdateConfig(Actor{ID: 1, Role: models.RoleTechnician}, CarrierConfigInput{DefaultHSCode: &hs}); err != nil {
 		t.Fatal(err)
 	}
 	return e

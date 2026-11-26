@@ -179,8 +179,8 @@ type THEMaterialPreview struct {
 // PreviewServiceRules classifies all of Master Data under rules (nil = the
 // table in force) and defaultService ("" = the connection's own). Read-only.
 func (s *CarrierService) PreviewServiceRules(actor Actor, rules *models.THEServiceRules, defaultService string) (*THERulesPreview, error) {
-	if !canManageCarrier(actor) {
-		return nil, apperr.Forbidden("Chỉ Owner/Admin xem được cấu hình kết nối THE")
+	if !canConfigureCarrier(actor) {
+		return nil, apperr.Forbidden("Chỉ Kỹ thuật viên xem được cấu hình kết nối THE")
 	}
 	c, err := s.loadConfig()
 	if err != nil {

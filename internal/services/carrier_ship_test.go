@@ -237,7 +237,7 @@ func newTHEEnv(t *testing.T) *theEnv {
 		tracking: carrier.tracking, the: carrier}
 
 	on, tok, svc := true, "dGVzdEB0ZXN0LmNvbTp1dWlkLTEyMzQ1Njc4OQ==", "EXPRESS"
-	if _, err := carrier.UpdateConfig(Actor{ID: 1, Role: models.RoleOwner},
+	if _, err := carrier.UpdateConfig(Actor{ID: 1, Role: models.RoleTechnician},
 		CarrierConfigInput{Token: &tok, ServiceCode: &svc, Enabled: &on}); err != nil {
 		t.Fatalf("config: %v", err)
 	}
@@ -653,7 +653,7 @@ func TestTHE_AddressCheckAndOverride(t *testing.T) {
 func TestTHE_OffMeansPlainHandoff(t *testing.T) {
 	e := newTHEEnv(t)
 	off := false
-	if _, err := e.carrier.UpdateConfig(Actor{ID: 1, Role: models.RoleOwner}, CarrierConfigInput{Enabled: &off}); err != nil {
+	if _, err := e.carrier.UpdateConfig(Actor{ID: 1, Role: models.RoleTechnician}, CarrierConfigInput{Enabled: &off}); err != nil {
 		t.Fatal(err)
 	}
 	o := e.order(t, "100011")
@@ -663,7 +663,7 @@ func TestTHE_OffMeansPlainHandoff(t *testing.T) {
 	}
 	// Manual handoff while ON: same, by choice.
 	on := true
-	e.carrier.UpdateConfig(Actor{ID: 1, Role: models.RoleOwner}, CarrierConfigInput{Enabled: &on})
+	e.carrier.UpdateConfig(Actor{ID: 1, Role: models.RoleTechnician}, CarrierConfigInput{Enabled: &on})
 	o2 := e.order(t, "100012")
 	res = e.send(t, o2, ShipSendOptions{ManualHandoff: true})
 	if len(res.Shipped) != 1 || e.fake.creates != 0 {
@@ -793,7 +793,7 @@ func TestTHE_BuildParcel(t *testing.T) {
 	child := &models.SKU{Code: "FAM-L", Name: "Con", ParentID: &parent.ID, ShipWeightG: fptr(300)}
 	e.db.Create(child)
 	w := 50.0
-	e.carrier.UpdateConfig(Actor{ID: 1, Role: models.RoleOwner}, CarrierConfigInput{PackagingWeightG: &w})
+	e.carrier.UpdateConfig(Actor{ID: 1, Role: models.RoleTechnician}, CarrierConfigInput{PackagingWeightG: &w})
 
 	o := e.order(t, "100016", 2, 1) // SKU-1 ×2, then a second line
 	e.db.Model(&models.OrderItem{}).Where("order_id = ? AND line_no = 2", o.ID).Update("sku_code", "FAM-L")
@@ -821,7 +821,7 @@ func TestTHE_BuildParcel(t *testing.T) {
 // HS code never fills a SKU without one — the SKU must declare it.
 func TestTHE_CustomsDefaultsFromConnection(t *testing.T) {
 	e := newTHEEnv(t)
-	owner := Actor{ID: 1, Role: models.RoleOwner}
+	owner := Actor{ID: 1, Role: models.RoleTechnician}
 	plain := &models.SKU{Code: "PLAIN", Name: "Chỉ có cân + hộp", ShipWeightG: fptr(100),
 		ShipLengthCM: fptr(10), ShipWidthCM: fptr(10), ShipHeightCM: fptr(1)}
 	e.db.Create(plain)

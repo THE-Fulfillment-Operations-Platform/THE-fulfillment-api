@@ -118,7 +118,7 @@ func TestTHEServiceRules_BlockUnclassified(t *testing.T) {
 	e.catalog(t)
 	rules := models.DefaultTHEServiceRules()
 	rules.Unclassified = models.THEUnclassifiedBlock
-	if _, err := e.carrier.UpdateConfig(Actor{ID: 1, Role: models.RoleOwner}, CarrierConfigInput{ServiceRules: &rules}); err != nil {
+	if _, err := e.carrier.UpdateConfig(Actor{ID: 1, Role: models.RoleTechnician}, CarrierConfigInput{ServiceRules: &rules}); err != nil {
 		t.Fatal(err)
 	}
 	mug := e.goodsOrder(t, "200011", "MUG-1", "MICA-1")
@@ -158,7 +158,7 @@ func TestTHEServiceRules_AutoOffAndServiceChangeReplacesPending(t *testing.T) {
 
 	rules := models.DefaultTHEServiceRules()
 	rules.Auto = false
-	if _, err := e.carrier.UpdateConfig(Actor{ID: 1, Role: models.RoleOwner}, CarrierConfigInput{ServiceRules: &rules}); err != nil {
+	if _, err := e.carrier.UpdateConfig(Actor{ID: 1, Role: models.RoleTechnician}, CarrierConfigInput{ServiceRules: &rules}); err != nil {
 		t.Fatal(err)
 	}
 	e.send(t, o)
@@ -176,7 +176,7 @@ func TestTHEServiceRules_AutoOffAndServiceChangeReplacesPending(t *testing.T) {
 
 func TestTHEServiceRules_ConfigViewSaveReset(t *testing.T) {
 	e := newTHEEnv(t)
-	owner := Actor{ID: 1, Role: models.RoleOwner}
+	owner := Actor{ID: 1, Role: models.RoleTechnician}
 	v, err := e.carrier.GetConfig(owner)
 	if err != nil || v.ServiceRulesSaved || len(v.ServiceRules.Groups) != 3 || !v.ServiceRules.Auto {
 		t.Fatalf("defaults must show until saved: %+v %v", v, err)
@@ -214,7 +214,7 @@ func TestTHEServiceRules_Preview(t *testing.T) {
 	if err := e.db.Create(child).Error; err != nil {
 		t.Fatal(err)
 	}
-	pv, err := e.carrier.PreviewServiceRules(Actor{ID: 1, Role: models.RoleOwner}, nil, "")
+	pv, err := e.carrier.PreviewServiceRules(Actor{ID: 1, Role: models.RoleTechnician}, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,11 +240,11 @@ func TestTHEServiceRules_Preview(t *testing.T) {
 	// Previewing an edited table does not save it.
 	edited := models.DefaultTHEServiceRules()
 	edited.Groups = append(edited.Groups, models.THEGoodsGroup{Name: "Gốm", ServiceCode: "SPU", Materials: []string{"CERAMIC"}})
-	pv, err = e.carrier.PreviewServiceRules(Actor{ID: 1, Role: models.RoleOwner}, &edited, "")
+	pv, err = e.carrier.PreviewServiceRules(Actor{ID: 1, Role: models.RoleTechnician}, &edited, "")
 	if err != nil || pv.Unclassified.SKUs != 0 || pv.Groups[3].SKUs != 1 {
 		t.Fatalf("edited preview: %+v %v", pv, err)
 	}
-	if v, _ := e.carrier.GetConfig(Actor{ID: 1, Role: models.RoleOwner}); v.ServiceRulesSaved {
+	if v, _ := e.carrier.GetConfig(Actor{ID: 1, Role: models.RoleTechnician}); v.ServiceRulesSaved {
 		t.Fatal("preview must not save")
 	}
 }

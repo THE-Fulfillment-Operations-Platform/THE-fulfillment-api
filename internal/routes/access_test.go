@@ -323,3 +323,42 @@ func TestWarrantyButtonRoles(t *testing.T) {
 		}
 	}
 }
+
+// The THE connection (token, services, customs) is the technician's alone:
+// every other role, OWNER and ADMIN included, gets 403 on all four endpoints,
+// while the shipping routes that use the connection inside the server keep
+// their own guards.
+func TestCarrierConnectionTechnicianOnly(t *testing.T) {
+	h := newAccessHarness(t)
+	conn := [][2]string{
+		{"GET", "/api/carrier/the/config"},
+		{"PUT", "/api/carrier/the/config"},
+		{"POST", "/api/carrier/the/check"},
+		{"POST", "/api/carrier/the/service-rules/preview"},
+	}
+	for _, role := range models.AllRoles {
+		for _, rc := range conn {
+			code := h.status(rc[0], rc[1], h.tokens[role])
+			if role == models.RoleTechnician {
+				if code == http.StatusForbidden || code == http.StatusUnauthorized || code == http.StatusNotFound {
+					t.Errorf("%s %s as TECHNICIAN: status %d, want allowed", rc[0], rc[1], code)
+				}
+			} else if code != http.StatusForbidden {
+				t.Errorf("%s %s as %s: status %d, want 403", rc[0], rc[1], role, code)
+			}
+		}
+	}
+	// Label flow: roles that ship still pass the guard.
+	for _, role := range []models.Role{models.RoleOps, models.RoleShipping, models.RolePacking} {
+		for _, rc := range [][2]string{
+			{"POST", "/api/orders/the/preflight"},
+			{"POST", "/api/orders/ship-to-carrier"},
+			{"GET", "/api/orders/1/the/label"},
+			{"GET", "/api/orders/1/the/shipments"},
+		} {
+			if code := h.status(rc[0], rc[1], h.tokens[role]); code == http.StatusForbidden {
+				t.Errorf("%s %s as %s: 403, the label flow must stay open", rc[0], rc[1], role)
+			}
+		}
+	}
+}

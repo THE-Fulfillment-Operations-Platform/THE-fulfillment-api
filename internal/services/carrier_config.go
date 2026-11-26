@@ -97,6 +97,12 @@ type CarrierConfigInput struct {
 	ResetServiceRules bool `json:"reset_service_rules"`
 }
 
+// canConfigureCarrier: the THE connection (token, services, customs) is set up
+// by the technician only. Second lock behind the route guard.
+func canConfigureCarrier(a Actor) bool {
+	return a.Role == models.RoleTechnician
+}
+
 func canManageCarrier(a Actor) bool {
 	return a.Role.HasAdminRights()
 }
@@ -157,8 +163,8 @@ func (s *CarrierService) view(c *models.CarrierConfig) *CarrierConfigView {
 
 // GetConfig returns the connection as the settings screen shows it.
 func (s *CarrierService) GetConfig(actor Actor) (*CarrierConfigView, error) {
-	if !canManageCarrier(actor) {
-		return nil, apperr.Forbidden("Chỉ Owner/Admin xem được cấu hình kết nối THE")
+	if !canConfigureCarrier(actor) {
+		return nil, apperr.Forbidden("Chỉ Kỹ thuật viên xem được cấu hình kết nối THE")
 	}
 	c, err := s.loadConfig()
 	if err != nil {
@@ -169,8 +175,8 @@ func (s *CarrierService) GetConfig(actor Actor) (*CarrierConfigView, error) {
 
 // UpdateConfig saves the connection.
 func (s *CarrierService) UpdateConfig(actor Actor, in CarrierConfigInput) (*CarrierConfigView, error) {
-	if !canManageCarrier(actor) {
-		return nil, apperr.Forbidden("Chỉ Owner/Admin sửa được cấu hình kết nối THE")
+	if !canConfigureCarrier(actor) {
+		return nil, apperr.Forbidden("Chỉ Kỹ thuật viên sửa được cấu hình kết nối THE")
 	}
 	c, err := s.loadConfig()
 	if err != nil {
@@ -315,8 +321,8 @@ func (s *CarrierService) client(c *models.CarrierConfig) (theAPI, error) {
 // CheckConnection calls THE read-only (balance + services): proves the token
 // and fills the service dropdown. Never creates anything.
 func (s *CarrierService) CheckConnection(ctx context.Context, actor Actor) (*CarrierCheck, error) {
-	if !canManageCarrier(actor) {
-		return nil, apperr.Forbidden("Chỉ Owner/Admin kiểm tra được kết nối THE")
+	if !canConfigureCarrier(actor) {
+		return nil, apperr.Forbidden("Chỉ Kỹ thuật viên kiểm tra được kết nối THE")
 	}
 	c, err := s.loadConfig()
 	if err != nil {

@@ -13,7 +13,7 @@ import (
 // owner/admin touch it, and the integration cannot be switched on half-done.
 func TestCarrierConfig_TokenNeverLeaves(t *testing.T) {
 	e := newTHEEnv(t)
-	owner := Actor{ID: 1, Role: models.RoleOwner}
+	owner := Actor{ID: 1, Role: models.RoleTechnician}
 
 	var row models.CarrierConfig
 	e.db.Where("provider = ?", models.CarrierProviderTHE).First(&row)
@@ -74,5 +74,47 @@ func TestPreflight(t *testing.T) {
 	}
 	if e.fake.creates != 0 {
 		t.Fatal("preflight must not create anything")
+	}
+}
+
+// Only the technician reads or changes the THE connection (Owner and Admin
+// included); shipping still reads the same config inside the server for the
+// roles that ship, whoever they are.
+func TestCarrierConfig_TechnicianOnly(t *testing.T) {
+	e := newTHEEnv(t)
+	phone := "0900000000"
+	for _, r := range []models.Role{models.RoleOwner, models.RoleAdmin, models.RoleOps, models.RoleShipping, models.RolePacking, models.RoleCS} {
+		a := Actor{ID: 9, Role: r}
+		if _, err := e.carrier.GetConfig(a); err == nil {
+			t.Errorf("%s must not read the connection", r)
+		}
+		if _, err := e.carrier.UpdateConfig(a, CarrierConfigInput{DefaultPhone: &phone}); err == nil {
+			t.Errorf("%s must not save the connection", r)
+		}
+		if _, err := e.carrier.CheckConnection(context.Background(), a); err == nil {
+			t.Errorf("%s must not check the connection", r)
+		}
+		if _, err := e.carrier.PreviewServiceRules(a, nil, ""); err == nil {
+			t.Errorf("%s must not preview the service rules", r)
+		}
+	}
+	tech := Actor{ID: 1, Role: models.RoleTechnician}
+	if _, err := e.carrier.GetConfig(tech); err != nil {
+		t.Fatalf("technician read: %v", err)
+	}
+	if _, err := e.carrier.UpdateConfig(tech, CarrierConfigInput{DefaultPhone: &phone}); err != nil {
+		t.Fatalf("technician save: %v", err)
+	}
+	if _, err := e.carrier.CheckConnection(context.Background(), tech); err != nil {
+		t.Fatalf("technician check: %v", err)
+	}
+	if _, err := e.carrier.PreviewServiceRules(tech, nil, ""); err != nil {
+		t.Fatalf("technician preview: %v", err)
+	}
+	// The label flow of a non-technician still works off the stored config.
+	o := e.order(t, "100777")
+	pf, err := e.carrier.PreflightTHE(context.Background(), Actor{ID: 5, Role: models.RoleShipping}, []uint{o.ID})
+	if err != nil || !pf.Enabled || pf.Ready != 1 {
+		t.Fatalf("shipping role preflight must still work: %+v %v", pf, err)
 	}
 }
