@@ -22,7 +22,36 @@ func (r *ImportRepository) CreateErrors(errs []models.ImportError) error {
 	if len(errs) == 0 {
 		return nil
 	}
-	return r.db.Create(&errs).Error
+	// The columns are varchar(n): one long SKU or a message quoting a long
+	// address made the whole insert fail, and with it the import preview
+	// ("could not store import errors", anh Kiên's TDN 2511.xlsx, 25/11/2026).
+	// Store a clipped copy; the caller keeps the full text for the response.
+	rows := make([]models.ImportError, len(errs))
+	for i, e := range errs {
+		rows[i] = ClipImportError(e)
+	}
+	return r.db.Create(&rows).Error
+}
+
+// ClipImportError cuts each text field of an import error to its column size
+// (models.ImportError gorm size tags), counting characters as Postgres does.
+func ClipImportError(e models.ImportError) models.ImportError {
+	e.StoreOrderID = clipRunes(e.StoreOrderID, 120)
+	e.SKU = clipRunes(e.SKU, 48)
+	e.Field = clipRunes(e.Field, 60)
+	e.ErrorCode = clipRunes(e.ErrorCode, 60)
+	e.Message = clipRunes(e.Message, 255)
+	e.Suggestion = clipRunes(e.Suggestion, 255)
+	return e
+}
+
+// clipRunes keeps s within max characters, ending with "…" when it had to cut.
+func clipRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max-1]) + "…"
 }
 
 func (r *ImportRepository) FindByID(id uint) (*models.ImportJob, error) {
