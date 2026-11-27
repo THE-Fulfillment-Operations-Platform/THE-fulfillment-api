@@ -58,12 +58,17 @@ type Error struct {
 	Status   int
 	Message  string
 	Messages []string
+	// Code is THE's machine-readable reason, when the body carries one ("code").
+	Code string
 }
 
 func (e *Error) Error() string {
 	msg := strings.TrimSpace(strings.Join(e.Messages, "; "))
 	if msg == "" {
 		msg = e.Message
+	}
+	if msg == "" {
+		msg = e.Code
 	}
 	if msg == "" {
 		msg = http.StatusText(e.Status)
@@ -80,6 +85,9 @@ func (e *Error) Detail() string {
 	if e.Message != "" {
 		return e.Message
 	}
+	if e.Code != "" {
+		return e.Code
+	}
 	return http.StatusText(e.Status)
 }
 
@@ -92,6 +100,30 @@ func (e *Error) Unauthorized() bool { return e.Status == http.StatusUnauthorized
 // package stays pending on THE until THE's staff handle it.
 func (e *Error) RouteUnavailable() bool {
 	return strings.EqualFold(strings.TrimSpace(e.Message), "Route unavailable")
+}
+
+// DuplicateOrderNumberCode is THE's code for a create refused because the
+// customer already has a package with a label or a THE code, not cancelled,
+// under the same order number (THE's rule from 27/11/2026; a PENDING one is
+// still merged into, as before).
+const DuplicateOrderNumberCode = "duplicate_order_number"
+
+// DuplicateOrderNumber reports THE refusing a create because the order number
+// is taken: its code wherever THE puts it (code, error or messages), or — until
+// the exact shape is settled — a 400/409 whose words say so.
+func (e *Error) DuplicateOrderNumber() bool {
+	if e == nil {
+		return false
+	}
+	all := strings.ToLower(strings.Join(append([]string{e.Code, e.Message}, e.Messages...), " "))
+	if strings.Contains(all, DuplicateOrderNumberCode) {
+		return true
+	}
+	if e.Status != http.StatusBadRequest && e.Status != http.StatusConflict {
+		return false
+	}
+	return strings.Contains(all, "duplicate") || strings.Contains(all, "đã tồn tại") ||
+		strings.Contains(all, "already exist")
 }
 
 // ErrTransport wraps failures where THE's answer is UNKNOWN: timeout,
@@ -212,9 +244,11 @@ func (c *Client) doRaw(ctx context.Context, method, path string, query url.Value
 			Error    Flex            `json:"error"`
 			Message  Flex            `json:"message"`
 			Messages json.RawMessage `json:"messages"`
+			Code     Flex            `json:"code"`
 		}
 		if json.Unmarshal(raw, &env) == nil {
 			e.Message = firstNonEmpty(string(env.Error), string(env.Message))
+			e.Code = strings.TrimSpace(string(env.Code))
 			var list []Flex
 			var one Flex
 			switch {

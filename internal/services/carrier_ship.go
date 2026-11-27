@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"regexp"
@@ -36,6 +37,10 @@ import (
 //     pending cũ, và tạo đơn không mất tiền). Chốt đơn mà không rõ: đợi, hỏi THE
 //     trạng thái đơn (pending = chưa trừ tiền, có mã THE = đã trừ) rồi mới làm.
 //   - Đơn đã LABELED thì bấm lại chỉ trả lại kết quả cũ, không gọi THE nữa.
+//   - THE từ chối tạo vì trùng mã đơn (từ 27/11, mã đã có đơn có label / mã THE):
+//     không có gì được tạo, nên tạo lại ĐÚNG MỘT lần với mã riêng của đơn
+//     ("<mã shop>-<mã nội bộ>"). Trừ khi lần tạo trước của chính dòng này chưa rõ
+//     kết quả: đơn THE đang giữ mã có thể là của chính đơn này → dừng, người kiểm.
 
 const (
 	// creatingStaleAfter: a CREATING row younger than this may still be in
@@ -587,6 +592,8 @@ func (s *CarrierService) ShipOrderOnTHE(ctx context.Context, actor Actor, c *mod
 		live = nil
 	}
 
+	// fresh: the row is claimed right here, so no earlier create of it went out.
+	fresh := false
 	if live == nil {
 		if !opts.SkipAddressCheck {
 			if err := s.checkAddress(ctx, cli, parcel); err != nil {
@@ -611,6 +618,7 @@ func (s *CarrierService) ShipOrderOnTHE(ctx context.Context, actor Actor, c *mod
 			}
 			return nil, apperr.Internal("could not claim shipment").Wrap(err)
 		}
+		fresh = true
 	}
 
 	if live.Status == models.ShipmentCreating {
@@ -621,7 +629,7 @@ func (s *CarrierService) ShipOrderOnTHE(ctx context.Context, actor Actor, c *mod
 			_ = s.repo.Carrier.UpdateShipment(live.ID, map[string]any{"request_hash": hash, "service_code": parcel.Service.ServiceCode})
 			live.RequestHash, live.ServiceCode = hash, parcel.Service.ServiceCode
 		}
-		if err := s.createOnTHE(ctx, cli, live, parcel); err != nil {
+		if err := s.createOnTHE(ctx, cli, live, parcel, fresh); err != nil {
 			return nil, err
 		}
 	}
@@ -672,18 +680,22 @@ func outcomeOf(sh *models.CarrierShipment, reused bool) *ShipmentOutcome {
 const maxTHEOrderNumber = 60
 
 // theOrderNumber is the order number a new THE package of the order is filed
-// under: the shop's order id - what THE shows and CS search by. THE merges a
-// create into any PENDING package with the same order number, and a shop's
-// order id is not unique in FFM (re-imports repeat it), so while another FFM
-// order has a package pending under it, the internal code is appended. No
-// shop id, or one too long to store with room for the suffix: the internal
-// code alone, unique by itself.
+// under: the shop's order id - what THE shows and CS search by. A shop's order
+// id is not unique in FFM (split orders like "#BW159368-1-S1-C1", re-imports
+// repeat it), while THE merges a create into a PENDING package with the same
+// number and, from 27/11/2026, refuses one whose number already has a label or
+// a THE code (and several parcels under one number got the wrong labels in
+// THE's warehouse, 26/11). So while another FFM order has a shipment standing
+// on THE under it - pending, held, paid, handed off; not cancelled or failed -
+// the internal code is appended. No shop id, or one too long to store with
+// room for the suffix: the internal code alone, unique by itself. (A number
+// taken on THE outside FFM is caught when THE refuses it: see createOnTHE.)
 func (s *CarrierService) theOrderNumber(o *models.Order) (string, error) {
 	shop := strings.TrimSpace(o.StoreOrderID)
 	if shop == "" || utf8.RuneCountInString(shop+"-"+o.InternalCode) > maxTHEOrderNumber {
 		return o.InternalCode, nil
 	}
-	taken, err := s.repo.Carrier.PendingOrderNumberTaken(shop, o.ID)
+	taken, err := s.repo.Carrier.OrderNumberTaken(shop, o.ID)
 	if err != nil {
 		return "", err
 	}
@@ -693,14 +705,34 @@ func (s *CarrierService) theOrderNumber(o *models.Order) (string, error) {
 	return shop, nil
 }
 
+// suffixedOrderNumber is the number only this order can have: the given one
+// with "-<internal code>" appended, or the internal code alone when that would
+// not fit.
+func suffixedOrderNumber(number, internalCode string) string {
+	n := strings.TrimSpace(number) + "-" + internalCode
+	if strings.TrimSpace(number) == "" || utf8.RuneCountInString(n) > maxTHEOrderNumber {
+		return internalCode
+	}
+	return n
+}
+
 // uniqueOrderNumber reports an order number only this order can have filed:
 // the internal code, alone or as the suffix theOrderNumber appends.
 func uniqueOrderNumber(number, internalCode string) bool {
 	return number == internalCode || strings.HasSuffix(number, "-"+internalCode)
 }
 
-// createOnTHE runs POST /packages for a CREATING row.
-func (s *CarrierService) createOnTHE(ctx context.Context, cli theAPI, sh *models.CarrierShipment, p *Parcel) error {
+// duplicateOrderNumber reports THE refusing a create because the order number
+// already has a package with a label or a THE code (THE's rule from 27/11).
+func duplicateOrderNumber(err error) bool {
+	var te *theapi.Error
+	return errors.As(err, &te) && te.DuplicateOrderNumber()
+}
+
+// createOnTHE runs POST /packages for a CREATING row. fresh: the row was just
+// claimed (no earlier create of it can have reached THE).
+func (s *CarrierService) createOnTHE(ctx context.Context, cli theAPI, sh *models.CarrierShipment, p *Parcel, fresh bool) error {
+	renamed := false // filed again under a number of its own after THE refused a duplicate: once only
 	for attempt := 0; attempt < 3; attempt++ {
 		cctx, cancel := context.WithTimeout(ctx, theCreateTimeout)
 		pkg, err := cli.CreatePackage(cctx, p.Request)
@@ -710,7 +742,45 @@ func (s *CarrierService) createOnTHE(ctx context.Context, cli theAPI, sh *models
 				_ = s.repo.Carrier.UpdateShipment(sh.ID, map[string]any{"error": unclearCreatePrefix + err.Error()})
 				return shipErr(ShipErrUnclear, "Không nhận được trả lời rõ ràng từ THE khi tạo đơn — gửi lại sau 2 phút (không tạo trùng, chưa mất tiền)")
 			}
+			// THE refuses the number: a package under it already has a label or a
+			// THE code (another FFM order's, or one filed on THE outside FFM). Nothing
+			// was created and creating costs nothing: file once more under a number
+			// only this order has.
+			if duplicateOrderNumber(err) && !renamed && attempt < 2 &&
+				!uniqueOrderNumber(p.Request.OrderNumber, p.InternalCode) {
+				if !fresh || strings.HasPrefix(sh.Error, unclearCreatePrefix) {
+					// An earlier create of THIS row went out without a clear answer
+					// (timeout, crash): the package THE says holds the number may be
+					// this order's own, since paid. A second number could make a second
+					// paid package — a human checks first. The row stays CREATING,
+					// marked unclear.
+					msg := fmt.Sprintf("THE báo mã đơn %s đã có đơn có label trên THE (%s), mà lần tạo trước của đơn này chưa rõ kết quả — có thể đó chính là đơn THE của đơn này. Kiểm trên THE: nếu đúng là của đơn này thì không tạo thêm; nếu không phải thì huỷ đơn THE của đơn này trong FFM rồi gửi lại (FFM sẽ tạo với mã riêng)",
+						p.Request.OrderNumber, theErrorMessage(err))
+					_ = s.repo.Carrier.UpdateShipment(sh.ID, map[string]any{"error": unclearCreatePrefix + msg})
+					sh.Error = unclearCreatePrefix + msg
+					return shipErr(ShipErrTHE, msg)
+				}
+				from := p.Request.OrderNumber
+				number := suffixedOrderNumber(from, p.InternalCode)
+				p.Request.OrderNumber = number
+				hash := requestHash(p.Request)
+				why := fmt.Sprintf("THE báo trùng mã đơn %s (%s) — tạo lại với mã %s", from, theErrorMessage(err), number)
+				if uerr := s.repo.Carrier.UpdateShipment(sh.ID, map[string]any{"order_number": number, "request_hash": hash, "error": why}); uerr != nil {
+					return apperr.Internal("could not note the THE order number").Wrap(uerr)
+				}
+				sh.OrderNumber, sh.RequestHash, sh.Error = number, hash, why
+				log.Printf("THE: shipment %d (order %d): %s", sh.ID, sh.OrderID, why)
+				s.audit.Log(Actor{}, "THE_ORDER_NUMBER_DUPLICATE", "order", &sh.OrderID, why,
+					models.JSONMap{"shipment_id": sh.ID, "from": from, "to": number})
+				renamed = true
+				continue
+			}
 			msg, code := theErrorMessage(err), ShipErrTHE
+			if duplicateOrderNumber(err) {
+				// Already under a number only this order has (or already renamed once):
+				// the package holding it may be this order's own — never try a third.
+				msg = "THE báo trùng mã đơn " + p.Request.OrderNumber + " (" + msg + ") — FFM không thử thêm mã khác (có thể đơn này đã có đơn THE): liên hệ quản trị kiểm trên THE"
+			}
 			if strings.Contains(strings.ToLower(msg), "hs code does not exist") {
 				code = ShipErrData
 				// THE looks the code up by its OWN system code (HS code + its 3-digit id,
@@ -738,10 +808,7 @@ func (s *CarrierService) createOnTHE(ctx context.Context, cli theAPI, sh *models
 				sh.Status = models.ShipmentFailed
 				return shipErr(ShipErrTHE, msg)
 			}
-			number := strings.TrimSpace(p.Request.OrderNumber) + "-" + p.InternalCode
-			if utf8.RuneCountInString(number) > maxTHEOrderNumber {
-				number = p.InternalCode
-			}
+			number := suffixedOrderNumber(p.Request.OrderNumber, p.InternalCode)
 			p.Request.OrderNumber = number
 			fields := map[string]any{"order_number": number, "request_hash": requestHash(p.Request)}
 			if err := s.repo.Carrier.UpdateShipment(sh.ID, fields); err != nil {

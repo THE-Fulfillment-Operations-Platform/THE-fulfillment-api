@@ -126,13 +126,21 @@ func (r *CarrierRepository) AwaitingLastMile(limit int, since time.Time) ([]mode
 	return rows, err
 }
 
-// PendingOrderNumberTaken reports another order having a package pending on
-// THE (CREATING or CREATED) under this order number.
-func (r *CarrierRepository) PendingOrderNumberTaken(number string, exceptOrderID uint) (bool, error) {
+// OrderNumberTaken reports another order having a shipment still standing on
+// THE under this order number: being created, pending, held for THE's staff
+// or paid (CREATING, CREATED, LABELED — anything but CANCELLED/FAILED). THE
+// merges a create into a pending package with the same number and, from
+// 27/11/2026, refuses one whose number already has a label or a THE code.
+// Compared trimmed and case-insensitively, as THE's MySQL matches it.
+func (r *CarrierRepository) OrderNumberTaken(number string, exceptOrderID uint) (bool, error) {
+	key := strings.ToLower(strings.TrimSpace(number))
+	if key == "" {
+		return false, nil
+	}
 	var n int64
 	err := r.db.Model(&models.CarrierShipment{}).
-		Where("order_number = ? AND order_id <> ? AND status IN ?", number, exceptOrderID,
-			[]string{models.ShipmentCreating, models.ShipmentCreated}).
+		Where("LOWER(TRIM(order_number)) = ? AND order_id <> ? AND status NOT IN ?", key, exceptOrderID,
+			[]string{models.ShipmentCancelled, models.ShipmentFailed}).
 		Count(&n).Error
 	return n > 0, err
 }

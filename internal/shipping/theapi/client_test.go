@@ -150,3 +150,44 @@ func TestDeliver_RouteUnavailable(t *testing.T) {
 		t.Fatal("Bad request is not a route refusal")
 	}
 }
+
+// THE's refusal of a taken order number (rule from 27/11/2026), in the shapes
+// it may come in until its code is settled: the code in "code", in "error",
+// or only words in the messages.
+func TestCreate_DuplicateOrderNumber(t *testing.T) {
+	cases := map[string]bool{
+		`{"code":"duplicate_order_number","error":"Please check input data","messages":["Mã đơn hàng đã tồn tại"]}`: true,
+		`{"error":"duplicate_order_number","messages":["Order number #BW1 already has a label"]}`:                   true,
+		`{"error":"Please check input data","messages":["Mã đơn hàng đã tồn tại"]}`:                                 true,
+		`{"error":"Duplicate order number"}`:                                                        true,
+		`{"error":"Please check input data","messages":["The weight is required"]}`:                 false,
+		`{"error":"Route unavailable","messages":["Gặp sự cố đường bay, báo nhân viên THE xử lý"]}`: false,
+	}
+	for body, want := range cases {
+		c := server(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, body)
+		})
+		_, err := c.CreatePackage(context.Background(), CreatePackageRequest{OrderNumber: "#BW1"})
+		var te *Error
+		if !errors.As(err, &te) || IsTransport(err) {
+			t.Fatalf("body %s: got %v", body, err)
+		}
+		if got := te.DuplicateOrderNumber(); got != want {
+			t.Errorf("body %s: duplicate=%v, want %v", body, got, want)
+		}
+	}
+	// The code alone is enough, whatever the status; words alone only on 400/409.
+	if !(&Error{Status: 422, Code: DuplicateOrderNumberCode}).DuplicateOrderNumber() {
+		t.Error("the code must count on any status")
+	}
+	if (&Error{Status: 404, Messages: []string{"Package already exists"}}).DuplicateOrderNumber() {
+		t.Error("words on a 404 are not a duplicate refusal")
+	}
+	if !(&Error{Status: 409, Messages: []string{"Order already exists"}}).DuplicateOrderNumber() {
+		t.Error("409 with the words must count")
+	}
+	if d := (&Error{Status: 400, Code: DuplicateOrderNumberCode}).Detail(); d != DuplicateOrderNumberCode {
+		t.Errorf("detail falls back to the code, got %q", d)
+	}
+}

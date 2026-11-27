@@ -55,10 +55,16 @@ type fakeTHE struct {
 	// onlyHS: the account's line takes only goods whose HS code starts with it
 	// (THE's api-allowed-hs-codes); other deliveries answer "Route unavailable".
 	onlyHS string
+	// refuseTakenNumber: THE's rule from 27/11/2026 — a create whose order
+	// number (trimmed, any case) already has a package with a THE code that is
+	// not cancelled is refused as duplicate_order_number (a pending one is still
+	// merged into, above). dupRefusals counts those refusals.
+	refuseTakenNumber bool
+	dupRefusals       int
 }
 
 func newFakeTHE() *fakeTHE {
-	return &fakeTHE{pkgs: map[string]*fakePkg{}, addrExists: "Y", lastMile: "9200190000000000000001"}
+	return &fakeTHE{pkgs: map[string]*fakePkg{}, addrExists: "Y", lastMile: "9200190000000000000001", refuseTakenNumber: true}
 }
 
 var pngLabel = []byte("\x89PNG\r\n\x1a\n-fake-label")
@@ -98,6 +104,16 @@ func (f *fakeTHE) CreatePackage(_ context.Context, in theapi.CreatePackageReques
 	for _, p := range f.pkgs {
 		if p.orderNumber == in.OrderNumber && p.status == "pending" {
 			return f.echo(p), nil // THE's de-dupe: the OLD package's data
+		}
+	}
+	if f.refuseTakenNumber {
+		key := strings.ToLower(strings.TrimSpace(in.OrderNumber))
+		for _, p := range f.pkgs {
+			if strings.ToLower(strings.TrimSpace(p.orderNumber)) == key && p.code != "" && !theStatusDead(p.status) {
+				f.dupRefusals++
+				return nil, &theapi.Error{Status: 400, Code: theapi.DuplicateOrderNumberCode, Message: "Duplicate order number",
+					Messages: []string{"Mã đơn hàng " + in.OrderNumber + " đã tồn tại"}}
+			}
 		}
 	}
 	f.nextID++
