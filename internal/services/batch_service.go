@@ -393,6 +393,61 @@ func (s *BatchService) List(f repositories.BatchFilter) ([]models.Batch, int64, 
 	return s.repo.Batch.List(f)
 }
 
+// StageCountsResult: số batch mỗi chặng dưới bộ lọc hiện tại. Stages có ĐỦ mọi
+// chặng đã biết (0 nếu không có) cộng chặng lạ nếu DB có; ByStatus tách theo trạng
+// thái lưu (cột mặc định của Bảng sản xuất); Rows là bảng gốc.
+type StageCountsResult struct {
+	Stages   map[string]int64               `json:"stages"`
+	ByStatus map[string]map[string]int64    `json:"by_status"`
+	Rows     []repositories.BatchStageCount `json:"rows"`
+	Order    []string                       `json:"order"`
+}
+
+// StageCounts đếm batch theo chặng (GET /api/batches/stage-counts).
+func (s *BatchService) StageCounts(f repositories.BatchFilter) (*StageCountsResult, error) {
+	rows, err := s.repo.Batch.StageCounts(f)
+	if err != nil {
+		return nil, err
+	}
+	out := &StageCountsResult{
+		Stages:   map[string]int64{},
+		ByStatus: map[string]map[string]int64{},
+		Rows:     rows,
+		Order:    append([]string(nil), repositories.AllBatchStages...),
+	}
+	if out.Rows == nil {
+		out.Rows = []repositories.BatchStageCount{}
+	}
+	for _, st := range repositories.AllBatchStages {
+		out.Stages[st] = 0
+	}
+	for _, r := range rows {
+		out.Stages[r.Stage] += r.Count
+		if out.ByStatus[r.Status] == nil {
+			out.ByStatus[r.Status] = map[string]int64{}
+		}
+		out.ByStatus[r.Status][r.Stage] += r.Count
+		if !repositories.IsBatchStage(r.Stage) && !containsStr(out.Order, r.Stage) {
+			out.Order = append(out.Order, r.Stage)
+		}
+	}
+	return out, nil
+}
+
+// FilterOptions: chất liệu / seller / ưu tiên lấy từ chính các batch (GET /api/batches/filter-options).
+func (s *BatchService) FilterOptions() (*repositories.BatchFilterOptions, error) {
+	return s.repo.Batch.FilterOptions()
+}
+
+func containsStr(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
 // UpdateStatusInput sets a new production status on a batch.
 type UpdateStatusInput struct {
 	Status string `json:"status" binding:"required"`

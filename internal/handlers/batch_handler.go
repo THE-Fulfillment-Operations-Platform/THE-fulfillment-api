@@ -31,12 +31,52 @@ func (h *Handlers) CreateBatch(c *gin.Context) {
 // GET /api/batches
 func (h *Handlers) ListBatches(c *gin.Context) {
 	f := batchFilterFrom(c)
+	if err := checkBatchStages(f); err != nil {
+		response.Fail(c, err)
+		return
+	}
 	rows, total, err := h.svc.Batch.List(f)
 	if err != nil {
 		response.Fail(c, err)
 		return
 	}
 	response.List(c, rows, metaFor(f.Page, total))
+}
+
+// BatchStageCounts đếm batch theo chặng dưới cùng bộ lọc của GET /api/batches
+// (trừ status / stage / open). GET /api/batches/stage-counts
+func (h *Handlers) BatchStageCounts(c *gin.Context) {
+	out, err := h.svc.Batch.StageCounts(batchFilterFrom(c))
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, out)
+}
+
+// BatchFilterOptions trả chất liệu / seller / ưu tiên đang có trong batch, kèm số
+// batch. GET /api/batches/filter-options
+func (h *Handlers) BatchFilterOptions(c *gin.Context) {
+	out, err := h.svc.Batch.FilterOptions()
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, out)
+}
+
+// checkBatchStages: ?stage= lạ thì 400 nêu rõ giá trị hợp lệ, thay vì âm thầm trả
+// danh sách rỗng (web cũ/mới lệch nhau thì thấy ngay).
+func checkBatchStages(f repositories.BatchFilter) error {
+	for _, s := range f.Stages {
+		if !repositories.IsBatchStage(s) {
+			return badRequest("stage không hợp lệ: " + s + " (hợp lệ: " + strings.Join(repositories.AllBatchStages, ", ") + ")")
+		}
+	}
+	if f.Sort != "" && f.Sort != "newest" && f.Sort != repositories.BatchSortOldest {
+		return badRequest("sort không hợp lệ: " + f.Sort + " (newest | oldest)")
+	}
+	return nil
 }
 
 // batchFilterFrom reads the batch list's query string (GET /api/batches).
@@ -78,6 +118,11 @@ func batchFilterFrom(c *gin.Context) repositories.BatchFilter {
 		// ?handover=done|pending — tách "Đã QC" theo đã bàn giao hết hay chưa. Đi kèm status=QC_PASSED.
 		// files / handover là tham số kiểu cũ (lựa chọn đơn), AND với ?status=.
 		Handover: c.Query("handover"),
+		// ?stage=A,B — chặng suy ra, loại trừ nhau (repositories/batch_stage.go), OR với
+		// nhau. Bảng sản xuất: mỗi cột một chặng.
+		Stages: stringListQuery(c, "stage"),
+		// ?sort=oldest — cũ nhất trước (cột còn việc của bảng); mặc định mới nhất trước.
+		Sort: strings.TrimSpace(c.Query("sort")),
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"the-fulfillment/backend/internal/apperr"
 )
 
 // Bảng sản xuất gọi GET /api/batches với đủ bộ lọc; kiểm cách đọc từng tham số,
@@ -33,5 +35,35 @@ func TestBatchFilterFrom_Board(t *testing.T) {
 	e := batchFilterFrom(ctxWithQuery(""))
 	if e.ExcludeClosed || e.SKU != "" || e.DateFrom != nil || e.DateBefore != nil || len(e.Statuses) != 0 || len(e.SellerIDs) != 0 {
 		t.Fatalf("mặc định phải rỗng: %+v", e)
+	}
+}
+
+// ?stage= (chặng, Bảng sản xuất) và ?sort=: đọc đủ giá trị, giá trị lạ bị từ chối
+// với câu nêu giá trị hợp lệ (không âm thầm trả danh sách rỗng).
+func TestBatchFilterFrom_StageAndSort(t *testing.T) {
+	f := batchFilterFrom(ctxWithQuery("stage=FILES_READY,HANDED_OFF&stage=CLOSED&sort=oldest&material_id=2"))
+	if !reflect.DeepEqual(f.Stages, []string{"FILES_READY", "HANDED_OFF", "CLOSED"}) || f.Sort != "oldest" || f.MaterialID == nil || *f.MaterialID != 2 {
+		t.Fatalf("đọc stage/sort sai: %+v", f)
+	}
+	if err := checkBatchStages(f); err != nil {
+		t.Fatalf("stage hợp lệ bị từ chối: %v", err)
+	}
+	for _, q := range []string{
+		"stage=FILES_MISSING,FILES_READY,PRINTED,CUT,QC_PASSED,PACKED,HANDED_OFF,SHIPPED,DELIVERED,CLOSED,NO_ITEMS",
+		"sort=newest", "sort=", "",
+	} {
+		if err := checkBatchStages(batchFilterFrom(ctxWithQuery(q))); err != nil {
+			t.Errorf("%q bị từ chối: %v", q, err)
+		}
+	}
+	for _, q := range []string{"stage=PENDING", "stage=handed_off", "stage=CUT,XYZ", "sort=asc"} {
+		err := checkBatchStages(batchFilterFrom(ctxWithQuery(q)))
+		if err == nil {
+			t.Errorf("%q phải bị từ chối", q)
+			continue
+		}
+		if ae, ok := apperr.As(err); !ok || ae.Status != 400 {
+			t.Errorf("%q: phải là 400, got %v", q, err)
+		}
 	}
 }

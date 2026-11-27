@@ -41,6 +41,10 @@ type Batch struct {
 	// live part belongs to an order already handed off / shipped / delivered (the
 	// "Đã bàn giao" badge). Same rule as BatchFilter.Handover = "done".
 	HandedOver bool `json:"handed_over" gorm:"-"`
+	// Stage là chặng suy ra, loại trừ nhau (repositories/batch_stage.go): FILES_MISSING,
+	// FILES_READY, PRINTED, CUT, QC_PASSED, PACKED, HANDED_OFF, SHIPPED, DELIVERED,
+	// CLOSED, NO_ITEMS. Không lưu; danh sách điền bằng một câu SELECT cho cả trang.
+	Stage string `json:"stage,omitempty" gorm:"-"`
 	// MaterialUnits is how many sheets of the material this batch needs:
 	// ⌈Σ quantity / quota⌉ over its live parts, quota per product from the
 	// (SKU, material) pair — declared, else estimated from the sizes. nil when

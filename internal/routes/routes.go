@@ -415,6 +415,10 @@ func New(cfg *config.Config, h *handlers.Handlers, jwt *auth.Manager) *gin.Engin
 	batches := authd.Group("/batches")
 	{
 		batches.GET("", perm(view(models.FeatBatches), view(models.FeatProduction), view(models.FeatDashboard)), h.ListBatches)
+		// Bảng sản xuất: số batch mỗi chặng (ô Trạng thái + dòng tách ở đầu cột) và
+		// danh sách chọn của ô lọc lấy từ chính các batch. Cùng quyền với danh sách.
+		batches.GET("/stage-counts", perm(view(models.FeatBatches), view(models.FeatProduction), view(models.FeatDashboard)), h.BatchStageCounts)
+		batches.GET("/filter-options", perm(view(models.FeatBatches), view(models.FeatProduction), view(models.FeatDashboard)), h.BatchFilterOptions)
 		batches.GET("/:id", batchRead, h.GetBatch)
 		batches.GET("/:id/timeline", batchRead, h.BatchTimeline)
 		batches.GET("/:id/production-template.xlsx", batchRead, h.ExportProductionTemplate)

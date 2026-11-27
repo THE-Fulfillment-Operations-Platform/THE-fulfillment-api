@@ -67,7 +67,18 @@ type BatchFilter struct {
 	// "pending" = every other QC_PASSED batch (including a partly handed-off one).
 	// Combined with Status=QC_PASSED by the batch list; empty = plain status filter.
 	Handover string
+	// Stages: chặng suy ra của batch (batch_stage.go), OR với nhau; AND với mọi bộ
+	// lọc khác. Các chặng loại trừ nhau nên mỗi cột của Bảng sản xuất là một chặng.
+	// Lọc chặng KHÔNG tự bỏ batch đã đóng: CLOSED chính là batch đã đóng.
+	Stages []string
+	// Sort: "" / "newest" = mới nhất trước (id giảm dần, như trước); "oldest" = cũ
+	// nhất trước — cột còn việc của bảng dùng để batch đến lượt trước nằm trên cùng
+	// và trang sau ("Xem thêm") nối tiếp đúng thứ tự.
+	Sort string
 }
+
+// BatchSortOldest: ?sort=oldest.
+const BatchSortOldest = "oldest"
 
 // filesReadyCond is the SQL form of the web's batchStatusBadge "Đã có file SX".
 const filesReadyCond = `batches.status = 'PENDING' AND batches.closed_at IS NULL
@@ -308,6 +319,9 @@ func (r *BatchRepository) baseQuery(f BatchFilter) *gorm.DB {
 	if cond, args, ok := batchStatusCond(f.Statuses); ok {
 		q = q.Where(cond, args...)
 	}
+	if stages := normalizeTokens(f.Stages); len(stages) > 0 {
+		q = q.Where("("+batchStageSQL+") IN ?", stages)
+	}
 	if f.Priority != "" {
 		q = q.Where("priority = ?", f.Priority)
 	}
@@ -382,12 +396,16 @@ func (r *BatchRepository) List(f BatchFilter) ([]models.Batch, int64, error) {
 	var rows []models.Batch
 	var total int64
 	r.baseQuery(f).Count(&total)
+	order := "id desc"
+	if f.Sort == BatchSortOldest {
+		order = "id asc"
+	}
 	err := r.baseQuery(f).
 		Preload("Material").
 		Preload("CreatedBy").
 		Preload("Links").
 		Preload("Items", activeBatchItems).
-		Order("id desc").
+		Order(order).
 		Limit(f.PageSize).Offset(f.Offset()).Find(&rows).Error
 	if err != nil {
 		return rows, total, err
@@ -418,7 +436,12 @@ func (r *BatchRepository) List(f BatchFilter) ([]models.Batch, int64, error) {
 	if err != nil {
 		return rows, total, err
 	}
+	stages, err := r.stagesByID(ids)
+	if err != nil {
+		return rows, total, err
+	}
 	for i := range rows {
+		rows[i].Stage = stages[rows[i].ID]
 		rows[i].Sellers = sellers[rows[i].ID]
 		rows[i].ScrappedCount = scrapped[rows[i].ID]
 		rows[i].HandedOver = handed[rows[i].ID]
